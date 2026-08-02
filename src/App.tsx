@@ -1810,6 +1810,7 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
   syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void;
 }) {
   const [status, setStatus] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
   const [codeInput, setCodeInput] = useState(syncCode);
   const download = () => {
     const data = getSnapshot();
@@ -1873,10 +1874,11 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 220 }}>
                 <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Code de synchronisation</label>
-                <input style={inputStyle} value={codeInput} onChange={(e) => setCodeInput(e.target.value)} placeholder="ex: atelier-lagune-482" />
+                <input style={inputStyle} value={codeInput} onChange={(e) => setCodeInput(e.target.value)} placeholder="ex: atelier-lagune-482"
+                  autoCapitalize="off" autoCorrect="off" spellCheck={false} autoComplete="off" />
               </div>
               <button onClick={generateCode} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 34 }}>Générer</button>
-              <button onClick={() => setSyncCode(codeInput.trim())} disabled={!codeInput.trim()} style={{ background: codeInput.trim() ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: codeInput.trim() ? COLOR.bg : COLOR.inkMuted, padding: "9px 16px", fontSize: 12.5, fontWeight: 600, cursor: codeInput.trim() ? "pointer" : "default", height: 34 }}>
+              <button onClick={() => setSyncCode(codeInput.trim().toLowerCase())} disabled={!codeInput.trim()} style={{ background: codeInput.trim() ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: codeInput.trim() ? COLOR.bg : COLOR.inkMuted, padding: "9px 16px", fontSize: 12.5, fontWeight: 600, cursor: codeInput.trim() ? "pointer" : "default", height: 34 }}>
                 {syncCode ? "Mettre à jour" : "Se connecter"}
               </button>
               {syncCode && (
@@ -1891,6 +1893,27 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
                   <RotateCcw size={12} /> Forcer la synchronisation
                 </button>
                 <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Saisis exactement le même code sur ton autre appareil pour le relier.</span>
+              </div>
+            )}
+            {syncCode && (
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ fontSize: 12, color: COLOR.goldSoft, marginBottom: 6 }}>💡 Astuce anti-déconnexion (iPhone)</div>
+                <div style={{ fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 10 }}>
+                  Safari sur iPhone efface parfois la mémoire du navigateur, ce qui oblige à retaper le code. Mets ce lien
+                  en favori (ou sur l'écran d'accueil) à la place de l'adresse simple — il contient ton code et te reconnecte
+                  automatiquement à chaque ouverture, même après un effacement.
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <code style={{ flex: 1, minWidth: 220, background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, padding: "8px 10px", fontSize: 11, color: COLOR.ink, overflowX: "auto", whiteSpace: "nowrap", display: "block" }}>
+                    {typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}?sync=${syncCode}` : ""}
+                  </code>
+                  <button onClick={() => {
+                    const link = `${window.location.origin}${window.location.pathname}?sync=${syncCode}`;
+                    navigator.clipboard?.writeText(link).then(() => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1500); });
+                  }} style={{ display: "flex", alignItems: "center", gap: 6, background: linkCopied ? COLOR.emerald : "rgba(201,162,39,0.14)", border: `1px solid ${linkCopied ? COLOR.emerald : COLOR.gold}`, borderRadius: 6, color: linkCopied ? COLOR.bg : COLOR.goldSoft, padding: "8px 14px", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    {linkCopied ? <Check size={13} /> : <ClipboardList size={13} />} {linkCopied ? "Copié" : "Copier le lien"}
+                  </button>
+                </div>
               </div>
             )}
           </>
@@ -2620,6 +2643,21 @@ export default function GrandLivre() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(!isMobile);
   const [syncCode, setSyncCode, syncCodeLoaded] = usePersistentState<string>("gl-sync-code", "");
+
+  // Récupère le code de synchronisation depuis l'URL (?sync=code), si présent — utile si le
+  // localStorage a été effacé par iOS. Marquer cette page en favori avec ce paramètre rend
+  // la reconnexion automatique, sans jamais retaper le code.
+  useEffect(() => {
+    if (!syncCodeLoaded) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const urlCode = params.get("sync");
+      if (urlCode && urlCode.trim() && urlCode.trim().toLowerCase() !== syncCode) {
+        setSyncCode(urlCode.trim().toLowerCase());
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncCodeLoaded]);
   const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "synced" | "error" | "disabled">(SYNC_ENABLED ? "idle" : "disabled");
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const skipNextPush = useRef(false);
