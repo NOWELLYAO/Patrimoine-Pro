@@ -279,6 +279,12 @@ const GROUPS: Group[] = ["Nécessaire", "Productif", "Non-productif", "Non class
 function getSubcategories(type: TxType, category: string): string[] {
   return (type === "Dépense" ? depSubcategories[category] : revSubcategories[category]) || [];
 }
+function categoriesForType(transactions: Transaction[], type: TxType): string[] {
+  const used = new Set(transactions.filter((t) => t.type === type).map((t) => t.category));
+  const known = Object.keys(type === "Dépense" ? depSubcategories : revSubcategories);
+  known.forEach((c) => used.add(c));
+  return Array.from(used).sort((a, b) => a.localeCompare(b, "fr"));
+}
 const groupColor: Record<string, string> = {
   "Nécessaire": COLOR.slateBlue, "Productif": COLOR.emerald, "Non-productif": COLOR.clay,
   "Non classifié": COLOR.inkMuted, "Revenu": COLOR.goldSoft,
@@ -1489,7 +1495,7 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
   transactions: Transaction[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void; allCategories: string[];
 }) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ category: allCategories[0] || "", amount: 100000, rollover: false });
+  const [form, setForm] = useState({ category: categoriesForType(transactions, "Dépense")[0] || "", amount: 100000, rollover: false });
   const [transferFrom, setTransferFrom] = useState<string | null>(null);
   const [transferAmount, setTransferAmount] = useState(0);
   const [transferTo, setTransferTo] = useState("");
@@ -1500,7 +1506,7 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
 
   const spentInMonth = (cat: string, monthKey: string) => transactions.filter((t) => t.type === "Dépense" && t.category === cat && dateToMonthKey(t.date) === monthKey).reduce((a, t) => a + t.amount, 0);
 
-  const add = () => { if (!form.category) return; setBudgets([...budgets, { ...form, id: uid("b") }]); setForm({ category: allCategories[0] || "", amount: 100000, rollover: false }); setAdding(false); };
+  const add = () => { if (!form.category) return; setBudgets([...budgets, { ...form, id: uid("b") }]); setForm({ category: categoriesForType(transactions, "Dépense")[0] || "", amount: 100000, rollover: false }); setAdding(false); };
   const update = (id: string, patch: Partial<CategoryBudget>) => setBudgets(budgets.map((b) => (b.id === id ? { ...b, ...patch } : b)));
   const remove = (id: string) => setBudgets(budgets.filter((b) => b.id !== id));
 
@@ -1524,7 +1530,11 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
         }>
         {adding && (
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label><input style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} list="cat-list-budget" /><datalist id="cat-list-budget">{allCategories.map((c) => <option key={c} value={c} />)}</datalist></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
+              <select style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                {categoriesForType(transactions, "Dépense").map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Limite mensuelle</label><input type="number" style={{ ...inputStyle, width: 150 }} value={form.amount} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) || 0 })} /></div>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: COLOR.inkMuted }}><input type="checkbox" checked={form.rollover} onChange={(e) => setForm({ ...form, rollover: e.target.checked })} /> Reconduction</label>
             <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
@@ -1621,12 +1631,12 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[];
 }) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<Omit<RecurringTemplate, "id">>({ category: allCategories[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO() });
+  const [form, setForm] = useState<Omit<RecurringTemplate, "id">>({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO() });
 
   const today = todayISO();
   const upcoming = recurring.filter((r) => daysBetween(today, r.nextDate) <= 14).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
 
-  const add = () => { if (!form.category || form.amount <= 0) return; setRecurring([...recurring, { ...form, id: uid("r") }]); setForm({ category: allCategories[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO() }); setAdding(false); };
+  const add = () => { if (!form.category || form.amount <= 0) return; setRecurring([...recurring, { ...form, id: uid("r") }]); setForm({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO() }); setAdding(false); };
   const remove = (id: string) => setRecurring(recurring.filter((r) => r.id !== id));
 
   const enregistrer = (r: RecurringTemplate) => {
@@ -1668,8 +1678,12 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
         }>
         {adding && (
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label><input style={{ ...inputStyle, width: 160 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} list="cat-list-rec" /><datalist id="cat-list-rec">{allCategories.map((c) => <option key={c} value={c} />)}</datalist></div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as TxType })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
+              <select style={{ ...inputStyle, width: 160 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                {categoriesForType(transactions, form.type).map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => { const ty = e.target.value as TxType; setForm({ ...form, type: ty, category: categoriesForType(transactions, ty)[0] || "" }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Fréquence</label><select style={inputStyle} value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as RecurringTemplate["frequency"] })}><option>Hebdomadaire</option><option>Mensuelle</option><option>Annuelle</option></select></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Prochaine échéance</label><input type="date" style={inputStyle} value={form.nextDate} onChange={(e) => setForm({ ...form, nextDate: e.target.value })} /></div>
@@ -1746,8 +1760,8 @@ function SauvegardeTab({ getSnapshot, restore }: { getSnapshot: () => any; resto
 // ============================================================
 // JOURNAL TAB (CRUD + import texte + règles de catégorisation)
 // ============================================================
-function emptyForm(allCategories: string[]): Omit<Transaction, "id"> {
-  return { date: todayISO(), category: allCategories[0] || "Cadeaux", type: "Dépense", amount: 0 };
+function emptyForm(transactions: Transaction[]): Omit<Transaction, "id"> {
+  return { date: todayISO(), category: categoriesForType(transactions, "Dépense")[0] || "Cadeaux", type: "Dépense", amount: 0 };
 }
 
 function JournalTab({ filtered, allCategories, categoryGroups, transactions, setTransactions, rules, setRules }: {
@@ -1756,7 +1770,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void;
 }) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(allCategories));
+  const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions));
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Omit<Transaction, "id"> | null>(null);
@@ -1791,7 +1805,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   const addTransaction = () => {
     if (!form.category || form.amount <= 0) return;
     setTransactions([...transactions, { ...form, id: uid() }]);
-    setForm(emptyForm(allCategories)); setAdding(false);
+    setForm(emptyForm(transactions)); setAdding(false);
   };
   const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note }); };
   const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
@@ -1879,7 +1893,11 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           <div style={{ padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label><input type="date" style={inputStyle} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label><input style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value, subcategory: "" })} list="cat-list" /><datalist id="cat-list">{allCategories.map((c) => <option key={c} value={c} />)}</datalist></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
+                <select style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value, subcategory: "" })}>
+                  {categoriesForType(transactions, form.type).map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
               {getSubcategories(form.type, form.category).length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Sous-catégorie</label>
@@ -1889,7 +1907,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                   </select>
                 </div>
               )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as TxType, subcategory: "" })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => { const ty = e.target.value as TxType; setForm({ ...form, type: ty, subcategory: "", category: categoriesForType(transactions, ty)[0] || "" }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label><input style={inputStyle} type="number" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
               <button onClick={() => setShowAdvanced((s) => !s)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 32 }}>{showAdvanced ? "− options" : "+ bénéficiaire / note"}</button>
               <button onClick={addTransaction} style={{ display: "flex", alignItems: "center", gap: 6, background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}><Save size={13} /> Enregistrer</button>
@@ -1941,7 +1959,9 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                       <>
                         <td style={{ padding: 6 }}><input type="date" style={inputStyle} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} /></td>
                         <td style={{ padding: 6 }}>
-                          <input style={inputStyle} value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value, subcategory: "" })} list="cat-list" />
+                          <select style={inputStyle} value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value, subcategory: "" })}>
+                            {categoriesForType(transactions, editForm.type).map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
                           {getSubcategories(editForm.type, editForm.category).length > 0 && (
                             <select style={{ ...inputStyle, marginTop: 4 }} value={editForm.subcategory || ""} onChange={(e) => setEditForm({ ...editForm, subcategory: e.target.value })}>
                               <option value="">— sous-catégorie —</option>
@@ -1949,7 +1969,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                             </select>
                           )}
                         </td>
-                        <td style={{ padding: 6 }}><select style={inputStyle} value={editForm.type} onChange={(e) => setEditForm({ ...editForm, type: e.target.value as TxType, subcategory: "" })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></td>
+                        <td style={{ padding: 6 }}><select style={inputStyle} value={editForm.type} onChange={(e) => { const ty = e.target.value as TxType; setEditForm({ ...editForm, type: ty, subcategory: "", category: categoriesForType(transactions, ty)[0] || editForm.category }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></td>
                         <td style={{ padding: 6, fontSize: 12, color: COLOR.inkMuted }}>{editForm.type === "Revenu" ? "Revenu" : (categoryGroups[editForm.category] || "Non classifié")}</td>
                         <td style={{ padding: 6 }}><input style={{ ...inputStyle, textAlign: "right" }} type="number" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} /></td>
                         <td style={{ padding: 6, whiteSpace: "nowrap" }}><button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button><button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button></td>
@@ -2059,7 +2079,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>;
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
-  const [quickCategory, setQuickCategory] = useState(allCategories[0] || "Aliments");
+  const [quickCategory, setQuickCategory] = useState(() => categoriesForType(transactions, "Dépense")[0] || "Aliments");
   const [quickSubcategory, setQuickSubcategory] = useState("");
   const [quickType, setQuickType] = useState<TxType>("Dépense");
   const [quickAmount, setQuickAmount] = useState<number | "">("");
@@ -2112,7 +2132,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label>
             <div style={{ display: "flex", gap: 6 }}>
               {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
-                <button key={ty} onClick={() => { setQuickType(ty); setQuickSubcategory(""); }} style={{
+                <button key={ty} onClick={() => { setQuickType(ty); setQuickSubcategory(""); setQuickCategory(categoriesForType(transactions, ty)[0] || ""); }} style={{
                   padding: "8px 16px", borderRadius: 6, fontSize: 12.5, cursor: "pointer",
                   border: `1px solid ${quickType === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
                   background: quickType === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
@@ -2123,8 +2143,9 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
-            <input style={{ ...inputStyle, width: 190 }} value={quickCategory} onChange={(e) => { setQuickCategory(e.target.value); setQuickSubcategory(""); }} list="cat-list-quick" />
-            <datalist id="cat-list-quick">{allCategories.map((c) => <option key={c} value={c} />)}</datalist>
+            <select style={{ ...inputStyle, width: 190 }} value={quickCategory} onChange={(e) => { setQuickCategory(e.target.value); setQuickSubcategory(""); }}>
+              {categoriesForType(transactions, quickType).map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
           {getSubcategories(quickType, quickCategory).length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
