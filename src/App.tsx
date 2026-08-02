@@ -11,7 +11,7 @@ import {
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
-  FileSpreadsheet, FileText, Loader2, Minus,
+  FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle,
 } from "lucide-react";
 
 // ============================================================
@@ -479,6 +479,40 @@ function Panel({ title, subtitle, right, children, style = {} }: {
   );
 }
 
+// Panneau avec bouton d'aide (?) — affiche une explication du graphique au clic,
+// juste au-dessus du contenu, sans quitter la page.
+function PanelWithHelp({ title, subtitle, explain, right, children, style = {} }: {
+  title?: string; subtitle?: string; explain: string; right?: React.ReactNode; children: React.ReactNode; style?: React.CSSProperties;
+}) {
+  const [showHelp, setShowHelp] = useState(false);
+  return (
+    <Panel
+      title={title}
+      subtitle={subtitle}
+      style={style}
+      right={
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {right}
+          <button onClick={() => setShowHelp((s) => !s)} title="Comprendre ce graphique" style={{
+            width: 24, height: 24, borderRadius: "50%", border: `1px solid ${showHelp ? COLOR.gold : COLOR.hairline}`,
+            background: showHelp ? "rgba(201,162,39,0.15)" : "transparent", color: showHelp ? COLOR.goldSoft : COLOR.inkMuted,
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          }}>
+            <HelpCircle size={14} />
+          </button>
+        </div>
+      }
+    >
+      {showHelp && (
+        <div style={{ background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "12px 14px", marginBottom: 16, fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+          {explain}
+        </div>
+      )}
+      {children}
+    </Panel>
+  );
+}
+
 function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint }: {
   label: string; value: string; suffix?: string; tone?: string; icon?: any; hint?: string;
 }) {
@@ -529,7 +563,7 @@ const inputStyle: React.CSSProperties = {
 // ============================================================
 // FILTER BAR
 // ============================================================
-interface Filters { from: string; to: string; type: string; group: string; category: string; search: string; scope: string; }
+interface Filters { from: string; to: string; type: string; group: string; category: string; subcategory: string; search: string; scope: string; }
 
 function FilterBar({ filters, setFilters, allMonths, allCategories, onReset }: {
   filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; onReset: () => void;
@@ -545,12 +579,16 @@ function FilterBar({ filters, setFilters, allMonths, allCategories, onReset }: {
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
-      <Select label="Catégorie" value={filters.category} onChange={(v) => patch({ category: v })} options={[{ value: "Toutes", label: "Toutes" }, ...allCategories.map((c) => ({ value: c, label: c }))]} />
+      <Select label="Catégorie" value={filters.category} onChange={(v) => patch({ category: v, subcategory: "Toutes" })} options={[{ value: "Toutes", label: "Toutes" }, ...allCategories.map((c) => ({ value: c, label: c }))]} />
+      {filters.category !== "Toutes" && (
+        <Select label="Sous-catégorie" value={filters.subcategory} onChange={(v) => patch({ subcategory: v })}
+          options={[{ value: "Toutes", label: "Toutes" }, ...Array.from(new Set([...depSubcategories[filters.category] || [], ...revSubcategories[filters.category] || []])).map((s) => ({ value: s, label: s }))]} />
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 5, flex: 1, minWidth: 160 }}>
         <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Recherche</label>
         <div style={{ position: "relative" }}>
           <Search size={13} color={COLOR.inkMuted} style={{ position: "absolute", left: 9, top: 9 }} />
-          <input value={filters.search} onChange={(e) => patch({ search: e.target.value })} placeholder="ex: Cadeaux, GRUNDFOS…" style={{ width: "100%", background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.ink, padding: "8px 10px 8px 28px", fontSize: 12.5, fontFamily: "'Inter', sans-serif", boxSizing: "border-box" }} />
+          <input value={filters.search} onChange={(e) => patch({ search: e.target.value })} placeholder="ex: Déjeuner, GRUNDFOS…" style={{ width: "100%", background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.ink, padding: "8px 10px 8px 28px", fontSize: 12.5, fontFamily: "'Inter', sans-serif", boxSizing: "border-box" }} />
         </div>
       </div>
       <button onClick={onReset} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 34 }}>
@@ -1035,7 +1073,8 @@ function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: an
       )}
 
       {nwFiltered.length > 1 && (
-        <Panel title="Évolution de la valeur nette" subtitle="Relevé de solde — rapport séparé, non affecté par les filtres de type/groupe">
+        <PanelWithHelp title="Évolution de la valeur nette" subtitle="Relevé de solde — rapport séparé, non affecté par les filtres de type/groupe"
+          explain="Cette courbe retrace le solde total de tes comptes mois par mois, tel qu'enregistré dans le relevé historique MoneyCoach puis mis à jour en direct par le solde réel de tes comptes actuels. Elle ne dépend pas des filtres Type/Groupe/Catégorie ci-dessus — seule la période (Du mois/Au mois) l'affecte. Une pente montante signifie que ton patrimoine augmente sur la période ; les creux correspondent souvent à de grosses dépenses ponctuelles (achat, investissement).">
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={nwFiltered} margin={{ left: 0, right: 10, top: 10 }}>
               <defs>
@@ -1051,10 +1090,11 @@ function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: an
               <Area type="monotone" dataKey="valeur" name="Valeur nette" stroke={COLOR.goldSoft} strokeWidth={2} fill="url(#nwGrad)" />
             </AreaChart>
           </ResponsiveContainer>
-        </Panel>
+        </PanelWithHelp>
       )}
 
-      <Panel title="Revenus vs Dépenses" subtitle={`${byMonth.length} mois dans la période filtrée`}>
+      <PanelWithHelp title="Revenus vs Dépenses" subtitle={`${byMonth.length} mois dans la période filtrée`}
+        explain="Chaque paire de barres compare, pour un même mois, le total encaissé (vert) au total dépensé (rouge). Quand la barre rouge dépasse la verte, ce mois-là a coûté plus qu'il n'a rapporté — pas forcément un problème si c'est un mois d'investissement ponctuel (achat, travaux), mais à surveiller si ça se répète plusieurs mois de suite.">
         {byMonth.length ? (
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={byMonth} margin={{ left: 0, right: 10, top: 10 }}>
@@ -1068,9 +1108,10 @@ function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: an
             </BarChart>
           </ResponsiveContainer>
         ) : <EmptyState />}
-      </Panel>
+      </PanelWithHelp>
 
-      <Panel title="Répartition des dépenses par groupe" subtitle="Selon la classification des catégories">
+      <PanelWithHelp title="Répartition des dépenses par groupe" subtitle="Selon la classification des catégories"
+        explain="Chaque dépense est classée dans l'un de ces 4 groupes : Nécessaire (logement, alimentation…), Productif (investissements, épargne, activité), Non-productif (cadeaux, sorties, shopping — sans retour), ou Non classifié (catégories comme 'Ajustement' pas encore triées). Un cercle doré épais indique une part élevée de dépenses non-productives par rapport au reste — c'est le principal levier si tu veux augmenter ton épargne.">
         {groupBreakdown.length ? (
           <div style={{ display: "flex", gap: 28, flexWrap: "wrap", alignItems: "center" }}>
             <ResponsiveContainer width={240} height={240}>
@@ -1094,7 +1135,7 @@ function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: an
             </div>
           </div>
         ) : <EmptyState />}
-      </Panel>
+      </PanelWithHelp>
     </div>
   );
 }
@@ -1119,12 +1160,14 @@ function DeltaRow({ label, val, inverse = false }: { label: string; val: number 
 function FluxTab({ filtered }: { filtered: any[] }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <Panel title="Flux Revenus → Dépenses" subtitle="Comment le revenu de la période se répartit entre les groupes de dépenses et le solde">
+      <PanelWithHelp title="Flux Revenus → Dépenses" subtitle="Comment le revenu de la période se répartit entre les groupes de dépenses et le solde"
+        explain="Le bloc vert à gauche représente 100% du revenu de la période. Chaque ruban qui en part montre la part qui va vers un groupe de dépenses (Nécessaire, Productif, Non-productif, Non classifié) ou vers le Solde (épargne restante). Plus un ruban est épais, plus ce poste absorbe une grande partie du revenu.">
         <FlowDiagram filtered={filtered} />
-      </Panel>
-      <Panel title="Calendrier d'intensité — dépenses non-productives" subtitle="Repérer les mois et saisons à risque">
+      </PanelWithHelp>
+      <PanelWithHelp title="Calendrier d'intensité — dépenses non-productives" subtitle="Repérer les mois et saisons à risque"
+        explain="Chaque case représente un mois. Plus la couleur est intense (vert → or → rouge), plus les dépenses non-productives (cadeaux, sorties, shopping) ont été élevées ce mois-là. Pratique pour repérer des périodes récurrentes à risque — fêtes de fin d'année, rentrée scolaire, anniversaires groupés…">
         <HeatmapCalendar filtered={filtered} />
-      </Panel>
+      </PanelWithHelp>
     </div>
   );
 }
@@ -1164,7 +1207,8 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <Panel title="Revenus, dépenses et solde par mois" subtitle="Cliquer sur une colonne pour trier">
+      <PanelWithHelp title="Revenus, dépenses et solde par mois" subtitle="Cliquer sur une colonne pour trier"
+        explain="La ligne dorée (Solde net) trace la différence revenus−dépenses de chaque mois : au-dessus de zéro, le mois est excédentaire. La ligne rouge pointillée (Non-productif) montre le poids des dépenses sans retour (cadeaux, sorties…) — si elle suit de près ou dépasse le solde net, c'est souvent le premier poste à réduire pour améliorer l'épargne.">
         {chartData.length ? (
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={chartData} margin={{ left: 0, right: 10, top: 10 }}>
@@ -1178,7 +1222,7 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
             </LineChart>
           </ResponsiveContainer>
         ) : <EmptyState />}
-      </Panel>
+      </PanelWithHelp>
       <Panel title="Tableau mensuel" subtitle={`${rows.length} mois`}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -1388,7 +1432,8 @@ function CategoryDetailView({ category, type, filtered, onBack }: { category: st
         <Kpi label={`% du total ${type === "Revenu" ? "revenus" : "dépenses"}`} value={pctOfTotal.toFixed(1)} suffix="%" tone={COLOR.goldSoft} icon={Percent} />
       </div>
 
-      <Panel title="Évolution mensuelle" subtitle={`${byMonth.length} mois avec activité`}>
+      <PanelWithHelp title="Évolution mensuelle" subtitle={`${byMonth.length} mois avec activité`}
+        explain={`Chaque barre montre le total dépensé (ou reçu) en "${category}" ce mois-là. Une hausse progressive peut indiquer une habitude qui s'installe ; des pics isolés correspondent souvent à des achats ponctuels plutôt qu'à une tendance de fond.`}>
         {byMonth.length ? (
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={byMonth} margin={{ left: 0, right: 10, top: 10 }}>
@@ -1400,7 +1445,7 @@ function CategoryDetailView({ category, type, filtered, onBack }: { category: st
             </BarChart>
           </ResponsiveContainer>
         ) : <EmptyState />}
-      </Panel>
+      </PanelWithHelp>
 
       {bySubcat.length > 1 && (
         <Panel title="Répartition par sous-catégorie">
@@ -1486,7 +1531,8 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
         <Kpi label="Taux d'épargne" value={tauxEpargne.toFixed(1)} suffix="%" tone={COLOR.gold} icon={Target} />
       </div>
 
-      <Panel title="Revenus vs Dépenses" subtitle={`${byMonth.length} mois dans la période filtrée`}>
+      <PanelWithHelp title="Revenus vs Dépenses" subtitle={`${byMonth.length} mois dans la période filtrée`}
+        explain="Chaque paire de barres compare, pour un même mois, le total encaissé (vert) au total dépensé (rouge). Utile pour repérer d'un coup d'œil les mois où les dépenses ont dépassé les revenus.">
         {byMonth.length ? (
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={byMonth} margin={{ left: 0, right: 10, top: 10 }}>
@@ -1500,7 +1546,7 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
             </BarChart>
           </ResponsiveContainer>
         ) : <EmptyState />}
-      </Panel>
+      </PanelWithHelp>
 
       <InsightsPanel filtered={filtered} />
 
@@ -1584,7 +1630,8 @@ function ComparatifTab({ transactions, categoryGroups }: { transactions: Transac
           ))}
         </div>
       </Panel>
-      <Panel title="Top 10 catégories — comparaison par année" subtitle="Totaux bruts par catégorie et par année">
+      <PanelWithHelp title="Top 10 catégories — comparaison par année" subtitle="Totaux bruts par catégorie et par année"
+        explain="Pour chacune de tes 10 catégories de dépenses les plus importantes, une barre par année (bleu=2024, or=2025, vert=2026…) montre le total dépensé. Comme 2024 et l'année en cours sont partielles, compare plutôt les tendances/ordres de grandeur que les totaux bruts — le panneau du dessus donne les moyennes mensuelles, plus justes pour ce type de comparaison.">
         <ResponsiveContainer width="100%" height={420}>
           <BarChart data={chartData} layout="vertical" margin={{ left: 10, right: 20, top: 10 }}>
             <CartesianGrid stroke={COLOR.hairline} horizontal={false} />
@@ -1597,6 +1644,150 @@ function ComparatifTab({ transactions, categoryGroups }: { transactions: Transac
             ))}
           </BarChart>
         </ResponsiveContainer>
+      </PanelWithHelp>
+    </div>
+  );
+}
+
+// ============================================================
+// COMPARATEUR — deux périodes personnalisées, côte à côte
+// ============================================================
+function ComparateurTab({ transactions, categoryGroups, allMonths }: {
+  transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[];
+}) {
+  const withGroup = useMemo(
+    () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") })),
+    [transactions, categoryGroups]
+  );
+
+  const lastMonth = allMonths[allMonths.length - 1] || "";
+  const idxLast = allMonths.indexOf(lastMonth);
+  const prevMonth = idxLast > 0 ? allMonths[idxLast - 1] : lastMonth;
+
+  const [aFrom, setAFrom] = useState(prevMonth);
+  const [aTo, setATo] = useState(prevMonth);
+  const [bFrom, setBFrom] = useState(lastMonth);
+  const [bTo, setBTo] = useState(lastMonth);
+
+  const statsFor = (from: string, to: string) => {
+    const fk = monthSortKey(from), tk = monthSortKey(to);
+    const tx = withGroup.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
+    const revenus = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+    const depenses = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+    const nonProd = tx.filter((t) => t.type === "Dépense" && t.group === "Non-productif").reduce((a, t) => a + t.amount, 0);
+    const solde = revenus - depenses;
+    const tauxEpargne = revenus > 0 ? (solde / revenus) * 100 : 0;
+    const byCat: Record<string, number> = {};
+    tx.filter((t) => t.type === "Dépense").forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length };
+  };
+
+  const A = useMemo(() => statsFor(aFrom, aTo), [withGroup, aFrom, aTo]);
+  const B = useMemo(() => statsFor(bFrom, bTo), [withGroup, bFrom, bTo]);
+
+  const pctDelta = (a: number, b: number) => (a !== 0 ? ((b - a) / Math.abs(a)) * 100 : (b !== 0 ? 100 : 0));
+
+  const chartData = [
+    { name: "Revenus", A: A.revenus, B: B.revenus },
+    { name: "Dépenses", A: A.depenses, B: B.depenses },
+    { name: "Solde", A: A.solde, B: B.solde },
+    { name: "Non-productif", A: A.nonProd, B: B.nonProd },
+  ];
+
+  const allCats = Array.from(new Set([...Object.keys(A.byCat), ...Object.keys(B.byCat)]));
+  const catRows = allCats
+    .map((c) => ({ cat: c, a: A.byCat[c] || 0, b: B.byCat[c] || 0, delta: (B.byCat[c] || 0) - (A.byCat[c] || 0) }))
+    .filter((r) => r.a !== 0 || r.b !== 0)
+    .sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta))
+    .slice(0, 15);
+
+  const metricRow = (label: string, a: number, b: number, lowerIsBetter: boolean, suffix = "FCFA") => {
+    const d = pctDelta(a, b);
+    const good = d === 0 ? null : lowerIsBetter ? d < 0 : d > 0;
+    return (
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+        <div style={{ width: 150, fontSize: 12.5, color: COLOR.inkMuted }}>{label}</div>
+        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.slateBlueSoft }}>{suffix === "%" ? a.toFixed(1) + "%" : fmt(a)}</div>
+        <div style={{ width: 30, textAlign: "center", color: COLOR.inkMuted }}>→</div>
+        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.goldSoft }}>{suffix === "%" ? b.toFixed(1) + "%" : fmt(b)}</div>
+        <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: good === null ? COLOR.inkMuted : good ? COLOR.emeraldSoft : COLOR.claySoft }}>
+          {d >= 0 ? "+" : ""}{d.toFixed(0)}%
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <Panel title="Choisir les deux périodes à comparer">
+        <div style={{ display: "flex", gap: 30, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: COLOR.slateBlue }} />
+              <span style={{ fontSize: 12.5, color: COLOR.slateBlueSoft, fontWeight: 600 }}>Période A</span>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <Select label="Du mois" value={aFrom} onChange={setAFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+              <Select label="Au mois" value={aTo} onChange={setATo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+            </div>
+          </div>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: COLOR.gold }} />
+              <span style={{ fontSize: 12.5, color: COLOR.goldSoft, fontWeight: 600 }}>Période B</span>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <Select label="Du mois" value={bFrom} onChange={setBFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+              <Select label="Au mois" value={bTo} onChange={setBTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="Comparaison des indicateurs clés" subtitle={`A : ${monthLabel(aFrom)} — ${monthLabel(aTo)} (${A.count} tx)  ·  B : ${monthLabel(bFrom)} — ${monthLabel(bTo)} (${B.count} tx)`}>
+        <div style={{ display: "flex", padding: "4px 0", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+          <div style={{ width: 150 }}></div>
+          <div style={{ flex: 1, textAlign: "right" }}>A</div>
+          <div style={{ width: 30 }}></div>
+          <div style={{ flex: 1, textAlign: "right" }}>B</div>
+          <div style={{ width: 90, textAlign: "right" }}>Évolution</div>
+        </div>
+        {metricRow("Revenus", A.revenus, B.revenus, false)}
+        {metricRow("Dépenses", A.depenses, B.depenses, true)}
+        {metricRow("Solde", A.solde, B.solde, false)}
+        {metricRow("Taux d'épargne", A.tauxEpargne, B.tauxEpargne, false, "%")}
+        {metricRow("Non-productif", A.nonProd, B.nonProd, true)}
+      </Panel>
+
+      <PanelWithHelp title="Comparaison visuelle" explain="Chaque paire de barres met côte à côte la Période A (bleu) et la Période B (or) pour Revenus, Dépenses, Solde et Non-productif. Ça permet de voir en un coup d'œil quels indicateurs ont le plus bougé entre les deux périodes choisies ci-dessus.">
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={chartData} margin={{ left: 0, right: 10, top: 10 }}>
+            <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+            <XAxis dataKey="name" tick={{ fill: COLOR.inkMuted, fontSize: 11 }} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+            <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
+            <Tooltip content={<CustomTooltip />} />
+            <Legend wrapperStyle={{ fontSize: 12, color: COLOR.inkMuted }} />
+            <Bar dataKey="A" name={`A (${monthLabel(aFrom)}${aFrom !== aTo ? "…" + monthLabel(aTo) : ""})`} fill={COLOR.slateBlue} radius={[3, 3, 0, 0]} />
+            <Bar dataKey="B" name={`B (${monthLabel(bFrom)}${bFrom !== bTo ? "…" + monthLabel(bTo) : ""})`} fill={COLOR.gold} radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </PanelWithHelp>
+
+      <Panel title="Catégories qui ont le plus évolué" subtitle="Triées par variation absolue entre A et B">
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {catRows.map((r) => (
+            <div key={r.cat} style={{ display: "flex", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <div style={{ flex: 1, fontSize: 12.5, color: COLOR.ink }}>{r.cat}</div>
+              <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLOR.slateBlueSoft }}>{fmt(r.a)}</div>
+              <div style={{ width: 20, textAlign: "center", color: COLOR.inkMuted }}>→</div>
+              <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLOR.goldSoft }}>{fmt(r.b)}</div>
+              <div style={{ width: 100, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: r.delta > 0 ? COLOR.claySoft : COLOR.emeraldSoft }}>
+                {r.delta >= 0 ? "+" : ""}{fmt(r.delta)}
+              </div>
+            </div>
+          ))}
+          {!catRows.length && <EmptyState text="Aucune dépense sur ces deux périodes." />}
+        </div>
       </Panel>
     </div>
   );
@@ -1744,7 +1935,8 @@ function SimulateurTab({ filtered, accounts, transactions }: { filtered: any[]; 
         <Kpi label="Nouveau solde (période)" value={fmt(newSolde)} tone={newSolde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} />
       </div>
 
-      <Panel title="Impact projeté sur la valeur nette" subtitle="Comparaison : trajectoire actuelle vs trajectoire avec les réductions appliquées chaque mois">
+      <PanelWithHelp title="Impact projeté sur la valeur nette" subtitle="Comparaison : trajectoire actuelle vs trajectoire avec les réductions appliquées chaque mois"
+        explain="La ligne grise prolonge ta trajectoire actuelle sans rien changer. La ligne verte simule l'effet, mois après mois, si tu appliquais réellement les réductions réglées avec les curseurs ci-dessus. L'écart entre les deux, au bout de 24 mois, donne une idée concrète du gain potentiel sur ton patrimoine.">
         <ResponsiveContainer width="100%" height={260}>
           <LineChart data={projection} margin={{ left: 0, right: 10, top: 10 }}>
             <CartesianGrid stroke={COLOR.hairline} vertical={false} />
@@ -1756,7 +1948,7 @@ function SimulateurTab({ filtered, accounts, transactions }: { filtered: any[]; 
             <Line type="monotone" dataKey="avecAction" name="Avec réductions" stroke={COLOR.emeraldSoft} strokeWidth={2.5} dot />
           </LineChart>
         </ResponsiveContainer>
-      </Panel>
+      </PanelWithHelp>
     </div>
   );
 }
@@ -1768,7 +1960,8 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
   const [months, setMonths] = useState(12);
   const { points } = projectNetWorth(months, liveNetWorthSeries(accounts, transactions));
   return (
-    <Panel title="Projection de valeur nette" subtitle={`Basée sur la tendance des 6 derniers relevés — bande optimiste/pessimiste (±1 écart-type)`}
+    <PanelWithHelp title="Projection de valeur nette" subtitle={`Basée sur la tendance des 6 derniers relevés — bande optimiste/pessimiste (±1 écart-type)`}
+      explain="La ligne dorée centrale prolonge la moyenne d'évolution de ta valeur nette sur les 6 derniers mois. Les deux lignes pointillées (vert=optimiste, rouge=prudent) montrent une fourchette réaliste autour de cette projection, basée sur la variabilité récente de ton patrimoine. C'est une extrapolation statistique, pas une garantie — un gros achat ou une rentrée d'argent imprévue peut la faire dévier."
       right={
         <div style={{ display: "flex", gap: 6 }}>
           {[6, 12, 24].map((m) => (
@@ -1792,7 +1985,7 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
           <Line type="monotone" dataKey="bas" name="Scénario prudent" stroke={COLOR.claySoft} strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
         </AreaChart>
       </ResponsiveContainer>
-    </Panel>
+    </PanelWithHelp>
   );
 }
 
@@ -2725,61 +2918,170 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
     URL.revokeObjectURL(url);
   };
 
-  const exportExcel = () => {
+  const exportExcelSimple = () => {
     const wb = XLSX.utils.book_new();
-
-    // Feuille Résumé
     const byMonthXl: Record<string, { revenus: number; depenses: number }> = {};
     filtered.forEach((t) => {
       if (!byMonthXl[t.month]) byMonthXl[t.month] = { revenus: 0, depenses: 0 };
       if (t.type === "Revenu") byMonthXl[t.month].revenus += t.amount; else byMonthXl[t.month].depenses += t.amount;
     });
     const summaryRows: any[][] = [
-      ["Grand Livre — Rapport financier"],
-      ["Période", `${monthLabel(filters.from)} — ${monthLabel(filters.to)}`],
-      ["Généré le", dateLabelFull(todayISO())],
-      [],
-      ["Revenus", totalRevenus],
-      ["Dépenses", totalDepenses],
-      ["Solde", solde],
-      ["Nombre de transactions", filtered.length],
+      ["Grand Livre — Rapport financier"], ["Période", `${monthLabel(filters.from)} — ${monthLabel(filters.to)}`],
+      ["Généré le", dateLabelFull(todayISO())], [], ["Revenus", totalRevenus], ["Dépenses", totalDepenses],
+      ["Solde", solde], ["Nombre de transactions", filtered.length],
     ];
     const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
     wsSummary["!cols"] = [{ wch: 26 }, { wch: 22 }];
     XLSX.utils.book_append_sheet(wb, wsSummary, "Résumé");
-
-    // Feuille Transactions
     const txHeader = ["Date", "Heure", "Catégorie", "Sous-catégorie", "Type", "Groupe", "Compte", "Bénéficiaire", "Note", "Montant (FCFA)"];
-    const txRows = filtered
-      .slice()
-      .sort((a, b) => b.date.localeCompare(a.date))
+    const txRows = filtered.slice().sort((a, b) => b.date.localeCompare(a.date))
       .map((t) => [t.date, t.time || "", t.category, t.subcategory || "", t.type, t.group, t.account || "", t.payee || "", t.note || "", t.amount]);
     const wsTx = XLSX.utils.aoa_to_sheet([txHeader, ...txRows]);
     wsTx["!cols"] = [{ wch: 12 }, { wch: 8 }, { wch: 22 }, { wch: 18 }, { wch: 10 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 20 }, { wch: 14 }];
     XLSX.utils.book_append_sheet(wb, wsTx, "Transactions");
-
-    // Feuille Par mois
     const monthHeader = ["Mois", "Revenus", "Dépenses", "Solde"];
-    const monthRows = Object.keys(byMonthXl)
-      .sort((a, b) => monthSortKey(a) - monthSortKey(b))
+    const monthRows = Object.keys(byMonthXl).sort((a, b) => monthSortKey(a) - monthSortKey(b))
       .map((k) => [monthLabel(k), byMonthXl[k].revenus, byMonthXl[k].depenses, byMonthXl[k].revenus - byMonthXl[k].depenses]);
     const wsMonth = XLSX.utils.aoa_to_sheet([monthHeader, ...monthRows]);
     wsMonth["!cols"] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
     XLSX.utils.book_append_sheet(wb, wsMonth, "Par mois");
-
-    // Feuille Par catégorie
     const catTotals: Record<string, { value: number; type: string }> = {};
-    filtered.forEach((t) => {
-      if (!catTotals[t.category]) catTotals[t.category] = { value: 0, type: t.type };
-      catTotals[t.category].value += t.amount;
-    });
+    filtered.forEach((t) => { if (!catTotals[t.category]) catTotals[t.category] = { value: 0, type: t.type }; catTotals[t.category].value += t.amount; });
     const catHeader = ["Catégorie", "Type", "Total (FCFA)"];
     const catRows = Object.entries(catTotals).sort((a, b) => b[1].value - a[1].value).map(([name, d]) => [name, d.type, d.value]);
     const wsCat = XLSX.utils.aoa_to_sheet([catHeader, ...catRows]);
     wsCat["!cols"] = [{ wch: 26 }, { wch: 10 }, { wch: 14 }];
     XLSX.utils.book_append_sheet(wb, wsCat, "Par catégorie");
-
     XLSX.writeFile(wb, `grand-livre_${filters.from}_${filters.to}.xlsx`);
+  };
+
+  const exportExcel = async () => {
+    let ExcelJS: any;
+    try {
+      ExcelJS = await import(/* @vite-ignore */ "exceljs");
+    } catch {
+      exportExcelSimple();
+      return;
+    }
+    const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", SUBTLE = "FF232F27", WHITE = "FFFFFFFF", MUTED = "FF8A9A8E";
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "Grand Livre"; wb.created = new Date();
+
+    const styleHeaderRow = (row: any) => {
+      row.eachCell((c: any) => {
+        c.font = { bold: true, color: { argb: WHITE } };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+        c.alignment = { vertical: "middle" };
+      });
+      row.height = 22;
+    };
+    const styleSubtotalRow = (row: any) => {
+      row.eachCell((c: any) => {
+        c.font = { bold: true, color: { argb: GOLD } };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } };
+      });
+    };
+
+    // ===== Feuille Résumé =====
+    const byMonthXl: Record<string, { revenus: number; depenses: number }> = {};
+    filtered.forEach((t) => {
+      if (!byMonthXl[t.month]) byMonthXl[t.month] = { revenus: 0, depenses: 0 };
+      if (t.type === "Revenu") byMonthXl[t.month].revenus += t.amount; else byMonthXl[t.month].depenses += t.amount;
+    });
+    const wsSummary = wb.addWorksheet("Résumé");
+    wsSummary.columns = [{ width: 30 }, { width: 24 }];
+    wsSummary.mergeCells("A1:B1");
+    const titleCell = wsSummary.getCell("A1");
+    titleCell.value = "Grand Livre — Rapport financier";
+    titleCell.font = { bold: true, size: 15, color: { argb: WHITE } };
+    titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+    titleCell.alignment = { vertical: "middle", indent: 1 };
+    wsSummary.getRow(1).height = 30;
+    const addSum = (label: string, value: any, color?: string, fmtNum?: boolean) => {
+      const r = wsSummary.addRow([label, value]);
+      r.getCell(1).font = { color: { argb: MUTED } };
+      r.getCell(2).font = { bold: true, color: { argb: color || NAVY } };
+      if (fmtNum) r.getCell(2).numFmt = "#,##0";
+      r.getCell(2).alignment = { horizontal: "right" };
+    };
+    wsSummary.addRow([]);
+    addSum("Période", `${monthLabel(filters.from)} — ${monthLabel(filters.to)}`);
+    addSum("Généré le", dateLabelFull(todayISO()));
+    wsSummary.addRow([]);
+    addSum("Revenus", totalRevenus, EMERALD, true);
+    addSum("Dépenses", totalDepenses, CLAY, true);
+    addSum("Solde", solde, solde >= 0 ? EMERALD : CLAY, true);
+    addSum("Taux d'épargne", `${(totalRevenus > 0 ? (solde / totalRevenus) * 100 : 0).toFixed(1)}%`);
+    addSum("Nombre de transactions", filtered.length);
+
+    // ===== Feuille Transactions, avec sous-total automatique à chaque changement de mois =====
+    const wsTx = wb.addWorksheet("Transactions");
+    wsTx.columns = [
+      { header: "Date", key: "date", width: 12 }, { header: "Heure", key: "time", width: 8 },
+      { header: "Catégorie", key: "cat", width: 22 }, { header: "Sous-catégorie", key: "sub", width: 18 },
+      { header: "Type", key: "type", width: 10 }, { header: "Groupe", key: "group", width: 16 },
+      { header: "Compte", key: "account", width: 14 }, { header: "Montant (FCFA)", key: "amount", width: 16 },
+    ];
+    styleHeaderRow(wsTx.getRow(1));
+    const sortedTx = filtered.slice().sort((a, b) => a.date.localeCompare(b.date));
+    let curMonth: string | null = null, monthRev = 0, monthDep = 0;
+    const flushMonthSubtotal = () => {
+      if (curMonth === null) return;
+      const r = wsTx.addRow({ cat: `— Sous-total ${monthLabel(curMonth)} —`, account: `Rev: ${fmt(monthRev)}`, amount: monthDep });
+      styleSubtotalRow(r);
+      r.getCell("amount").numFmt = "#,##0";
+    };
+    sortedTx.forEach((t) => {
+      if (curMonth !== null && t.month !== curMonth) { flushMonthSubtotal(); monthRev = 0; monthDep = 0; }
+      curMonth = t.month;
+      if (t.type === "Revenu") monthRev += t.amount; else monthDep += t.amount;
+      const r = wsTx.addRow({ date: t.date, time: t.time || "", cat: t.category, sub: t.subcategory || "", type: t.type, group: t.group, account: t.account || "", amount: t.amount });
+      r.getCell("amount").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+      r.getCell("amount").numFmt = "#,##0";
+    });
+    flushMonthSubtotal();
+
+    // ===== Feuille Par mois =====
+    const wsMonth = wb.addWorksheet("Par mois");
+    wsMonth.columns = [{ header: "Mois", key: "mois", width: 14 }, { header: "Revenus", key: "rev", width: 16 }, { header: "Dépenses", key: "dep", width: 16 }, { header: "Solde", key: "solde", width: 16 }];
+    styleHeaderRow(wsMonth.getRow(1));
+    Object.keys(byMonthXl).sort((a, b) => monthSortKey(a) - monthSortKey(b)).forEach((k) => {
+      const r = wsMonth.addRow({ mois: monthLabel(k), rev: byMonthXl[k].revenus, dep: byMonthXl[k].depenses, solde: byMonthXl[k].revenus - byMonthXl[k].depenses });
+      r.getCell("rev").font = { color: { argb: EMERALD } }; r.getCell("rev").numFmt = "#,##0";
+      r.getCell("dep").font = { color: { argb: CLAY } }; r.getCell("dep").numFmt = "#,##0";
+      const s = byMonthXl[k].revenus - byMonthXl[k].depenses;
+      r.getCell("solde").font = { bold: true, color: { argb: s >= 0 ? EMERALD : CLAY } }; r.getCell("solde").numFmt = "#,##0";
+    });
+
+    // ===== Feuille Par catégorie, groupée avec sous-total par groupe =====
+    const wsCat = wb.addWorksheet("Par catégorie");
+    wsCat.columns = [{ header: "Catégorie", key: "cat", width: 26 }, { header: "Groupe", key: "group", width: 18 }, { header: "Total (FCFA)", key: "total", width: 16 }];
+    styleHeaderRow(wsCat.getRow(1));
+    const groupOrder = ["Revenu", ...GROUPS];
+    groupOrder.forEach((g) => {
+      const items = filtered.filter((t) => t.group === g);
+      if (!items.length) return;
+      const byCat: Record<string, number> = {};
+      items.forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+      const groupTitleRow = wsCat.addRow({ cat: g.toUpperCase() });
+      groupTitleRow.getCell("cat").font = { bold: true, color: { argb: g === "Revenu" ? EMERALD : g === "Non-productif" ? CLAY : GOLD } };
+      Object.entries(byCat).sort((a, b) => b[1] - a[1]).forEach(([name, val]) => {
+        const r = wsCat.addRow({ cat: `   ${name}`, group: g, total: val });
+        r.getCell("total").numFmt = "#,##0";
+      });
+      const groupTotal = Object.values(byCat).reduce((a, b) => a + b, 0);
+      const subRow = wsCat.addRow({ cat: `— Sous-total ${g} —`, total: groupTotal });
+      styleSubtotalRow(subRow);
+      subRow.getCell("total").numFmt = "#,##0";
+    });
+
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `grand-livre_${filters.from}_${filters.to}.xlsx`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const exportPDF = async () => {
@@ -2791,37 +3093,92 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       ]);
       const autoTable = (autoTableModule as any).default || autoTableModule;
       const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
 
+      // Bandeau d'en-tête coloré
+      doc.setFillColor(26, 43, 76);
+      doc.rect(0, 0, pageWidth, 34, "F");
       doc.setFontSize(17);
-      doc.setTextColor(26, 43, 76);
-      doc.text("Grand Livre — Rapport financier", 14, 18);
-      doc.setFontSize(10);
-      doc.setTextColor(90, 90, 90);
-      doc.text(`Période : ${monthLabel(filters.from)} — ${monthLabel(filters.to)}`, 14, 25);
-      doc.text(`Généré le ${dateLabelFull(todayISO())}`, 14, 30);
+      doc.setTextColor(255, 255, 255);
+      doc.text("Grand Livre — Rapport financier", 14, 16);
+      doc.setFontSize(9.5);
+      doc.setTextColor(200, 210, 225);
+      doc.text(`Période : ${monthLabel(filters.from)} — ${monthLabel(filters.to)}  ·  Généré le ${dateLabelFull(todayISO())}`, 14, 24);
+      doc.text(`${filtered.length} transaction(s)`, 14, 29);
 
-      doc.setFontSize(11);
-      doc.setTextColor(30, 120, 90);
-      doc.text(`Revenus : ${fmt(totalRevenus)} FCFA`, 14, 40);
-      doc.setTextColor(180, 60, 50);
-      doc.text(`Dépenses : ${fmt(totalDepenses)} FCFA`, 80, 40);
-      doc.setTextColor(solde >= 0 ? 30 : 180, solde >= 0 ? 120 : 60, solde >= 0 ? 90 : 50);
-      doc.text(`Solde : ${fmt(solde)} FCFA`, 150, 40);
+      // Cartes KPI colorées
+      const kpiY = 40, kpiH = 20, kpiW = (pageWidth - 28 - 16) / 3;
+      const drawKpiBox = (x: number, label: string, value: string, r: number, g: number, b: number) => {
+        doc.setFillColor(r, g, b); doc.setDrawColor(r, g, b);
+        doc.roundedRect(x, kpiY, kpiW, kpiH, 2, 2, "F");
+        doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+        doc.text(label, x + 5, kpiY + 7);
+        doc.setFontSize(11); doc.setFont("helvetica", "bold");
+        doc.text(value, x + 5, kpiY + 15);
+        doc.setFont("helvetica", "normal");
+      };
+      drawKpiBox(14, "REVENUS", `${fmt(totalRevenus)} FCFA`, 63, 156, 122);
+      drawKpiBox(14 + kpiW + 8, "DÉPENSES", `${fmt(totalDepenses)} FCFA`, 193, 84, 63);
+      drawKpiBox(14 + (kpiW + 8) * 2, "SOLDE", `${fmt(solde)} FCFA`, solde >= 0 ? 63 : 193, solde >= 0 ? 156 : 84, solde >= 0 ? 122 : 63);
 
-      const rows = filtered
-        .slice()
-        .sort((a, b) => b.date.localeCompare(a.date))
-        .map((t) => [dateLabelFull(t.date), t.time || "—", t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, t.group, fmt(t.amount)]);
+      // Graphique en barres dessiné à la main (revenus vs dépenses par mois, jusqu'à 12 mois)
+      let chartBottom = 68;
+      const monthsChart = byMonth.slice(-12);
+      if (monthsChart.length > 1) {
+        const chartX = 14, chartY = 70, chartW = pageWidth - 28, chartH = 42;
+        const maxVal = Math.max(1, ...monthsChart.map((m) => Math.max(m.revenus, m.depenses)));
+        const bw = chartW / monthsChart.length;
+        doc.setDrawColor(220, 220, 220);
+        doc.line(chartX, chartY + chartH, chartX + chartW, chartY + chartH);
+        monthsChart.forEach((m, i) => {
+          const slot = chartX + i * bw;
+          const hRev = (m.revenus / maxVal) * chartH;
+          const hDep = (m.depenses / maxVal) * chartH;
+          doc.setFillColor(63, 156, 122);
+          doc.rect(slot + bw * 0.15, chartY + chartH - hRev, bw * 0.3, hRev, "F");
+          doc.setFillColor(193, 84, 63);
+          doc.rect(slot + bw * 0.5, chartY + chartH - hDep, bw * 0.3, hDep, "F");
+          doc.setFontSize(6); doc.setTextColor(120, 120, 120);
+          doc.text(monthLabel(m.key), slot + bw * 0.5, chartY + chartH + 5, { align: "center", maxWidth: bw });
+        });
+        doc.setFontSize(7); doc.setTextColor(63, 156, 122); doc.text("■ Revenus", chartX, chartY - 3);
+        doc.setTextColor(193, 84, 63); doc.text("■ Dépenses", chartX + 28, chartY - 3);
+        chartBottom = chartY + chartH + 10;
+      }
+
+      // Tableau des transactions, groupé avec sous-total à chaque changement de mois
+      const sortedTx = filtered.slice().sort((a, b) => a.date.localeCompare(b.date));
+      const rows: any[] = [];
+      let curMonth: string | null = null, monthRev = 0, monthDep = 0;
+      const pushSubtotal = () => {
+        if (curMonth === null) return;
+        rows.push([{ content: `▸ Sous-total ${monthLabel(curMonth)}`, colSpan: 4 }, { content: `Rev: ${fmt(monthRev)} / Dép: ${fmt(monthDep)}`, styles: { halign: "right" } }]);
+      };
+      sortedTx.forEach((t) => {
+        if (curMonth !== null && t.month !== curMonth) { pushSubtotal(); monthRev = 0; monthDep = 0; }
+        curMonth = t.month;
+        if (t.type === "Revenu") monthRev += t.amount; else monthDep += t.amount;
+        rows.push([dateLabelFull(t.date), t.time || "—", t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, fmt(t.amount)]);
+      });
+      pushSubtotal();
 
       autoTable(doc, {
-        startY: 48,
-        head: [["Date", "Heure", "Catégorie", "Type", "Groupe", "Montant (FCFA)"]],
+        startY: chartBottom,
+        head: [["Date", "Heure", "Catégorie", "Type", "Montant (FCFA)"]],
         body: rows,
         styles: { fontSize: 8, cellPadding: 2.5 },
         headStyles: { fillColor: [26, 43, 76], textColor: 255, fontStyle: "bold" },
         alternateRowStyles: { fillColor: [245, 245, 245] },
-        columnStyles: { 5: { halign: "right" } },
+        columnStyles: { 4: { halign: "right" } },
         margin: { left: 14, right: 14 },
+        didParseCell: (data: any) => {
+          const first = data.row.raw?.[0];
+          if (first && typeof first === "object" && first.content && String(first.content).startsWith("▸")) {
+            data.cell.styles.fillColor = [27, 38, 32];
+            data.cell.styles.textColor = [201, 162, 39];
+            data.cell.styles.fontStyle = "bold";
+          }
+        },
       });
 
       doc.save(`grand-livre_${filters.from}_${filters.to}.pdf`);
@@ -2840,11 +3197,12 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
   if (filters.group !== "Tous") filterDescriptions.push(`groupe : ${filters.group}`);
   if (filters.scope !== "Tous") filterDescriptions.push(`portée : ${filters.scope}`);
   if (filters.category !== "Toutes") filterDescriptions.push(`catégorie : ${filters.category}`);
+  if (filters.subcategory && filters.subcategory !== "Toutes") filterDescriptions.push(`sous-catégorie : ${filters.subcategory}`);
   if (filters.search) filterDescriptions.push(`recherche : "${filters.search}"`);
   const hasExtraFilters = filters.type !== "Tous" || filters.group !== "Tous" || filters.scope !== "Tous" || filters.category !== "Toutes" || !!filters.search;
 
   const applyPreset = (from: string, to: string) => {
-    setFilters({ ...filters, from, to, type: "Tous", group: "Tous", scope: "Tous", category: "Toutes", search: "" });
+    setFilters({ ...filters, from, to, type: "Tous", group: "Tous", scope: "Tous", category: "Toutes", subcategory: "Toutes", search: "" });
   };
   const presetThisMonth = () => { const k = dateToMonthKey(todayISO()); applyPreset(k, k); };
   const presetLast3Months = () => {
@@ -2888,8 +3246,8 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       <Panel title="Que contient chaque format ?" subtitle="Choisis selon ce que tu veux en faire">
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {[
-            { icon: FileSpreadsheet, color: COLOR.emeraldSoft, name: "Excel (.xlsx)", desc: "4 feuilles : Résumé, Transactions détaillées, Par mois, Par catégorie. Idéal pour retravailler les chiffres ou faire tes propres tableaux croisés." },
-            { icon: FileText, color: COLOR.goldSoft, name: "PDF", desc: "Un document prêt à partager ou imprimer : en-tête avec les chiffres clés, puis le détail des transactions en tableau. Ne se modifie pas." },
+            { icon: FileSpreadsheet, color: COLOR.emeraldSoft, name: "Excel (.xlsx)", desc: "4 feuilles mises en couleur : Résumé, Transactions (avec sous-total automatique à chaque changement de mois), Par mois, Par catégorie (regroupée par groupe avec sous-totaux). Idéal pour retravailler les chiffres." },
+            { icon: FileText, color: COLOR.goldSoft, name: "PDF", desc: "Document coloré prêt à partager : bandeau d'en-tête, cartes KPI, un graphique en barres Revenus/Dépenses par mois dessiné directement, puis le tableau détaillé avec sous-totaux mensuels en surbrillance dorée." },
             { icon: Download, color: COLOR.inkMuted, name: "CSV", desc: "Liste brute des transactions, une ligne par opération. Le format le plus simple à réimporter dans un autre outil ou tableur." },
             { icon: Printer, color: COLOR.inkMuted, name: "Imprimer", desc: "Utilise la fenêtre d'impression de ton navigateur — pratique pour un aperçu rapide papier ou un export PDF alternatif." },
           ].map((f) => (
@@ -3153,7 +3511,8 @@ function JournalierTab({ filtered }: { filtered: any[] }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <Panel title="Solde net par jour" subtitle={`${rows.length} jour(s) avec activité dans la période filtrée`}>
+      <PanelWithHelp title="Solde net par jour" subtitle={`${rows.length} jour(s) avec activité dans la période filtrée`}
+        explain="Chaque point représente le solde (revenus−dépenses) d'un seul jour, pas un cumul. Les pointes vers le haut sont des jours de rentrée d'argent (salaire, loyer perçu…) ; les creux vers le bas sont des jours de grosse dépense. La ligne de zéro sépare les jours excédentaires des jours déficitaires.">
         {rows.length ? (
           <ResponsiveContainer width="100%" height={260}>
             <LineChart data={rows} margin={{ left: 0, right: 10, top: 10 }}>
@@ -3171,7 +3530,7 @@ function JournalierTab({ filtered }: { filtered: any[] }) {
             <Info size={12} /> Période large — restreignez le filtre "Du mois / Au mois" pour une lecture jour par jour plus lisible.
           </div>
         )}
-      </Panel>
+      </PanelWithHelp>
       <Panel title="Tableau journalier" subtitle={`${rows.length} jour(s)`}>
         <div style={{ overflowX: "auto", maxHeight: 480, overflowY: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -3395,7 +3754,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -3405,6 +3764,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "apercu", label: "Aperçu", icon: LayoutDashboard },
     { id: "flux", label: "Flux & Calendrier", icon: Workflow },
     { id: "comparatif", label: "Comparatif annuel", icon: BarChart3 },
+    { id: "comparateur", label: "Comparateur", icon: GitCompare },
   ]},
   { section: "Budget", items: [
     { id: "mensuel", label: "Rapport mensuel", icon: CalendarRange },
@@ -3492,7 +3852,7 @@ export default function GrandLivre() {
 
   const defaultFilters: Filters = {
     from: allMonths[0] || "2024_6", to: allMonths[allMonths.length - 1] || "2026_8",
-    type: "Tous", group: "Tous", category: "Toutes", search: "", scope: "Tous",
+    type: "Tous", group: "Tous", category: "Toutes", subcategory: "Toutes", search: "", scope: "Tous",
   };
   const [filters, setFilters] = useState<Filters>(defaultFilters);
 
@@ -3529,7 +3889,8 @@ export default function GrandLivre() {
       if (filters.group !== "Tous" && t.group !== filters.group) return false;
       if (filters.scope !== "Tous" && t.scope !== filters.scope) return false;
       if (filters.category !== "Toutes" && t.category !== filters.category) return false;
-      if (filters.search && !normalizeText(t.category).includes(normalizeText(filters.search))) return false;
+      if (filters.subcategory && filters.subcategory !== "Toutes" && t.subcategory !== filters.subcategory) return false;
+      if (filters.search && !normalizeText(t.category).includes(normalizeText(filters.search)) && !normalizeText(t.subcategory || "").includes(normalizeText(filters.search))) return false;
       return true;
     });
   }, [txWithGroup, filters]);
@@ -3715,6 +4076,7 @@ export default function GrandLivre() {
           {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
+          {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
