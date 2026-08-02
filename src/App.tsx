@@ -107,6 +107,41 @@ async function pushRemoteState(syncCode: string, data: any): Promise<boolean> {
   } catch { return false; }
 }
 
+// Abonnement en temps réel (WebSocket) aux changements de la ligne sync_code, via
+// @supabase/supabase-js chargé dynamiquement — n'existe pas dans l'aperçu Claude (fallback
+// silencieux vers le mode "pull au chargement + push différé" déjà en place, qui continue
+// de fonctionner seul). Retourne une fonction de désabonnement, ou null si indisponible.
+let realtimeClientPromise: Promise<any> | null = null;
+async function getRealtimeClient(): Promise<any | null> {
+  if (!SYNC_ENABLED) return null;
+  if (!realtimeClientPromise) {
+    realtimeClientPromise = (async () => {
+      try {
+        const mod: any = await import(/* @vite-ignore */ "@supabase/supabase-js");
+        return mod.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return realtimeClientPromise;
+}
+async function subscribeRealtime(syncCode: string, onRemoteChange: () => void): Promise<(() => void) | null> {
+  const client = await getRealtimeClient();
+  if (!client || !syncCode) return null;
+  try {
+    const channel = client
+      .channel(`app_state_${syncCode}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: `sync_code=eq.${syncCode}` }, () => {
+        onRemoteChange();
+      })
+      .subscribe();
+    return () => { try { client.removeChannel(channel); } catch {} };
+  } catch {
+    return null;
+  }
+}
+
 
 // ============================================================
 // TYPES
@@ -383,18 +418,18 @@ function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boo
   const [state, setState] = useState<T>(initial);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw) setState(JSON.parse(raw));
-    } catch {}
-    setLoaded(true);
+    (async () => {
+      try {
+        const res = await window.storage?.get(key, false);
+        if (res) setState(JSON.parse(res.value));
+      } catch {}
+      setLoaded(true);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     if (!loaded) return;
-    try {
-      localStorage.setItem(key, JSON.stringify(state));
-    } catch {}
+    window.storage?.set(key, JSON.stringify(state), false).catch(() => {});
   }, [state, loaded]);
   return [state, setState, loaded];
 }
@@ -2096,9 +2131,9 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // ============================================================
 // SAUVEGARDE & RESTAURATION
 // ============================================================
-function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync }: {
+function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected }: {
   getSnapshot: () => any; restore: (data: any) => void; syncCode: string; setSyncCode: (c: string) => void;
-  syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void;
+  syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void; realtimeConnected: boolean;
 }) {
   const [status, setStatus] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -2158,9 +2193,20 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
           </div>
         ) : (
           <>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: statusLabel[syncStatus].color, display: "inline-block" }} />
               <span style={{ fontSize: 12.5, color: statusLabel[syncStatus].color }}>{statusLabel[syncStatus].text}</span>
+              {syncCode && (
+                <span style={{
+                  display: "flex", alignItems: "center", gap: 5, fontSize: 11, padding: "3px 9px", borderRadius: 20,
+                  border: `1px solid ${realtimeConnected ? COLOR.emerald : COLOR.hairline}`,
+                  color: realtimeConnected ? COLOR.emeraldSoft : COLOR.inkMuted,
+                  background: realtimeConnected ? "rgba(63,156,122,0.1)" : "transparent",
+                }}>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: realtimeConnected ? COLOR.emerald : COLOR.inkMuted }} />
+                  {realtimeConnected ? "Temps réel actif" : "Temps réel indisponible"}
+                </span>
+              )}
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 220 }}>
@@ -2184,6 +2230,16 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
                   <RotateCcw size={12} /> Forcer la synchronisation
                 </button>
                 <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Saisis exactement le même code sur ton autre appareil pour le relier.</span>
+              </div>
+            )}
+            {syncCode && !realtimeConnected && (
+              <div style={{ marginTop: 10, fontSize: 11.5, color: COLOR.inkMuted, display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <Info size={13} color={COLOR.gold} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>
+                  Sans temps réel actif, les mises à jour d'un autre appareil apparaissent quand même — juste au prochain
+                  chargement de la page, pas instantanément. Pour activer le temps réel : dans Supabase, <b>Database → Replication</b>,
+                  active la réplication pour la table <code style={{ color: COLOR.goldSoft }}>app_state</code>.
+                </span>
               </div>
             )}
             {syncCode && (
@@ -3071,6 +3127,7 @@ export default function GrandLivre() {
   }, [syncCodeLoaded]);
   const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "synced" | "error" | "disabled">(SYNC_ENABLED ? "idle" : "disabled");
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
   const skipNextPush = useRef(false);
   const pushTimer = useRef<any>(null);
 
@@ -3130,31 +3187,52 @@ export default function GrandLivre() {
 
   const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded;
 
+  // Tire l'état distant et hydrate les états locaux. Réutilisé au chargement,
+  // sur demande (forcer la sync) et à chaque notification temps réel.
+  const pullAndHydrate = React.useCallback(async (code: string) => {
+    setSyncStatus("syncing");
+    const remote = await fetchRemoteState(code);
+    if (remote) {
+      skipNextPush.current = true;
+      if (remote.transactions) setTransactions(remote.transactions);
+      if (remote.categoryGroups) setCategoryGroups(remote.categoryGroups);
+      if (remote.categoryScope) setCategoryScope(remote.categoryScope);
+      if (remote.rules) setRules(remote.rules);
+      if (remote.loans) setLoans(remote.loans);
+      if (typeof remote.envelopeCap === "number") setEnvelopeCap(remote.envelopeCap);
+      if (remote.accounts) setAccounts(remote.accounts);
+      if (remote.budgets) setBudgets(remote.budgets);
+      if (remote.goals) setGoals(remote.goals);
+      if (remote.recurring) setRecurring(remote.recurring);
+      setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+    }
+    setSyncStatus("synced");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Tire l'état distant au chargement si un code de synchronisation est défini.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
     let cancelled = false;
-    (async () => {
-      setSyncStatus("syncing");
-      const remote = await fetchRemoteState(syncCode);
-      if (cancelled) return;
-      if (remote) {
-        skipNextPush.current = true;
-        if (remote.transactions) setTransactions(remote.transactions);
-        if (remote.categoryGroups) setCategoryGroups(remote.categoryGroups);
-        if (remote.categoryScope) setCategoryScope(remote.categoryScope);
-        if (remote.rules) setRules(remote.rules);
-        if (remote.loans) setLoans(remote.loans);
-        if (typeof remote.envelopeCap === "number") setEnvelopeCap(remote.envelopeCap);
-        if (remote.accounts) setAccounts(remote.accounts);
-        if (remote.budgets) setBudgets(remote.budgets);
-        if (remote.goals) setGoals(remote.goals);
-        if (remote.recurring) setRecurring(remote.recurring);
-        setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-      }
-      setSyncStatus("synced");
-    })();
+    (async () => { if (!cancelled) await pullAndHydrate(syncCode); })();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allLoaded, syncCode]);
+
+  // Abonnement temps réel : dès qu'un autre appareil modifie la ligne distante, on la
+  // retire immédiatement — sans avoir à recharger la page. Repli silencieux si le canal
+  // temps réel n'est pas disponible (ex: aperçu Claude) ; le pull différé continue seul.
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) { setRealtimeConnected(false); return; }
+    let unsub: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      const fn = await subscribeRealtime(syncCode, () => { pullAndHydrate(syncCode); });
+      if (cancelled) { fn?.(); return; }
+      unsub = fn;
+      setRealtimeConnected(!!fn);
+    })();
+    return () => { cancelled = true; unsub?.(); setRealtimeConnected(false); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
@@ -3329,6 +3407,7 @@ export default function GrandLivre() {
               setSyncCode={setSyncCode}
               syncStatus={syncStatus}
               lastSyncedAt={lastSyncedAt}
+              realtimeConnected={realtimeConnected}
               onForceSync={async () => {
                 if (!syncCode) return;
                 setSyncStatus("syncing");
