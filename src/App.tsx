@@ -163,6 +163,7 @@ type LoanStatus = "En attente" | "Remboursé";
 interface Transaction {
   id: string;
   date: string; // "YYYY-MM-DD" — le mois est dérivé automatiquement pour tous les rapports
+  time?: string; // "HH:MM" — heure d'enregistrement, optionnelle (absente sur les données historiques)
   category: string;
   subcategory?: string;
   type: TxType;
@@ -361,6 +362,7 @@ const uid = (p = "t") => `${p}${Date.now()}${Math.floor(Math.random() * 10000)}`
 const mean = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
 function pad2(n: number) { return n < 10 ? `0${n}` : `${n}`; }
 function todayISO() { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+function nowTime() { const d = new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
 function dateToMonthKey(date: string) {
   const [y, m] = date.split("-");
   return `${parseInt(y, 10)}_${parseInt(m, 10)}`;
@@ -742,6 +744,34 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
             <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher catégorie ou sous-catégorie…"
               style={{ width: "100%", background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "11px 14px 11px 34px", color: COLOR.ink, fontSize: 14, boxSizing: "border-box", outline: "none" }} />
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// CONFIRMATION AVANT SUPPRESSION
+// ============================================================
+function ConfirmDialog({ open, title, message, onConfirm, onCancel, confirmLabel = "Supprimer" }: {
+  open: boolean; title: string; message: string; onConfirm: () => void; onCancel: () => void; confirmLabel?: string;
+}) {
+  if (!open) return null;
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, zIndex: 500, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 360, background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <AlertTriangle size={20} color={COLOR.claySoft} />
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>{title}</div>
+        </div>
+        <div style={{ fontSize: 13.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 22 }}>{message}</div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onCancel} style={{ flex: 1, padding: "11px 0", borderRadius: 10, border: `1px solid ${COLOR.hairline}`, background: "transparent", color: COLOR.inkMuted, fontSize: 13.5, cursor: "pointer" }}>
+            Annuler
+          </button>
+          <button onClick={onConfirm} style={{ flex: 1, padding: "11px 0", borderRadius: 10, border: "none", background: COLOR.clay, color: COLOR.bg, fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+            {confirmLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -2136,7 +2166,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
   const remove = (id: string) => setRecurring(recurring.filter((r) => r.id !== id));
 
   const enregistrer = (r: RecurringTemplate) => {
-    setTransactions([...transactions, { id: uid(), date: r.nextDate, category: r.category, type: r.type, amount: r.amount, account: r.account, payee: r.payee }]);
+    setTransactions([...transactions, { id: uid(), date: r.nextDate, time: nowTime(), category: r.category, type: r.type, amount: r.amount, account: r.account, payee: r.payee }]);
     setRecurring(recurring.map((x) => (x.id === r.id ? { ...x, nextDate: addInterval(x.nextDate, x.frequency) } : x)));
   };
 
@@ -2368,7 +2398,7 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
 // JOURNAL TAB (CRUD + import texte + règles de catégorisation)
 // ============================================================
 function emptyForm(transactions: Transaction[], accounts: Account[]): Omit<Transaction, "id"> {
-  return { date: todayISO(), category: categoriesForType(transactions, "Dépense")[0] || "Cadeaux", type: "Dépense", amount: 0, account: accounts[0]?.name };
+  return { date: todayISO(), time: nowTime(), category: categoriesForType(transactions, "Dépense")[0] || "Cadeaux", type: "Dépense", amount: 0, account: accounts[0]?.name };
 }
 
 function JournalTab({ filtered, allCategories, categoryGroups, transactions, setTransactions, rules, setRules, accounts }: {
@@ -2388,6 +2418,8 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   const [showRules, setShowRules] = useState(false);
   const [newRule, setNewRule] = useState({ keyword: "", group: "Non classifié" as Group });
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [bulkCategory, setBulkCategory] = useState("");
   const pageSize = 25;
 
@@ -2414,7 +2446,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
     setTransactions([...transactions, { ...form, id: uid() }]);
     setForm(emptyForm(transactions, accounts)); setAdding(false);
   };
-  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note, account: t.account }); };
+  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, time: t.time, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note, account: t.account }); };
   const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
@@ -2500,6 +2532,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           <div style={{ padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label><input type="date" style={inputStyle} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Heure</label><input type="time" style={{ ...inputStyle, width: 100 }} value={form.time || ""} onChange={(e) => setForm({ ...form, time: e.target.value })} /></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
                 <select style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value, subcategory: "" })}>
                   {categoriesForType(transactions, form.type).map((c) => <option key={c} value={c}>{c}</option>)}
@@ -2543,7 +2576,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
               {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
             <button onClick={bulkChangeCategory} disabled={!bulkCategory} style={{ background: bulkCategory ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: bulkCategory ? COLOR.bg : COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: bulkCategory ? "pointer" : "default" }}>Appliquer</button>
-            <button onClick={bulkDelete} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 6, color: COLOR.claySoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}><Trash2 size={12} /> Supprimer la sélection</button>
+            <button onClick={() => setConfirmBulkDelete(true)} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 6, color: COLOR.claySoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}><Trash2 size={12} /> Supprimer la sélection</button>
             <button onClick={() => setSelected(new Set())} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 11.5, cursor: "pointer" }}>Désélectionner</button>
           </div>
         )}
@@ -2571,7 +2604,10 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                     </td>
                     {isEditing && editForm ? (
                       <>
-                        <td style={{ padding: 6 }}><input type="date" style={inputStyle} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} /></td>
+                        <td style={{ padding: 6 }}>
+                          <input type="date" style={inputStyle} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} />
+                          <input type="time" style={{ ...inputStyle, marginTop: 4 }} value={editForm.time || ""} onChange={(e) => setEditForm({ ...editForm, time: e.target.value })} />
+                        </td>
                         <td style={{ padding: 6 }}>
                           <select style={inputStyle} value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value, subcategory: "" })}>
                             {categoriesForType(transactions, editForm.type).map((c) => <option key={c} value={c}>{c}</option>)}
@@ -2595,7 +2631,9 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                       </>
                     ) : (
                       <>
-                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{dateLabelFull(t.date)}</td>
+                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>
+                          {dateLabelFull(t.date)}{t.time && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.time}</div>}
+                        </td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}` }}>
                           {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
                           {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
@@ -2610,7 +2648,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                           )}
                         </td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
-                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => remove(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
                       </>
                     )}
                   </tr>
@@ -2628,6 +2666,20 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           </div>
         )}
       </Panel>
+      <ConfirmDialog
+        open={!!confirmDeleteId}
+        title="Supprimer cette transaction ?"
+        message="Cette action est définitive. Le montant ne sera plus comptabilisé nulle part dans l'app."
+        onConfirm={() => { if (confirmDeleteId) remove(confirmDeleteId); setConfirmDeleteId(null); }}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
+      <ConfirmDialog
+        open={confirmBulkDelete}
+        title={`Supprimer ${selected.size} transaction(s) ?`}
+        message="Cette action est définitive et concerne toutes les transactions actuellement sélectionnées."
+        onConfirm={() => { bulkDelete(); setConfirmBulkDelete(false); }}
+        onCancel={() => setConfirmBulkDelete(false)}
+      />
     </div>
   );
 }
@@ -2663,8 +2715,8 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
   }, [cur, prev, filtered]);
 
   const exportCSV = () => {
-    const header = "Date,Mois,Catégorie,Sous-catégorie,Type,Groupe,Compte,Montant\n";
-    const rows = filtered.map((t) => `${t.date},${monthLabel(t.month)},"${t.category}","${t.subcategory || ""}",${t.type},${t.group},"${t.account || ""}",${t.amount}`).join("\n");
+    const header = "Date,Heure,Mois,Catégorie,Sous-catégorie,Type,Groupe,Compte,Montant\n";
+    const rows = filtered.map((t) => `${t.date},${t.time || ""},${monthLabel(t.month)},"${t.category}","${t.subcategory || ""}",${t.type},${t.group},"${t.account || ""}",${t.amount}`).join("\n");
     const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -2697,13 +2749,13 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
     XLSX.utils.book_append_sheet(wb, wsSummary, "Résumé");
 
     // Feuille Transactions
-    const txHeader = ["Date", "Catégorie", "Sous-catégorie", "Type", "Groupe", "Compte", "Bénéficiaire", "Note", "Montant (FCFA)"];
+    const txHeader = ["Date", "Heure", "Catégorie", "Sous-catégorie", "Type", "Groupe", "Compte", "Bénéficiaire", "Note", "Montant (FCFA)"];
     const txRows = filtered
       .slice()
       .sort((a, b) => b.date.localeCompare(a.date))
-      .map((t) => [t.date, t.category, t.subcategory || "", t.type, t.group, t.account || "", t.payee || "", t.note || "", t.amount]);
+      .map((t) => [t.date, t.time || "", t.category, t.subcategory || "", t.type, t.group, t.account || "", t.payee || "", t.note || "", t.amount]);
     const wsTx = XLSX.utils.aoa_to_sheet([txHeader, ...txRows]);
-    wsTx["!cols"] = [{ wch: 12 }, { wch: 22 }, { wch: 18 }, { wch: 10 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 20 }, { wch: 14 }];
+    wsTx["!cols"] = [{ wch: 12 }, { wch: 8 }, { wch: 22 }, { wch: 18 }, { wch: 10 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 20 }, { wch: 14 }];
     XLSX.utils.book_append_sheet(wb, wsTx, "Transactions");
 
     // Feuille Par mois
@@ -2759,16 +2811,16 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
       const rows = filtered
         .slice()
         .sort((a, b) => b.date.localeCompare(a.date))
-        .map((t) => [dateLabelFull(t.date), t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, t.group, fmt(t.amount)]);
+        .map((t) => [dateLabelFull(t.date), t.time || "—", t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, t.group, fmt(t.amount)]);
 
       autoTable(doc, {
         startY: 48,
-        head: [["Date", "Catégorie", "Type", "Groupe", "Montant (FCFA)"]],
+        head: [["Date", "Heure", "Catégorie", "Type", "Groupe", "Montant (FCFA)"]],
         body: rows,
         styles: { fontSize: 8, cellPadding: 2.5 },
         headStyles: { fillColor: [26, 43, 76], textColor: 255, fontStyle: "bold" },
         alternateRowStyles: { fillColor: [245, 245, 245] },
-        columnStyles: { 4: { halign: "right" } },
+        columnStyles: { 5: { halign: "right" } },
         margin: { left: 14, right: 14 },
       });
 
@@ -2825,6 +2877,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
+  const [quickTime, setQuickTime] = useState(nowTime());
   const [quickCategory, setQuickCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
   const [quickSubcategory, setQuickSubcategory] = useState("");
   const [quickType, setQuickType] = useState<TxType>("Dépense");
@@ -2832,6 +2885,8 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [quickAccount, setQuickAccount] = useState(() => defaultQuickAccount(accounts));
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const today = todayISO();
   const currentMonthKey = dateToMonthKey(today);
@@ -2852,12 +2907,34 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   const quickDateEntries = withGroup.filter((t) => t.date === quickDate).sort((a, b) => b.id.localeCompare(a.id));
 
+  const resetForm = () => {
+    setQuickAmount(""); setQuickTime(nowTime()); setEditingId(null);
+  };
+
   const submit = () => {
     if (!quickCategory || !quickAmount || Number(quickAmount) <= 0) return;
-    setTransactions([...transactions, { id: uid(), date: quickDate, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined }]);
-    setQuickAmount("");
+    if (editingId) {
+      setTransactions(transactions.map((t) => t.id === editingId ? {
+        ...t, date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined,
+        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined,
+      } : t));
+    } else {
+      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined }]);
+    }
+    resetForm();
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1200);
+  };
+
+  const editEntry = (t: Transaction) => {
+    setEditingId(t.id);
+    setQuickDate(t.date);
+    setQuickTime(t.time || nowTime());
+    setQuickType(t.type);
+    setQuickCategory(t.category);
+    setQuickSubcategory(t.subcategory || "");
+    setQuickAmount(t.amount);
+    setQuickAccount(t.account || defaultQuickAccount(accounts));
   };
 
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
@@ -2881,10 +2958,16 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           return (
             <div style={{ background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.surface} 70%)`, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, overflow: "hidden" }}>
               {/* Type + Date */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 20px 6px 20px" }}>
-                <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 16px" }}>
-                  <input type="date" value={quickDate} onChange={(e) => setQuickDate(e.target.value)}
-                    style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 20px 6px 20px", flexWrap: "wrap", gap: 10 }}>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 16px" }}>
+                    <input type="date" value={quickDate} onChange={(e) => setQuickDate(e.target.value)}
+                      style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+                  </div>
+                  <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 16px" }}>
+                    <input type="time" value={quickTime} onChange={(e) => setQuickTime(e.target.value)}
+                      style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+                  </div>
                 </div>
                 <div style={{ display: "flex", gap: 10, background: COLOR.surface, borderRadius: 24, padding: 5, border: `1px solid ${COLOR.hairline}` }}>
                   <button onClick={() => { setQuickType("Dépense"); setQuickSubcategory(""); setQuickCategory(defaultQuickCategory(transactions, "Dépense")); }} title="Dépense" style={{
@@ -2932,14 +3015,21 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                 <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={quickType}
                   value={quickCategory} subvalue={quickSubcategory} onSelect={(c, s) => { setQuickCategory(c); setQuickSubcategory(s); }} />
 
+                {editingId && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, padding: "8px 12px", background: "rgba(201,162,39,0.08)", border: `1px solid ${COLOR.gold}`, borderRadius: 8 }}>
+                    <span style={{ fontSize: 12, color: COLOR.goldSoft }}>Modification d'une entrée existante</span>
+                    <button onClick={resetForm} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 11.5, cursor: "pointer", textDecoration: "underline" }}>Annuler</button>
+                  </div>
+                )}
+
                 <button onClick={submit} disabled={!quickAmount || Number(quickAmount) <= 0} style={{
-                  width: "100%", marginTop: 18, padding: "14px 0", borderRadius: 12, border: "none",
+                  width: "100%", marginTop: 12, padding: "14px 0", borderRadius: 12, border: "none",
                   background: justAdded ? COLOR.emerald : (!quickAmount || Number(quickAmount) <= 0) ? COLOR.hairline : COLOR.gold,
                   color: justAdded ? COLOR.bg : (!quickAmount || Number(quickAmount) <= 0) ? COLOR.inkMuted : COLOR.bg,
                   fontSize: 14.5, fontWeight: 700, cursor: (!quickAmount || Number(quickAmount) <= 0) ? "default" : "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.15s",
                 }}>
-                  {justAdded ? <Check size={17} /> : null} {justAdded ? "Ajouté" : "Sauvegarder"}
+                  {justAdded ? <Check size={17} /> : null} {justAdded ? (editingId ? "Mis à jour" : "Ajouté") : (editingId ? "Mettre à jour" : "Sauvegarder")}
                 </button>
               </div>
             </div>
@@ -2950,22 +3040,31 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       <Panel title={`Entrées du ${dateLabelFull(quickDate)}`} subtitle={`Revenus ${fmt(sumFor((t) => t.date === quickDate).rev)} · Dépenses ${fmt(sumFor((t) => t.date === quickDate).dep)} · Solde ${fmt(sumFor((t) => t.date === quickDate).solde)}`}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {quickDateEntries.map((t) => (
-            <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: COLOR.surfaceRaised, borderRadius: 6 }}>
+            <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: editingId === t.id ? "rgba(201,162,39,0.08)" : COLOR.surfaceRaised, border: editingId === t.id ? `1px solid ${COLOR.gold}` : "1px solid transparent", borderRadius: 6 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, width: 38 }}>{t.time}</span>}
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block" }} />
                 <span style={{ fontSize: 12.5 }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</span>
                 <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{t.type}</span>
                 {t.account && <span style={{ fontSize: 10.5, color: COLOR.slateBlueSoft }}>{t.account}</span>}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)}</span>
-                <button onClick={() => remove(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+                <button onClick={() => editEntry(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
+                <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
               </div>
             </div>
           ))}
           {!quickDateEntries.length && <EmptyState text="Aucune entrée pour cette date." />}
         </div>
       </Panel>
+      <ConfirmDialog
+        open={!!confirmDeleteId}
+        title="Supprimer cette transaction ?"
+        message="Cette action est définitive. Le montant ne sera plus comptabilisé nulle part dans l'app."
+        onConfirm={() => { if (confirmDeleteId) { remove(confirmDeleteId); if (editingId === confirmDeleteId) resetForm(); } setConfirmDeleteId(null); }}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
     </div>
   );
 }
@@ -3049,6 +3148,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 }) {
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState(todayISO());
+  const [time, setTime] = useState(nowTime());
   const [type, setType] = useState<TxType>("Dépense");
   const [category, setCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
   const [subcategory, setSubcategory] = useState("");
@@ -3060,6 +3160,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 
   useEffect(() => {
     if (open) {
+      setTime(nowTime());
       const prevHtmlOverflow = document.documentElement.style.overflow;
       const prevBodyOverflow = document.body.style.overflow;
       document.documentElement.style.overflow = "hidden";
@@ -3074,7 +3175,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
     setTransactions([...transactions, {
-      id: uid(), date, category, subcategory: subcategory || undefined, type, amount: Number(amount),
+      id: uid(), date, time, category, subcategory: subcategory || undefined, type, amount: Number(amount),
       account: account || undefined, note: note || undefined,
     }]);
     setAmount(""); setNote("");
@@ -3145,10 +3246,14 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
               <div style={{ width: 40 }} />
             </div>
 
-            {/* Date */}
-            <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+            {/* Date + heure */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 8 }}>
               <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
                 <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+                  style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+              </div>
+              <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
+                <input type="time" value={time} onChange={(e) => setTime(e.target.value)}
                   style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
               </div>
             </div>
