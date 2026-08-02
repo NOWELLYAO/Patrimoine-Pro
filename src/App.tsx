@@ -206,7 +206,7 @@ const seedBudgets: CategoryBudget[] = [
 ];
 
 const seedGoals: Goal[] = [
-  { id: "g1", name: "Valeur nette cible", target: 20000000, current: 11988196, date: "déc. 2027" },
+  { id: "g1", name: "Valeur nette cible", target: 20000000, current: 11955291, date: "déc. 2027" },
 ];
 
 const seedRecurring: RecurringTemplate[] = [
@@ -535,7 +535,7 @@ function HeatmapCalendar({ filtered }: { filtered: any[] }) {
   filtered.filter((t) => t.type === "Dépense" && t.group === "Non-productif").forEach((t) => {
     byMonth[t.month] = (byMonth[t.month] || 0) + t.amount;
   });
-  const years = ["2024", "2025", "2026"];
+  const years = Array.from(new Set(filtered.map((t) => t.date.slice(0, 4)))).sort();
   const max = Math.max(1, ...Object.values(byMonth));
 
   const cellColor = (v: number) => {
@@ -876,8 +876,8 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
 // ============================================================
 // CATÉGORIES TAB (reclassification + détection d'anomalies)
 // ============================================================
-function CategoriesTab({ filtered, categoryGroups, setCategoryGroups }: {
-  filtered: any[]; categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
+function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGroups }: {
+  filtered: any[]; categoryGroups: Record<string, Group>; resolvedGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
 }) {
   const [sortDir, setSortDir] = useState<1 | -1>(-1);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -945,8 +945,8 @@ function CategoriesTab({ filtered, categoryGroups, setCategoryGroups }: {
                   <div style={{ width: 95, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flexShrink: 0 }}>{fmt(r.value)}</div>
                   <div style={{ width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{total ? ((r.value / total) * 100).toFixed(1) : "0"}%</div>
                   {r.type === "Dépense" ? (
-                    <select value={categoryGroups[r.name] || "Non classifié"} onClick={(e) => e.stopPropagation()} onChange={(e) => setCategoryGroups({ ...categoryGroups, [r.name]: e.target.value as Group })}
-                      style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: groupColor[categoryGroups[r.name] || "Non classifié"], padding: "5px 8px", fontSize: 11.5, fontFamily: "'Inter', sans-serif", flexShrink: 0, width: 128, cursor: "pointer" }}>
+                    <select value={resolvedGroups[r.name] || "Non classifié"} onClick={(e) => e.stopPropagation()} onChange={(e) => setCategoryGroups({ ...categoryGroups, [r.name]: e.target.value as Group })}
+                      style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: groupColor[resolvedGroups[r.name] || "Non classifié"], padding: "5px 8px", fontSize: 11.5, fontFamily: "'Inter', sans-serif", flexShrink: 0, width: 128, cursor: "pointer" }}>
                       {GROUPS.map((g) => <option key={g} value={g}>{g}</option>)}
                     </select>
                   ) : <div style={{ width: 128, flexShrink: 0, fontSize: 11.5, color: COLOR.goldSoft, textAlign: "center" }}>Revenu</div>}
@@ -1019,8 +1019,11 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
 // COMPARATIF ANNUEL TAB
 // ============================================================
 function ComparatifTab({ transactions, categoryGroups }: { transactions: Transaction[]; categoryGroups: Record<string, Group> }) {
-  const years = ["2024", "2025", "2026"];
-  const monthCounts: Record<string, number> = { "2024": 7, "2025": 12, "2026": 8 };
+  const years = Array.from(new Set(transactions.map((t) => t.date.slice(0, 4)))).sort();
+  const monthCounts: Record<string, number> = {};
+  years.forEach((y) => {
+    monthCounts[y] = new Set(transactions.filter((t) => t.date.startsWith(y)).map((t) => t.date.slice(0, 7))).size || 1;
+  });
 
   const byYearCategory = useMemo(() => {
     const m: Record<string, Record<string, number>> = {};
@@ -1072,9 +1075,9 @@ function ComparatifTab({ transactions, categoryGroups }: { transactions: Transac
             <YAxis type="category" dataKey="name" tick={{ fill: COLOR.inkMuted, fontSize: 10.5 }} axisLine={false} tickLine={false} width={150} />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ fontSize: 12, color: COLOR.inkMuted }} />
-            <Bar dataKey="2024" fill={COLOR.slateBlue} radius={[0, 3, 3, 0]} />
-            <Bar dataKey="2025" fill={COLOR.gold} radius={[0, 3, 3, 0]} />
-            <Bar dataKey="2026" fill={COLOR.emerald} radius={[0, 3, 3, 0]} />
+            {years.map((y, i) => (
+              <Bar key={y} dataKey={y} fill={[COLOR.slateBlue, COLOR.gold, COLOR.emerald, COLOR.violet, COLOR.clay][i % 5]} radius={[0, 3, 3, 0]} />
+            ))}
           </BarChart>
         </ResponsiveContainer>
       </Panel>
@@ -1345,7 +1348,6 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
   const bizRev = withScope.filter((t) => t.scope === "Business" && t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const bizDep = withScope.filter((t) => t.scope === "Business" && t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const bizMargin = bizRev - bizDep;
-  const perCategories = allCategories.filter((c) => (categoryScope[c] || "Personnel") === "Business" || withScope.some((t) => t.category === c && (categoryGroups[c] === "Productif")));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -1887,7 +1889,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                   </select>
                 </div>
               )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as TxType })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as TxType, subcategory: "" })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label><input style={inputStyle} type="number" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
               <button onClick={() => setShowAdvanced((s) => !s)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 32 }}>{showAdvanced ? "− options" : "+ bénéficiaire / note"}</button>
               <button onClick={addTransaction} style={{ display: "flex", alignItems: "center", gap: 6, background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}><Save size={13} /> Enregistrer</button>
@@ -1938,8 +1940,16 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                     {isEditing && editForm ? (
                       <>
                         <td style={{ padding: 6 }}><input type="date" style={inputStyle} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} /></td>
-                        <td style={{ padding: 6 }}><input style={inputStyle} value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value })} list="cat-list" /></td>
-                        <td style={{ padding: 6 }}><select style={inputStyle} value={editForm.type} onChange={(e) => setEditForm({ ...editForm, type: e.target.value as TxType })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></td>
+                        <td style={{ padding: 6 }}>
+                          <input style={inputStyle} value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value, subcategory: "" })} list="cat-list" />
+                          {getSubcategories(editForm.type, editForm.category).length > 0 && (
+                            <select style={{ ...inputStyle, marginTop: 4 }} value={editForm.subcategory || ""} onChange={(e) => setEditForm({ ...editForm, subcategory: e.target.value })}>
+                              <option value="">— sous-catégorie —</option>
+                              {getSubcategories(editForm.type, editForm.category).map((s) => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                          )}
+                        </td>
+                        <td style={{ padding: 6 }}><select style={inputStyle} value={editForm.type} onChange={(e) => setEditForm({ ...editForm, type: e.target.value as TxType, subcategory: "" })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></td>
                         <td style={{ padding: 6, fontSize: 12, color: COLOR.inkMuted }}>{editForm.type === "Revenu" ? "Revenu" : (categoryGroups[editForm.category] || "Non classifié")}</td>
                         <td style={{ padding: 6 }}><input style={{ ...inputStyle, textAlign: "right" }} type="number" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} /></td>
                         <td style={{ padding: 6, whiteSpace: "nowrap" }}><button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button><button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button></td>
@@ -2102,7 +2112,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label>
             <div style={{ display: "flex", gap: 6 }}>
               {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
-                <button key={ty} onClick={() => setQuickType(ty)} style={{
+                <button key={ty} onClick={() => { setQuickType(ty); setQuickSubcategory(""); }} style={{
                   padding: "8px 16px", borderRadius: 6, fontSize: 12.5, cursor: "pointer",
                   border: `1px solid ${quickType === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
                   background: quickType === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
@@ -2346,7 +2356,7 @@ export default function GrandLivre() {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
   }
 
-  const lastNW = liveNetWorthSeries(accounts)[liveNetWorthSeries(accounts).length - 1][1];
+  const lastNW = (() => { const s = liveNetWorthSeries(accounts); return s[s.length - 1][1]; })();
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: "flex" }}>
@@ -2411,7 +2421,7 @@ export default function GrandLivre() {
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
-          {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} setCategoryGroups={setCategoryGroups} />}
+          {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
           {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
           {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} />}
