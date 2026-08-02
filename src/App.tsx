@@ -2687,7 +2687,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
 // ============================================================
 // RAPPORTS & EXPORT TAB
 // ============================================================
-function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters }) {
+function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any[]; filters: Filters; setFilters: (f: Filters) => void; allMonths: string[] }) {
   const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
@@ -2832,11 +2832,78 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
     }
   };
 
+  const tauxEpargne = totalRevenus > 0 ? (solde / totalRevenus) * 100 : 0;
+
+  const filterDescriptions: string[] = [];
+  filterDescriptions.push(`du ${monthLabel(filters.from)} au ${monthLabel(filters.to)}`);
+  if (filters.type !== "Tous") filterDescriptions.push(`type : ${filters.type}`);
+  if (filters.group !== "Tous") filterDescriptions.push(`groupe : ${filters.group}`);
+  if (filters.scope !== "Tous") filterDescriptions.push(`portée : ${filters.scope}`);
+  if (filters.category !== "Toutes") filterDescriptions.push(`catégorie : ${filters.category}`);
+  if (filters.search) filterDescriptions.push(`recherche : "${filters.search}"`);
+  const hasExtraFilters = filters.type !== "Tous" || filters.group !== "Tous" || filters.scope !== "Tous" || filters.category !== "Toutes" || !!filters.search;
+
+  const applyPreset = (from: string, to: string) => {
+    setFilters({ ...filters, from, to, type: "Tous", group: "Tous", scope: "Tous", category: "Toutes", search: "" });
+  };
+  const presetThisMonth = () => { const k = dateToMonthKey(todayISO()); applyPreset(k, k); };
+  const presetLast3Months = () => {
+    const cur = monthSortKey(dateToMonthKey(todayISO()));
+    const from = allMonths.find((m) => monthSortKey(m) >= cur - 2) || allMonths[0];
+    applyPreset(from || dateToMonthKey(todayISO()), dateToMonthKey(todayISO()));
+  };
+  const presetThisYear = () => {
+    const year = todayISO().slice(0, 4);
+    const monthsThisYear = allMonths.filter((m) => m.startsWith(year));
+    if (monthsThisYear.length) applyPreset(monthsThisYear[0], monthsThisYear[monthsThisYear.length - 1]);
+  };
+  const presetAll = () => { if (allMonths.length) applyPreset(allMonths[0], allMonths[allMonths.length - 1]); };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <Panel title="Ce que couvre ce rapport" subtitle="Basé exactement sur les filtres actifs en haut de l'écran">
+        <div style={{ fontSize: 13, color: COLOR.ink, lineHeight: 1.7, marginBottom: 16 }}>
+          Ce rapport et tous les exports ci-dessous portent sur <b>{filtered.length} transaction(s)</b> {filterDescriptions.join(" · ")}.
+          {!hasExtraFilters && " Aucun filtre restrictif (type, groupe, catégorie) n'est actif au-delà de la période — l'export couvre toutes les données de cet intervalle."}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={presetThisMonth} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 20, color: COLOR.inkMuted, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>Mois en cours</button>
+          <button onClick={presetLast3Months} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 20, color: COLOR.inkMuted, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>3 derniers mois</button>
+          <button onClick={presetThisYear} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 20, color: COLOR.inkMuted, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>Année en cours</button>
+          <button onClick={presetAll} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 20, color: COLOR.inkMuted, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>Tout l'historique</button>
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Kpi label="Revenus (sélection)" value={fmt(totalRevenus)} tone={COLOR.emeraldSoft} icon={TrendingUp} />
+        <Kpi label="Dépenses (sélection)" value={fmt(totalDepenses)} tone={COLOR.claySoft} icon={TrendingDown} />
+        <Kpi label="Solde" value={fmt(solde)} tone={solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
+        <Kpi label="Taux d'épargne" value={tauxEpargne.toFixed(1)} suffix="%" tone={COLOR.gold} icon={Target} />
+      </div>
+
       <Panel title="Résumé automatique" subtitle="Généré à partir de la période filtrée" right={<Sparkles size={16} color={COLOR.goldSoft} />}>
         <p style={{ fontSize: 13.5, lineHeight: 1.7, color: COLOR.ink, margin: 0 }}>{summary}</p>
       </Panel>
+
+      <Panel title="Que contient chaque format ?" subtitle="Choisis selon ce que tu veux en faire">
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[
+            { icon: FileSpreadsheet, color: COLOR.emeraldSoft, name: "Excel (.xlsx)", desc: "4 feuilles : Résumé, Transactions détaillées, Par mois, Par catégorie. Idéal pour retravailler les chiffres ou faire tes propres tableaux croisés." },
+            { icon: FileText, color: COLOR.goldSoft, name: "PDF", desc: "Un document prêt à partager ou imprimer : en-tête avec les chiffres clés, puis le détail des transactions en tableau. Ne se modifie pas." },
+            { icon: Download, color: COLOR.inkMuted, name: "CSV", desc: "Liste brute des transactions, une ligne par opération. Le format le plus simple à réimporter dans un autre outil ou tableur." },
+            { icon: Printer, color: COLOR.inkMuted, name: "Imprimer", desc: "Utilise la fenêtre d'impression de ton navigateur — pratique pour un aperçu rapide papier ou un export PDF alternatif." },
+          ].map((f) => (
+            <div key={f.name} style={{ display: "flex", gap: 12, padding: "10px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <f.icon size={16} color={f.color} style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, marginBottom: 2 }}>{f.name}</div>
+                <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.5 }}>{f.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
       <Panel title="Exporter le rapport filtré" subtitle={`${filtered.length} transaction(s) dans la sélection actuelle`}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <button onClick={exportExcel} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
@@ -3668,7 +3735,7 @@ export default function GrandLivre() {
           {tab === "payees" && <PayeesTab transactions={transactions} />}
           {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} />}
           {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} accounts={accounts} />}
-          {tab === "export" && <ExportTab filtered={filtered} filters={filters} />}
+          {tab === "export" && <ExportTab filtered={filtered} filters={filters} setFilters={setFilters} allMonths={allMonths} />}
           {tab === "sauvegarde" && (
             <SauvegardeTab
               getSnapshot={() => ({
