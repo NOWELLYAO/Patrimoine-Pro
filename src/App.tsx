@@ -68,7 +68,7 @@ interface Account {
   id: string;
   name: string;
   kind: "Espèces" | "Banque" | "Mobile Money" | "Carte de crédit" | "Autre";
-  balance: number;
+  openingBalance: number; // solde au moment où le suivi dans l'app a commencé
 }
 interface CategoryBudget {
   id: string;
@@ -175,10 +175,25 @@ const netWorthRaw: [string, number][] = [
   ["2026_5", 6722858], ["2026_6", 10048723], ["2026_7", 11992195], ["2026_8", 11988196],
 ];
 
+// Solde réel d'un compte = solde de départ + mouvements des transactions qui lui sont liées.
+// Les transactions sans compte assigné (données historiques importées) n'affectent aucun
+// solde, puisqu'elles sont déjà reflétées dans le solde de départ au moment du suivi.
+function accountBalance(acc: Account, transactions: Transaction[]): number {
+  let net = 0;
+  transactions.forEach((t) => {
+    if (t.account !== acc.name) return;
+    net += t.type === "Revenu" ? t.amount : -t.amount;
+  });
+  return acc.openingBalance + net;
+}
+function totalAccountsBalance(accounts: Account[], transactions: Transaction[]): number {
+  return accounts.reduce((a, acc) => a + accountBalance(acc, transactions), 0);
+}
+
 // Remplace (ou ajoute) le dernier point par le total réel des comptes — la valeur nette
 // affichée reflète alors l'état actuel des comptes plutôt qu'un relevé historique figé.
-function liveNetWorthSeries(accounts: Account[]): [string, number][] {
-  const total = accounts.reduce((a, acc) => a + acc.balance, 0);
+function liveNetWorthSeries(accounts: Account[], transactions: Transaction[]): [string, number][] {
+  const total = totalAccountsBalance(accounts, transactions);
   const curKey = dateToMonthKey(todayISO());
   const lastKey = netWorthRaw[netWorthRaw.length - 1][0];
   if (lastKey === curKey) return [...netWorthRaw.slice(0, -1), [lastKey, total]];
@@ -190,13 +205,13 @@ const seedLoans: Loan[] = [
 ];
 
 const seedAccounts: Account[] = [
-  { id: "a1", name: "SIB", kind: "Banque", balance: 1578.50 },
-  { id: "a2", name: "PETTY CASH", kind: "Banque", balance: 6176159 },
-  { id: "a3", name: "Dépôt LOYER", kind: "Banque", balance: 184164 },
-  { id: "a4", name: "Revenus MAZDA", kind: "Banque", balance: 4162759.50 },
-  { id: "a5", name: "SALAIRE", kind: "Banque", balance: 1099559 },
-  { id: "a6", name: "SGO", kind: "Banque", balance: -463429 },
-  { id: "a7", name: "PUMP", kind: "Espèces", balance: 794500 },
+  { id: "a1", name: "SIB", kind: "Banque", openingBalance: 1578.50 },
+  { id: "a2", name: "PETTY CASH", kind: "Banque", openingBalance: 6176159 },
+  { id: "a3", name: "Dépôt LOYER", kind: "Banque", openingBalance: 184164 },
+  { id: "a4", name: "Revenus MAZDA", kind: "Banque", openingBalance: 4162759.50 },
+  { id: "a5", name: "SALAIRE", kind: "Banque", openingBalance: 1099559 },
+  { id: "a6", name: "SGO", kind: "Banque", openingBalance: -463429 },
+  { id: "a7", name: "PUMP", kind: "Espèces", openingBalance: 794500 },
 ];
 
 const seedBudgets: CategoryBudget[] = [
@@ -591,7 +606,7 @@ function HeatmapCalendar({ filtered }: { filtered: any[] }) {
 // ============================================================
 // APERÇU TAB (KPIs + valeur nette + revenu/dépense + groupes + santé + comparaison)
 // ============================================================
-function ApercuTab({ filtered, filters, accounts }: { filtered: any[]; filters: Filters; accounts: Account[] }) {
+function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[] }) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const solde = totalRevenus - totalDepenses;
@@ -618,7 +633,7 @@ function ApercuTab({ filtered, filters, accounts }: { filtered: any[]; filters: 
     return Object.entries(m).map(([name, value]) => ({ name, value }));
   }, [filtered]);
 
-  const nwFiltered = liveNetWorthSeries(accounts).filter(([m]) => {
+  const nwFiltered = liveNetWorthSeries(accounts, transactions).filter(([m]) => {
     const k = monthSortKey(m);
     return k >= monthSortKey(filters.from) && k <= monthSortKey(filters.to);
   }).map(([m, v]) => ({ mois: monthLabel(m), valeur: v }));
@@ -1173,7 +1188,7 @@ function EnveloppesTab({ filtered, cap, setCap }: { filtered: any[]; cap: number
 // ============================================================
 // SIMULATEUR "ET SI"
 // ============================================================
-function SimulateurTab({ filtered, accounts }: { filtered: any[]; accounts: Account[] }) {
+function SimulateurTab({ filtered, accounts, transactions }: { filtered: any[]; accounts: Account[]; transactions: Transaction[] }) {
   const nonProdCats = useMemo(() => {
     const m: Record<string, number> = {};
     filtered.filter((t) => t.type === "Dépense" && t.group === "Non-productif").forEach((t) => { m[t.category] = (m[t.category] || 0) + t.amount; });
@@ -1200,7 +1215,7 @@ function SimulateurTab({ filtered, accounts }: { filtered: any[]; accounts: Acco
   const monthlySaving = savings / monthsInRange;
 
   const projection = useMemo(() => {
-    const series = liveNetWorthSeries(accounts);
+    const series = liveNetWorthSeries(accounts, transactions);
     const last = series[series.length - 1][1];
     return [0, 6, 12, 24].map((n) => ({ mois: n === 0 ? "aujourd'hui" : `+${n}m`, sansAction: last + (n * (projectNetWorth(1, series).avgDelta)), avecAction: last + (n * (projectNetWorth(1, series).avgDelta + monthlySaving)) }));
   }, [monthlySaving, accounts]);
@@ -1253,9 +1268,9 @@ function SimulateurTab({ filtered, accounts }: { filtered: any[]; accounts: Acco
 // ============================================================
 // PROJECTION TAB CONTENT (utilisé dans Aperçu section additionnelle — intégré ici pour Simulateur avancé)
 // ============================================================
-function ProjectionPanel({ accounts }: { accounts: Account[] }) {
+function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; transactions: Transaction[] }) {
   const [months, setMonths] = useState(12);
-  const { points } = projectNetWorth(months, liveNetWorthSeries(accounts));
+  const { points } = projectNetWorth(months, liveNetWorthSeries(accounts, transactions));
   return (
     <Panel title="Projection de valeur nette" subtitle={`Basée sur la tendance des 6 derniers relevés — bande optimiste/pessimiste (±1 écart-type)`}
       right={
@@ -1288,10 +1303,10 @@ function ProjectionPanel({ accounts }: { accounts: Account[] }) {
 // ============================================================
 // OBJECTIF D'ÉPARGNE
 // ============================================================
-function GoalsPanel({ goals, setGoals, accounts }: { goals: Goal[]; setGoals: (g: Goal[]) => void; accounts: Account[] }) {
+function GoalsPanel({ goals, setGoals, accounts, transactions }: { goals: Goal[]; setGoals: (g: Goal[]) => void; accounts: Account[]; transactions: Transaction[] }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Goal, "id">>({ name: "", target: 1000000, current: 0, date: "" });
-  const { avgDelta } = projectNetWorth(1, liveNetWorthSeries(accounts));
+  const { avgDelta } = projectNetWorth(1, liveNetWorthSeries(accounts, transactions));
 
   const add = () => { if (!form.name || form.target <= 0) return; setGoals([...goals, { ...form, id: uid("g") }]); setForm({ name: "", target: 1000000, current: 0, date: "" }); setAdding(false); };
   const update = (id: string, patch: Partial<Goal>) => setGoals(goals.map((g) => (g.id === id ? { ...g, ...patch } : g)));
@@ -1444,20 +1459,21 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
 // ============================================================
 // COMPTES (ACCOUNTS)
 // ============================================================
-function ComptesTab({ accounts, setAccounts }: { accounts: Account[]; setAccounts: (a: Account[]) => void }) {
+function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account[]; setAccounts: (a: Account[]) => void; transactions: Transaction[] }) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<Omit<Account, "id">>({ name: "", kind: "Banque", balance: 0 });
+  const [form, setForm] = useState<Omit<Account, "id">>({ name: "", kind: "Banque", openingBalance: 0 });
+  const [editingOpening, setEditingOpening] = useState<string | null>(null);
   const kinds: Account["kind"][] = ["Espèces", "Banque", "Mobile Money", "Carte de crédit", "Autre"];
 
-  const add = () => { if (!form.name) return; setAccounts([...accounts, { ...form, id: uid("a") }]); setForm({ name: "", kind: "Banque", balance: 0 }); setAdding(false); };
+  const add = () => { if (!form.name) return; setAccounts([...accounts, { ...form, id: uid("a") }]); setForm({ name: "", kind: "Banque", openingBalance: 0 }); setAdding(false); };
   const update = (id: string, patch: Partial<Account>) => setAccounts(accounts.map((a) => (a.id === id ? { ...a, ...patch } : a)));
   const remove = (id: string) => setAccounts(accounts.filter((a) => a.id !== id));
-  const total = accounts.reduce((a, acc) => a + acc.balance, 0);
+  const total = totalAccountsBalance(accounts, transactions);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <Kpi label="Total des comptes" value={fmt(total)} tone={COLOR.goldSoft} icon={Wallet} />
-      <Panel title="Comptes" subtitle="Répartis ton solde par compte — espèces, banque, mobile money…"
+      <Kpi label="Total des comptes (temps réel)" value={fmt(total)} tone={COLOR.goldSoft} icon={Wallet} />
+      <Panel title="Comptes" subtitle="Le solde de chaque compte se met à jour automatiquement dès qu'une transaction lui est liée"
         right={
           <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
             {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Ajouter un compte"}
@@ -1467,20 +1483,34 @@ function ComptesTab({ accounts, setAccounts }: { accounts: Account[]; setAccount
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nom</label><input style={{ ...inputStyle, width: 170 }} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={{ ...inputStyle, width: 150 }} value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as Account["kind"] })}>{kinds.map((k) => <option key={k} value={k}>{k}</option>)}</select></div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Solde (FCFA)</label><input type="number" style={{ ...inputStyle, width: 150 }} value={form.balance} onChange={(e) => setForm({ ...form, balance: Number(e.target.value) || 0 })} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Solde de départ (FCFA)</label><input type="number" style={{ ...inputStyle, width: 160 }} value={form.openingBalance} onChange={(e) => setForm({ ...form, openingBalance: Number(e.target.value) || 0 })} /></div>
             <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
           </div>
         )}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {accounts.map((a) => (
-            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
-              <div><div style={{ fontSize: 13 }}>{a.name}</div><div style={{ fontSize: 11, color: COLOR.inkMuted }}>{a.kind}</div></div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <input type="number" value={a.balance} onChange={(e) => update(a.id, { balance: Number(e.target.value) || 0 })} style={{ ...inputStyle, width: 140, textAlign: "right" }} />
-                <button onClick={() => remove(a.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {accounts.map((a) => {
+            const linked = transactions.filter((t) => t.account === a.name);
+            const current = accountBalance(a, transactions);
+            const isEditingOpening = editingOpening === a.id;
+            return (
+              <div key={a.id} style={{ padding: "12px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div><div style={{ fontSize: 13 }}>{a.name}</div><div style={{ fontSize: 11, color: COLOR.inkMuted }}>{a.kind} · {linked.length} transaction(s) liée(s)</div></div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: current >= 0 ? COLOR.ink : COLOR.claySoft }}>{fmt(current)}</div>
+                    <button onClick={() => setEditingOpening(isEditingOpening ? null : a.id)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
+                    <button onClick={() => remove(a.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+                {isEditingOpening && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${COLOR.hairline}` }}>
+                    <label style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Solde de départ (avant suivi dans l'app)</label>
+                    <input type="number" value={a.openingBalance} onChange={(e) => update(a.id, { openingBalance: Number(e.target.value) || 0 })} style={{ ...inputStyle, width: 150 }} />
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
           {!accounts.length && <EmptyState text="Aucun compte." />}
         </div>
       </Panel>
@@ -1626,17 +1656,17 @@ function PayeesTab({ transactions }: { transactions: Transaction[] }) {
 // ============================================================
 // RÉCURRENCES & ÉCHÉANCES
 // ============================================================
-function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions, allCategories }: {
+function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions, allCategories, accounts }: {
   recurring: RecurringTemplate[]; setRecurring: (r: RecurringTemplate[]) => void;
-  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[];
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; accounts: Account[];
 }) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<Omit<RecurringTemplate, "id">>({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO() });
+  const [form, setForm] = useState<Omit<RecurringTemplate, "id">>({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name });
 
   const today = todayISO();
   const upcoming = recurring.filter((r) => daysBetween(today, r.nextDate) <= 14).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
 
-  const add = () => { if (!form.category || form.amount <= 0) return; setRecurring([...recurring, { ...form, id: uid("r") }]); setForm({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO() }); setAdding(false); };
+  const add = () => { if (!form.category || form.amount <= 0) return; setRecurring([...recurring, { ...form, id: uid("r") }]); setForm({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name }); setAdding(false); };
   const remove = (id: string) => setRecurring(recurring.filter((r) => r.id !== id));
 
   const enregistrer = (r: RecurringTemplate) => {
@@ -1687,6 +1717,12 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Fréquence</label><select style={inputStyle} value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as RecurringTemplate["frequency"] })}><option>Hebdomadaire</option><option>Mensuelle</option><option>Annuelle</option></select></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Prochaine échéance</label><input type="date" style={inputStyle} value={form.nextDate} onChange={(e) => setForm({ ...form, nextDate: e.target.value })} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
+              <select style={{ ...inputStyle, width: 140 }} value={form.account || ""} onChange={(e) => setForm({ ...form, account: e.target.value })}>
+                {!accounts.length && <option value="">Aucun compte</option>}
+                {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+              </select>
+            </div>
             <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
           </div>
         )}
@@ -1760,17 +1796,17 @@ function SauvegardeTab({ getSnapshot, restore }: { getSnapshot: () => any; resto
 // ============================================================
 // JOURNAL TAB (CRUD + import texte + règles de catégorisation)
 // ============================================================
-function emptyForm(transactions: Transaction[]): Omit<Transaction, "id"> {
-  return { date: todayISO(), category: categoriesForType(transactions, "Dépense")[0] || "Cadeaux", type: "Dépense", amount: 0 };
+function emptyForm(transactions: Transaction[], accounts: Account[]): Omit<Transaction, "id"> {
+  return { date: todayISO(), category: categoriesForType(transactions, "Dépense")[0] || "Cadeaux", type: "Dépense", amount: 0, account: accounts[0]?.name };
 }
 
-function JournalTab({ filtered, allCategories, categoryGroups, transactions, setTransactions, rules, setRules }: {
+function JournalTab({ filtered, allCategories, categoryGroups, transactions, setTransactions, rules, setRules, accounts }: {
   filtered: any[]; allCategories: string[]; categoryGroups: Record<string, Group>;
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
-  rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void;
+  rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void; accounts: Account[];
 }) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions));
+  const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions, accounts));
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Omit<Transaction, "id"> | null>(null);
@@ -1805,9 +1841,9 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   const addTransaction = () => {
     if (!form.category || form.amount <= 0) return;
     setTransactions([...transactions, { ...form, id: uid() }]);
-    setForm(emptyForm(transactions)); setAdding(false);
+    setForm(emptyForm(transactions, accounts)); setAdding(false);
   };
-  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note }); };
+  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note, account: t.account }); };
   const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
@@ -1909,6 +1945,13 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
               )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => { const ty = e.target.value as TxType; setForm({ ...form, type: ty, subcategory: "", category: categoriesForType(transactions, ty)[0] || "" }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label><input style={inputStyle} type="number" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
+                <select style={{ ...inputStyle, width: 150 }} value={form.account || ""} onChange={(e) => setForm({ ...form, account: e.target.value })}>
+                  {!accounts.length && <option value="">Aucun compte créé</option>}
+                  {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
               <button onClick={() => setShowAdvanced((s) => !s)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 32 }}>{showAdvanced ? "− options" : "+ bénéficiaire / note"}</button>
               <button onClick={addTransaction} style={{ display: "flex", alignItems: "center", gap: 6, background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}><Save size={13} /> Enregistrer</button>
             </div>
@@ -1970,7 +2013,12 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                           )}
                         </td>
                         <td style={{ padding: 6 }}><select style={inputStyle} value={editForm.type} onChange={(e) => { const ty = e.target.value as TxType; setEditForm({ ...editForm, type: ty, subcategory: "", category: categoriesForType(transactions, ty)[0] || editForm.category }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></td>
-                        <td style={{ padding: 6, fontSize: 12, color: COLOR.inkMuted }}>{editForm.type === "Revenu" ? "Revenu" : (categoryGroups[editForm.category] || "Non classifié")}</td>
+                        <td style={{ padding: 6 }}>
+                          <select style={inputStyle} value={editForm.account || ""} onChange={(e) => setEditForm({ ...editForm, account: e.target.value })}>
+                            {!accounts.length && <option value="">Aucun compte</option>}
+                            {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                          </select>
+                        </td>
                         <td style={{ padding: 6 }}><input style={{ ...inputStyle, textAlign: "right" }} type="number" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} /></td>
                         <td style={{ padding: 6, whiteSpace: "nowrap" }}><button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button><button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button></td>
                       </>
@@ -1982,7 +2030,14 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                           {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
                         </td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
-                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>{t.group}</td>
+                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
+                          {t.group}
+                          {t.account ? (
+                            <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
+                          ) : (
+                            <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                          )}
+                        </td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
                         <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => remove(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
                       </>
@@ -2036,8 +2091,8 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
   }, [cur, prev, filtered]);
 
   const exportCSV = () => {
-    const header = "Date,Mois,Catégorie,Type,Groupe,Montant\n";
-    const rows = filtered.map((t) => `${t.date},${monthLabel(t.month)},"${t.category}",${t.type},${t.group},${t.amount}`).join("\n");
+    const header = "Date,Mois,Catégorie,Sous-catégorie,Type,Groupe,Compte,Montant\n";
+    const rows = filtered.map((t) => `${t.date},${monthLabel(t.month)},"${t.category}","${t.subcategory || ""}",${t.type},${t.group},"${t.account || ""}",${t.amount}`).join("\n");
     const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -2075,14 +2130,15 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
 // ============================================================
 // SAISIE QUOTIDIENNE (entrée rapide, jour par jour)
 // ============================================================
-function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups }: {
-  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>;
+function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
   const [quickCategory, setQuickCategory] = useState(() => categoriesForType(transactions, "Dépense")[0] || "Aliments");
   const [quickSubcategory, setQuickSubcategory] = useState("");
   const [quickType, setQuickType] = useState<TxType>("Dépense");
   const [quickAmount, setQuickAmount] = useState<number | "">("");
+  const [quickAccount, setQuickAccount] = useState(() => accounts[0]?.name || "");
   const [justAdded, setJustAdded] = useState(false);
 
   const today = todayISO();
@@ -2106,7 +2162,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   const submit = () => {
     if (!quickCategory || !quickAmount || Number(quickAmount) <= 0) return;
-    setTransactions([...transactions, { id: uid(), date: quickDate, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount) }]);
+    setTransactions([...transactions, { id: uid(), date: quickDate, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined }]);
     setQuickAmount("");
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1200);
@@ -2162,6 +2218,13 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
               onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
               style={{ ...inputStyle, width: 140 }} placeholder="0" autoFocus />
           </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
+            <select style={{ ...inputStyle, width: 150 }} value={quickAccount} onChange={(e) => setQuickAccount(e.target.value)}>
+              {!accounts.length && <option value="">Aucun compte créé</option>}
+              {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+            </select>
+          </div>
           <button onClick={submit} style={{
             display: "flex", alignItems: "center", gap: 6, background: justAdded ? COLOR.emerald : "rgba(201,162,39,0.16)",
             border: `1px solid ${justAdded ? COLOR.emerald : COLOR.gold}`, borderRadius: 6,
@@ -2180,6 +2243,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block" }} />
                 <span style={{ fontSize: 12.5 }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</span>
                 <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{t.type}</span>
+                {t.account && <span style={{ fontSize: 10.5, color: COLOR.slateBlueSoft }}>{t.account}</span>}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)}</span>
@@ -2377,7 +2441,7 @@ export default function GrandLivre() {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
   }
 
-  const lastNW = (() => { const s = liveNetWorthSeries(accounts); return s[s.length - 1][1]; })();
+  const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: "flex" }}>
@@ -2436,29 +2500,29 @@ export default function GrandLivre() {
             <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
           </div>
 
-          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} />}
+          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
           {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
           {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} />}
-          {tab === "simulateur" && <SimulateurTab filtered={filtered} accounts={accounts} />}
+          {tab === "simulateur" && <SimulateurTab filtered={filtered} accounts={accounts} transactions={transactions} />}
           {tab === "objectif" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-              <GoalsPanel goals={goals} setGoals={setGoals} accounts={accounts} />
-              <ProjectionPanel accounts={accounts} />
+              <GoalsPanel goals={goals} setGoals={setGoals} accounts={accounts} transactions={transactions} />
+              <ProjectionPanel accounts={accounts} transactions={transactions} />
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
-          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} />}
+          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
-          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} />}
-          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} />}
+          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} />}
+          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} accounts={accounts} />}
           {tab === "export" && <ExportTab filtered={filtered} filters={filters} />}
           {tab === "sauvegarde" && (
             <SauvegardeTab
