@@ -383,18 +383,18 @@ function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boo
   const [state, setState] = useState<T>(initial);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage?.get(key, false);
-        if (res) setState(JSON.parse(res.value));
-      } catch {}
-      setLoaded(true);
-    })();
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) setState(JSON.parse(raw));
+    } catch {}
+    setLoaded(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     if (!loaded) return;
-    window.storage?.set(key, JSON.stringify(state), false).catch(() => {});
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch {}
   }, [state, loaded]);
   return [state, setState, loaded];
 }
@@ -552,6 +552,112 @@ function detectAnomalies(filtered: any[]) {
     }
   });
   return anomalies.sort((a, b) => b.ratio - a.ratio).slice(0, 12);
+}
+
+// ============================================================
+// MOTEUR D'ANALYSE — alertes, conseils, constats positifs générés
+// automatiquement à partir des transactions filtrées (règles déterministes).
+// ============================================================
+type InsightKind = "alerte" | "conseil" | "positif";
+interface Insight { kind: InsightKind; title: string; text: string; }
+
+function generateInsights(filtered: any[]): Insight[] {
+  const insights: Insight[] = [];
+  const revenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+  const depenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+  const solde = revenus - depenses;
+  const tauxEpargne = revenus > 0 ? (solde / revenus) * 100 : 0;
+  const nonProd = filtered.filter((t) => t.type === "Dépense" && t.group === "Non-productif").reduce((a, t) => a + t.amount, 0);
+  const pctNonProd = revenus > 0 ? (nonProd / revenus) * 100 : 0;
+  const productif = filtered.filter((t) => t.type === "Dépense" && t.group === "Productif").reduce((a, t) => a + t.amount, 0);
+  const pctProductif = depenses > 0 ? (productif / depenses) * 100 : 0;
+
+  // Solde / taux d'épargne
+  if (solde < 0) {
+    insights.push({ kind: "alerte", title: "Solde négatif", text: `Les dépenses dépassent les revenus de ${fmt(Math.abs(solde))} FCFA sur cette période. À surveiller de près si la tendance se confirme sur les mois suivants.` });
+  } else if (tauxEpargne < 10) {
+    insights.push({ kind: "conseil", title: "Taux d'épargne faible", text: `${tauxEpargne.toFixed(1)}% du revenu est épargné, en dessous du repère habituel de 15-20%. Une réduction ciblée du non-productif pourrait combler l'écart.` });
+  } else if (tauxEpargne >= 20) {
+    insights.push({ kind: "positif", title: "Bon taux d'épargne", text: `${tauxEpargne.toFixed(1)}% du revenu est épargné sur cette période — au-dessus du repère de 20% généralement recommandé.` });
+  }
+
+  // Non-productif
+  if (pctNonProd > 30) {
+    insights.push({ kind: "alerte", title: "Non-productif élevé", text: `Les dépenses non-productives (cadeaux, sorties, shopping…) représentent ${pctNonProd.toFixed(1)}% du revenu — au-dessus du seuil de vigilance de 30%.` });
+  } else if (pctNonProd > 15) {
+    insights.push({ kind: "conseil", title: "Non-productif à surveiller", text: `${pctNonProd.toFixed(1)}% du revenu part en dépenses non-productives. Réduire ce poste de quelques points libérerait une marge d'épargne significative.` });
+  } else if (revenus > 0) {
+    insights.push({ kind: "positif", title: "Non-productif maîtrisé", text: `Seulement ${pctNonProd.toFixed(1)}% du revenu part en dépenses non-productives — une discipline budgétaire solide.` });
+  }
+
+  // Productif
+  if (depenses > 0 && pctProductif >= 35) {
+    insights.push({ kind: "positif", title: "Investissement soutenu", text: `${pctProductif.toFixed(1)}% des dépenses sont classées productives (immobilier, activité, épargne…) — la stratégie patrimoniale reste la priorité budgétaire.` });
+  }
+
+  // Tendance mensuelle (comparaison 1re moitié vs 2e moitié de la période)
+  const monthKeys = Array.from(new Set(filtered.map((t: any) => t.month))).sort((a: any, b: any) => monthSortKey(a) - monthSortKey(b));
+  if (monthKeys.length >= 4) {
+    const mid = Math.floor(monthKeys.length / 2);
+    const firstHalf = monthKeys.slice(0, mid);
+    const secondHalf = monthKeys.slice(mid);
+    const depFirst = filtered.filter((t: any) => t.type === "Dépense" && firstHalf.includes(t.month)).reduce((a: number, t: any) => a + t.amount, 0) / firstHalf.length;
+    const depSecond = filtered.filter((t: any) => t.type === "Dépense" && secondHalf.includes(t.month)).reduce((a: number, t: any) => a + t.amount, 0) / secondHalf.length;
+    if (depFirst > 0) {
+      const delta = ((depSecond - depFirst) / depFirst) * 100;
+      if (delta > 20) insights.push({ kind: "alerte", title: "Dépenses en hausse", text: `Les dépenses mensuelles moyennes ont augmenté de ${delta.toFixed(0)}% entre la première et la seconde moitié de la période.` });
+      else if (delta < -20) insights.push({ kind: "positif", title: "Dépenses en baisse", text: `Les dépenses mensuelles moyennes ont diminué de ${Math.abs(delta).toFixed(0)}% entre la première et la seconde moitié de la période.` });
+    }
+  }
+
+  // Catégorie dominante côté non-productif
+  const nonProdCats: Record<string, number> = {};
+  filtered.filter((t: any) => t.type === "Dépense" && t.group === "Non-productif").forEach((t: any) => { nonProdCats[t.category] = (nonProdCats[t.category] || 0) + t.amount; });
+  const topNonProd = Object.entries(nonProdCats).sort((a, b) => b[1] - a[1])[0];
+  if (topNonProd && nonProd > 0 && topNonProd[1] / nonProd > 0.4) {
+    insights.push({ kind: "conseil", title: `"${topNonProd[0]}" concentre le non-productif`, text: `Cette catégorie représente à elle seule ${((topNonProd[1] / nonProd) * 100).toFixed(0)}% des dépenses non-productives (${fmt(topNonProd[1])} FCFA) — le premier levier d'économie à considérer.` });
+  }
+
+  // Anomalies ponctuelles
+  const anomalies = detectAnomalies(filtered);
+  if (anomalies.length > 0) {
+    insights.push({ kind: "alerte", title: `${anomalies.length} transaction(s) atypique(s)`, text: `Certaines dépenses dépassent largement la moyenne habituelle de leur catégorie (ex: ${anomalies[0].category} à ${fmt(anomalies[0].amount)} FCFA, ${anomalies[0].ratio.toFixed(1)}× la moyenne). Détail dans l'onglet Catégories.` });
+  }
+
+  if (!insights.length) {
+    insights.push({ kind: "positif", title: "Rien à signaler", text: "Aucune alerte particulière sur cette période — les indicateurs sont dans des plages normales." });
+  }
+
+  const order: Record<InsightKind, number> = { alerte: 0, conseil: 1, positif: 2 };
+  return insights.sort((a, b) => order[a.kind] - order[b.kind]);
+}
+
+function InsightsPanel({ filtered }: { filtered: any[] }) {
+  const insights = useMemo(() => generateInsights(filtered), [filtered]);
+  const styleFor: Record<InsightKind, { bg: string; border: string; color: string; icon: any }> = {
+    alerte: { bg: "rgba(193,84,63,0.08)", border: COLOR.clay, color: COLOR.claySoft, icon: AlertTriangle },
+    conseil: { bg: "rgba(201,162,39,0.08)", border: COLOR.gold, color: COLOR.goldSoft, icon: Info },
+    positif: { bg: "rgba(63,156,122,0.08)", border: COLOR.emerald, color: COLOR.emeraldSoft, icon: Check },
+  };
+  return (
+    <Panel title="Analyse & conseils" subtitle="Généré automatiquement à partir de la période et des filtres actifs">
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {insights.map((ins, i) => {
+          const s = styleFor[ins.kind];
+          const Icon = s.icon;
+          return (
+            <div key={i} style={{ display: "flex", gap: 10, padding: "12px 14px", background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8 }}>
+              <Icon size={15} color={s.color} style={{ flexShrink: 0, marginTop: 1 }} />
+              <div>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: s.color, marginBottom: 3 }}>{ins.title}</div>
+                <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{ins.text}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
 }
 
 // ============================================================
@@ -966,6 +1072,7 @@ function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGr
 }) {
   const [sortDir, setSortDir] = useState<1 | -1>(-1);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<{ name: string; type: TxType } | null>(null);
   const rows = useMemo(() => {
     const m: Record<string, { value: number; count: number; type: TxType; group: string }> = {};
     filtered.forEach((t) => {
@@ -989,6 +1096,10 @@ function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGr
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
   };
 
+  if (selected) {
+    return <CategoryDetailView category={selected.name} type={selected.type} filtered={filtered} onBack={() => setSelected(null)} />;
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {anomalies.length > 0 && (
@@ -1008,7 +1119,7 @@ function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGr
           </div>
         </Panel>
       )}
-      <Panel title="Détail par catégorie" subtitle={`${rows.length} catégorie(s) · cliquez sur une catégorie pour voir ses sous-catégories · reclassez le groupe via le menu`}
+      <Panel title="Détail par catégorie" subtitle={`${rows.length} catégorie(s) · cliquez sur la loupe pour l'analyse complète d'une catégorie · le chevron déplie ses sous-catégories`}
         right={
           <button onClick={() => setSortDir((d) => (d === 1 ? -1 : 1))} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
             <ArrowUpDown size={12} /> {sortDir === -1 ? "Plus élevé d'abord" : "Plus faible d'abord"}
@@ -1021,14 +1132,19 @@ function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGr
             const hasRealSubs = subs.some(([name]) => name !== "Sans sous-catégorie");
             return (
               <div key={r.name}>
-                <div onClick={() => toggleExpand(r.name)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
-                  <ChevronRight size={13} color={COLOR.inkMuted} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
-                  <div style={{ width: 178, fontSize: 12.5, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>{r.name}</div>
-                  <div style={{ flex: 1, background: COLOR.hairline, borderRadius: 4, height: 16, position: "relative" }}>
-                    <div style={{ width: `${(r.value / maxVal) * 100}%`, height: "100%", borderRadius: 4, background: groupColor[r.group] || COLOR.inkMuted }} />
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <button onClick={() => setSelected({ name: r.name, type: r.type })} title="Analyser cette catégorie" style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex", flexShrink: 0, color: COLOR.goldSoft, padding: 2 }}>
+                    <BarChart3 size={14} />
+                  </button>
+                  <div onClick={() => toggleExpand(r.name)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer", flex: 1, minWidth: 0 }}>
+                    <ChevronRight size={13} color={COLOR.inkMuted} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
+                    <div style={{ width: 166, fontSize: 12.5, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>{r.name}</div>
+                    <div style={{ flex: 1, background: COLOR.hairline, borderRadius: 4, height: 16, position: "relative" }}>
+                      <div style={{ width: `${(r.value / maxVal) * 100}%`, height: "100%", borderRadius: 4, background: groupColor[r.group] || COLOR.inkMuted }} />
+                    </div>
+                    <div style={{ width: 95, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flexShrink: 0 }}>{fmt(r.value)}</div>
+                    <div style={{ width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{total ? ((r.value / total) * 100).toFixed(1) : "0"}%</div>
                   </div>
-                  <div style={{ width: 95, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flexShrink: 0 }}>{fmt(r.value)}</div>
-                  <div style={{ width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{total ? ((r.value / total) * 100).toFixed(1) : "0"}%</div>
                   {r.type === "Dépense" ? (
                     <select value={resolvedGroups[r.name] || "Non classifié"} onClick={(e) => e.stopPropagation()} onChange={(e) => setCategoryGroups({ ...categoryGroups, [r.name]: e.target.value as Group })}
                       style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: groupColor[resolvedGroups[r.name] || "Non classifié"], padding: "5px 8px", fontSize: 11.5, fontFamily: "'Inter', sans-serif", flexShrink: 0, width: 128, cursor: "pointer" }}>
@@ -1037,7 +1153,7 @@ function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGr
                   ) : <div style={{ width: 128, flexShrink: 0, fontSize: 11.5, color: COLOR.goldSoft, textAlign: "center" }}>Revenu</div>}
                 </div>
                 {isOpen && (
-                  <div style={{ marginLeft: 25, marginTop: 8, marginBottom: 4, paddingLeft: 12, borderLeft: `2px solid ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 5 }}>
+                  <div style={{ marginLeft: 47, marginTop: 8, marginBottom: 4, paddingLeft: 12, borderLeft: `2px solid ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 5 }}>
                     {hasRealSubs ? subs.map(([name, val]) => (
                       <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
                         <span style={{ color: name === "Sans sous-catégorie" ? COLOR.inkMuted : COLOR.ink, fontStyle: name === "Sans sous-catégorie" ? "italic" : "normal" }}>{name}</span>
@@ -1059,11 +1175,144 @@ function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGr
 }
 
 // ============================================================
+// FICHE DÉTAILLÉE PAR CATÉGORIE — évolution, sous-catégories, analyse, impression
+// ============================================================
+function CategoryDetailView({ category, type, filtered, onBack }: { category: string; type: TxType; filtered: any[]; onBack: () => void }) {
+  const catTx = useMemo(() => filtered.filter((t) => t.category === category && t.type === type), [filtered, category, type]);
+  const group = catTx[0]?.group || "Non classifié";
+  const total = catTx.reduce((a, t) => a + t.amount, 0);
+  const monthsPresent = Array.from(new Set(catTx.map((t) => t.month)));
+  const avgMonth = total / (monthsPresent.length || 1);
+  const grandTotal = filtered.filter((t) => t.type === type).reduce((a, t) => a + t.amount, 0);
+  const pctOfTotal = grandTotal ? (total / grandTotal) * 100 : 0;
+
+  const byMonth = useMemo(() => {
+    const m: Record<string, number> = {};
+    catTx.forEach((t) => { m[t.month] = (m[t.month] || 0) + t.amount; });
+    return Object.keys(m).sort((a, b) => monthSortKey(a) - monthSortKey(b)).map((k) => ({ mois: monthLabel(k), key: k, montant: m[k] }));
+  }, [catTx]);
+
+  const bySubcat = useMemo(() => {
+    const m: Record<string, number> = {};
+    catTx.forEach((t) => { const key = t.subcategory || "Sans sous-catégorie"; m[key] = (m[key] || 0) + t.amount; });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([name, value]) => ({ name, value }));
+  }, [catTx]);
+
+  const catAnomalies = useMemo(() => {
+    if (catTx.length < 3) return [];
+    const m = mean(catTx.map((t) => t.amount));
+    return catTx.filter((t) => t.amount > m * 2 && t.amount > 20000).sort((a, b) => b.amount - a.amount).slice(0, 5).map((t) => ({ ...t, avg: m, ratio: t.amount / m }));
+  }, [catTx]);
+
+  const trend = useMemo(() => {
+    if (byMonth.length < 4) return null;
+    const mid = Math.floor(byMonth.length / 2);
+    const first = byMonth.slice(0, mid).reduce((a, m) => a + m.montant, 0) / mid;
+    const second = byMonth.slice(mid).reduce((a, m) => a + m.montant, 0) / (byMonth.length - mid);
+    if (first === 0) return null;
+    return ((second - first) / first) * 100;
+  }, [byMonth]);
+
+  const maxSub = Math.max(1, ...bySubcat.map((s) => s.value));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div className="gl-noprint" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+          ← Retour aux catégories
+        </button>
+        <button onClick={() => window.print()} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>
+          <Printer size={15} /> Imprimer cette fiche
+        </button>
+      </div>
+
+      <Panel>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: groupColor[type === "Revenu" ? "Revenu" : group], textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{type === "Revenu" ? "Revenu" : group}</div>
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 26, margin: 0 }}>{category}</h2>
+          </div>
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Kpi label="Total (période)" value={fmt(total)} tone={type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
+        <Kpi label="Moyenne / mois" value={fmt(avgMonth)} tone={COLOR.gold} icon={CalendarRange} />
+        <Kpi label="Transactions" value={String(catTx.length)} suffix="" icon={BookOpen} />
+        <Kpi label={`% du total ${type === "Revenu" ? "revenus" : "dépenses"}`} value={pctOfTotal.toFixed(1)} suffix="%" tone={COLOR.goldSoft} icon={Percent} />
+      </div>
+
+      <Panel title="Évolution mensuelle" subtitle={`${byMonth.length} mois avec activité`}>
+        {byMonth.length ? (
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={byMonth} margin={{ left: 0, right: 10, top: 10 }}>
+              <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+              <XAxis dataKey="mois" tick={{ fill: COLOR.inkMuted, fontSize: 10 }} interval={byMonth.length > 14 ? 1 : 0} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+              <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
+              <Tooltip content={<CustomTooltip />} />
+              <Bar dataKey="montant" name={category} radius={[3, 3, 0, 0]} fill={type === "Revenu" ? COLOR.emerald : groupColor[group] || COLOR.clay} />
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <EmptyState />}
+      </Panel>
+
+      {bySubcat.length > 1 && (
+        <Panel title="Répartition par sous-catégorie">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {bySubcat.map((s) => (
+              <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 150, fontSize: 12, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: s.name === "Sans sous-catégorie" ? COLOR.inkMuted : COLOR.ink, fontStyle: s.name === "Sans sous-catégorie" ? "italic" : "normal" }}>{s.name}</div>
+                <div style={{ flex: 1, background: COLOR.hairline, borderRadius: 4, height: 14 }}>
+                  <div style={{ width: `${(s.value / maxSub) * 100}%`, height: "100%", borderRadius: 4, background: type === "Revenu" ? COLOR.emerald : groupColor[group] || COLOR.clay }} />
+                </div>
+                <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>{fmt(s.value)}</div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      <Panel title="Analyse de cette catégorie" subtitle="Constats spécifiques générés automatiquement">
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {trend !== null && (
+            <div style={{ display: "flex", gap: 10, padding: "12px 14px", background: trend > 20 ? "rgba(193,84,63,0.08)" : trend < -20 ? "rgba(63,156,122,0.08)" : "rgba(201,162,39,0.06)", border: `1px solid ${trend > 20 ? COLOR.clay : trend < -20 ? COLOR.emerald : COLOR.hairline}`, borderRadius: 8 }}>
+              {trend > 20 ? <TrendingUp size={15} color={COLOR.claySoft} style={{ flexShrink: 0, marginTop: 1 }} /> : trend < -20 ? <TrendingDown size={15} color={COLOR.emeraldSoft} style={{ flexShrink: 0, marginTop: 1 }} /> : <Info size={15} color={COLOR.goldSoft} style={{ flexShrink: 0, marginTop: 1 }} />}
+              <div style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.55 }}>
+                {trend > 20 && <>Tendance à la hausse : +{trend.toFixed(0)}% entre la première et la seconde moitié de la période.</>}
+                {trend < -20 && <>Tendance à la baisse : {trend.toFixed(0)}% entre la première et la seconde moitié de la période.</>}
+                {trend >= -20 && trend <= 20 && <>Dépense relativement stable sur la période (variation de {trend.toFixed(0)}% entre les deux moitiés).</>}
+              </div>
+            </div>
+          )}
+          {catAnomalies.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {catAnomalies.map((a) => (
+                <div key={a.id} style={{ display: "flex", justifyContent: "space-between", padding: "10px 14px", background: "rgba(193,84,63,0.08)", border: `1px solid ${COLOR.clay}`, borderRadius: 8, fontSize: 12 }}>
+                  <span style={{ color: COLOR.inkMuted }}>{dateLabelFull(a.date)}{a.subcategory ? ` · ${a.subcategory}` : ""}</span>
+                  <span style={{ color: COLOR.claySoft, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(a.amount)} ({a.ratio.toFixed(1)}×)</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {trend === null && !catAnomalies.length && (
+            <span style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Pas assez de données sur la période pour dégager une tendance ou détecter des anomalies.</span>
+          )}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// ============================================================
 // GROUPES TAB
 // ============================================================
 function GroupesTab({ filtered }: { filtered: any[] }) {
   const dep = filtered.filter((t) => t.type === "Dépense");
+  const rev = filtered.filter((t) => t.type === "Revenu");
   const totalDep = dep.reduce((a, t) => a + t.amount, 0);
+  const totalRev = rev.reduce((a, t) => a + t.amount, 0);
+  const solde = totalRev - totalDep;
+  const tauxEpargne = totalRev > 0 ? (solde / totalRev) * 100 : 0;
   const cards = GROUPS.map((g) => {
     const items = dep.filter((t) => t.group === g);
     const value = items.reduce((a, t) => a + t.amount, 0);
@@ -1072,30 +1321,67 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
     const top = Object.entries(cats).sort((a, b) => b[1] - a[1]).slice(0, 4);
     return { group: g, value, count: items.length, top, pct: totalDep ? (value / totalDep) * 100 : 0 };
   });
+
+  const byMonth = useMemo(() => {
+    const m: Record<string, { revenus: number; depenses: number }> = {};
+    filtered.forEach((t) => {
+      if (!m[t.month]) m[t.month] = { revenus: 0, depenses: 0 };
+      if (t.type === "Revenu") m[t.month].revenus += t.amount; else m[t.month].depenses += t.amount;
+    });
+    return Object.keys(m).sort((a, b) => monthSortKey(a) - monthSortKey(b)).map((k) => ({ mois: monthLabel(k), revenus: m[k].revenus, depenses: m[k].depenses }));
+  }, [filtered]);
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
-      {cards.map((c) => (
-        <div key={c.group} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 20 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ width: 10, height: 10, borderRadius: "50%", background: groupColor[c.group] }} />
-              <span style={{ fontSize: 14, fontWeight: 500 }}>{c.group}</span>
-            </div>
-            <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{c.count} transactions</span>
-          </div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, fontWeight: 600, color: groupColor[c.group] }}>
-            {fmt(c.value)} <span style={{ fontSize: 11, color: COLOR.inkMuted }}>FCFA · {c.pct.toFixed(1)}%</span>
-          </div>
-          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-            {c.top.map(([name, val]) => (
-              <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                <span style={{ color: COLOR.inkMuted }}>{name}</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(val)}</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Kpi label="Revenus" value={fmt(totalRev)} tone={COLOR.emeraldSoft} icon={TrendingUp} />
+        <Kpi label="Dépenses" value={fmt(totalDep)} tone={COLOR.claySoft} icon={TrendingDown} />
+        <Kpi label="Solde" value={fmt(solde)} tone={solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
+        <Kpi label="Taux d'épargne" value={tauxEpargne.toFixed(1)} suffix="%" tone={COLOR.gold} icon={Target} />
+      </div>
+
+      <Panel title="Revenus vs Dépenses" subtitle={`${byMonth.length} mois dans la période filtrée`}>
+        {byMonth.length ? (
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={byMonth} margin={{ left: 0, right: 10, top: 10 }}>
+              <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+              <XAxis dataKey="mois" tick={{ fill: COLOR.inkMuted, fontSize: 10 }} interval={byMonth.length > 14 ? 1 : 0} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+              <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
+              <Tooltip content={<CustomTooltip />} />
+              <Legend wrapperStyle={{ fontSize: 12, color: COLOR.inkMuted }} />
+              <Bar dataKey="revenus" name="Revenus" fill={COLOR.emerald} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="depenses" name="Dépenses" fill={COLOR.clay} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <EmptyState />}
+      </Panel>
+
+      <InsightsPanel filtered={filtered} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
+        {cards.map((c) => (
+          <div key={c.group} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 10, height: 10, borderRadius: "50%", background: groupColor[c.group] }} />
+                <span style={{ fontSize: 14, fontWeight: 500 }}>{c.group}</span>
               </div>
-            ))}
-            {!c.top.length && <span style={{ fontSize: 12, color: COLOR.inkMuted }}>Aucune donnée</span>}
+              <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{c.count} transactions</span>
+            </div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, fontWeight: 600, color: groupColor[c.group] }}>
+              {fmt(c.value)} <span style={{ fontSize: 11, color: COLOR.inkMuted }}>FCFA · {c.pct.toFixed(1)}%</span>
+            </div>
+            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+              {c.top.map(([name, val]) => (
+                <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span style={{ color: COLOR.inkMuted }}>{name}</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(val)}</span>
+                </div>
+              ))}
+              {!c.top.length && <span style={{ fontSize: 12, color: COLOR.inkMuted }}>Aucune donnée</span>}
+            </div>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
