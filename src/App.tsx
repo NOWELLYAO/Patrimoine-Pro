@@ -56,6 +56,7 @@ interface Transaction {
   id: string;
   date: string; // "YYYY-MM-DD" — le mois est dérivé automatiquement pour tous les rapports
   category: string;
+  subcategory?: string;
   type: TxType;
   amount: number;
   account?: string;
@@ -117,6 +118,45 @@ const defaultCategoryScope: Record<string, Scope> = {
   "Vente Pompe": "Business", "ECO PUMP": "Business",
 };
 
+// Hiérarchie catégorie → sous-catégories, telle que définie dans MoneyCoach.
+// Clés séparées par type car certains noms (ex: "Ajustement") existent des deux côtés
+// avec des sous-catégories différentes.
+const depSubcategories: Record<string, string[]> = {
+  "Invitation": ["Femmes", "Triade"],
+  "Logement": ["Location"],
+  "Personnel": ["Coiffure", "Produits de beauté", "Hygiène personnelle"],
+  "Plan Éducation": ["PEL"],
+  "Santé": ["Médicaments", "VG", "Dentaire", "Vision", "Hôpital", "Assurance"],
+  "Shopping": ["Draps", "Alimentation"],
+  "Transport": ["Peage", "Souterrain", "Autobus", "Taxi", "Train"],
+  "Utilitaires": ["Nettoyage", "Électricité", "Eau", "Gaz", "Chauffage", "Des ordures", "l'Internet", "Téléphones", "la télé", "Ordinateur HP"],
+  "Voiture": ["Lavage", "Peinture-Retouche", "Installation GPS", "Carburant", "Visite Technique", "Entretien", "La lessive", "Parking", "Assurance"],
+  "Voyage": ["Pourboire", "Peage", "Divertissement", "Aliment", "Shopping", "Vol", "Un hôtel", "Location de voiture"],
+  "Vêtements": ["Chemises", "Chaussures", "Un pantalon", "Tops", "Des sacs", "Accessoires", "Draps"],
+  "Éducation": ["Nesher", "Cours", "Livres", "Fournitures scolaires", "Prêt étudiant"],
+  "Dette": ["PEL"],
+  "Divertissement": ["Femme", "Residence", "Alcool", "BAP", "Films", "Boisson", "Anniversaire", "La musique", "Jeux", "Performance", "Fête", "Funérailles"],
+  "Déménagement": ["Lits", "Installation Clim Chauffe Eau", "Nettoyage", "Micro-ondes Four", "Chauffe-eau", "Réfrigérateur", "Gaziniere", "Remplacement Gaziniere", "Deco & Senteur", "Electricien", "Étagère Cuisine", "Splits", "Autres"],
+  "Aliments": ["Déjeuner", "Invitation", "Le déjeuner", "Dîner", "Les courses", "Dîner à l'extérieur"],
+  "Cadeaux": ["Mardochee", "Olokpacha", "Femme", "Ruth", "Enfants Nesher", "Ndjore", "Pourboire", "Adrien", "Cotisations", "Metty", "Obed", "Anniversaire", "Noël", "Juste pour le fun", "Dot Jo"],
+  "Création Entreprise ECO PUMP AFRIK": ["FNE", "Documents", "Dédouanement", "Timbre", "Application De Gestion", "Cachet", "Boîte Postale"],
+  "Des sports": ["Gym", "Équipement", "Piscine"],
+  "Enfants & Maman": ["Maman", "Nesher", "Hemra"],
+  "Formation": ["Finelo Invest", "Emergent", "Piano & Guitare"],
+  "GRUNDFOS": ["Appel", "Restaurant", "Location Prado", "Eau", "Enjoy", "Impression", "Impression Allowance", "Internet", "Ajustement Petty Cash", "Voyage", "FedEx", "Hotel", "Électricité", "Peage", "iPhone 16 Pro", "Divertissement", "Cachet", "Carburant", "Infraction", "AUTRES", "Hinoter"],
+  "Générales": ["Cachet Grundfos", "Impression", "Abonnement IScanner", "Visite Maison", "Cachet OMÉGA", "Certificat De Perte SIB", "Carte Money Fusion", "Police", "Réparation iPhone 13", "Souris Sans Fil", "Carte Djamo", "Vol Djamo", "Badoo", "Yango Livraison", "Peage", "Réparation Robinet", "Création Entreprise ECO PUMP", "Yango Transport Pompe", "Payement Pour Terrain Port Bouet", "Livraison Pompe"],
+  "INVEST SGO": ["DJAMO", "Daba Finance", "Frais", "NSIA"],
+  "Abonnements": ["Gamma App", "Daba Finance", "Emergent", "Netflix", "Financial AFRIK", "Assurance SAF", "Spotify", "Money Coach", "Richbourse", "Tinder", "Chat GPT", "Onfray", "Google Espace", "Canal", "Jeu D'affaire", "Claude"],
+  "Ajustement": ["Lahou", "Frais", "Frais Bancaire", "Étrange"],
+};
+
+const revSubcategories: Record<string, string[]> = {
+  "Petty Cash": ["Ajustement Petty Cash"],
+  "Revenu général": ["Solde 1er juillet 2024", "Rappel PEL", "Solde 1er Jan 2025"],
+  "Allocation": ["Avoir Azalai"],
+  "General": ["Commission Vente Peugeot 307", "Commission Vente Nissan", "Deladet ti", "Cadeau"],
+};
+
 const defaultRules: CategorizationRule[] = [
   { id: "r1", keyword: "grundfos", group: "Productif" },
   { id: "r2", keyword: "pompe", group: "Productif" },
@@ -134,6 +174,16 @@ const netWorthRaw: [string, number][] = [
   ["2026_1", 14173506], ["2026_2", 12972957], ["2026_3", 12095271], ["2026_4", 12378388],
   ["2026_5", 6722858], ["2026_6", 10048723], ["2026_7", 11992195], ["2026_8", 11988196],
 ];
+
+// Remplace (ou ajoute) le dernier point par le total réel des comptes — la valeur nette
+// affichée reflète alors l'état actuel des comptes plutôt qu'un relevé historique figé.
+function liveNetWorthSeries(accounts: Account[]): [string, number][] {
+  const total = accounts.reduce((a, acc) => a + acc.balance, 0);
+  const curKey = dateToMonthKey(todayISO());
+  const lastKey = netWorthRaw[netWorthRaw.length - 1][0];
+  if (lastKey === curKey) return [...netWorthRaw.slice(0, -1), [lastKey, total]];
+  return [...netWorthRaw, [curKey, total]];
+}
 
 const seedLoans: Loan[] = [
   { id: "l1", person: "Ami (février 2026)", amount: 500000, dateGiven: "2026_2", status: "En attente", notes: "Prêt personnel accordé — à suivre" },
@@ -226,6 +276,9 @@ const stdev = (arr: number[]) => {
 };
 
 const GROUPS: Group[] = ["Nécessaire", "Productif", "Non-productif", "Non classifié"];
+function getSubcategories(type: TxType, category: string): string[] {
+  return (type === "Dépense" ? depSubcategories[category] : revSubcategories[category]) || [];
+}
 const groupColor: Record<string, string> = {
   "Nécessaire": COLOR.slateBlue, "Productif": COLOR.emerald, "Non-productif": COLOR.clay,
   "Non classifié": COLOR.inkMuted, "Revenu": COLOR.goldSoft,
@@ -381,12 +434,12 @@ function computeHealthScore(tauxEpargne: number, pctNonProd: number, monthlyReve
   return { savingsScore, nonProdScore, stabilityScore, overall, grade, gradeColor };
 }
 
-function projectNetWorth(months = 12) {
-  const recent = netWorthRaw.slice(-6);
+function projectNetWorth(months = 12, series: [string, number][] = netWorthRaw) {
+  const recent = series.slice(-6);
   const deltas = recent.slice(1).map((v, i) => v[1] - recent[i][1]);
   const avgDelta = mean(deltas);
   const sd = stdev(deltas);
-  const last = netWorthRaw[netWorthRaw.length - 1][1];
+  const last = series[series.length - 1][1];
   const points = [];
   for (let i = 0; i <= months; i++) {
     points.push({
@@ -532,7 +585,7 @@ function HeatmapCalendar({ filtered }: { filtered: any[] }) {
 // ============================================================
 // APERÇU TAB (KPIs + valeur nette + revenu/dépense + groupes + santé + comparaison)
 // ============================================================
-function ApercuTab({ filtered, filters }: { filtered: any[]; filters: Filters }) {
+function ApercuTab({ filtered, filters, accounts }: { filtered: any[]; filters: Filters; accounts: Account[] }) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const solde = totalRevenus - totalDepenses;
@@ -559,7 +612,7 @@ function ApercuTab({ filtered, filters }: { filtered: any[]; filters: Filters })
     return Object.entries(m).map(([name, value]) => ({ name, value }));
   }, [filtered]);
 
-  const nwFiltered = netWorthRaw.filter(([m]) => {
+  const nwFiltered = liveNetWorthSeries(accounts).filter(([m]) => {
     const k = monthSortKey(m);
     return k >= monthSortKey(filters.from) && k <= monthSortKey(filters.to);
   }).map(([m, v]) => ({ mois: monthLabel(m), valeur: v }));
@@ -827,6 +880,7 @@ function CategoriesTab({ filtered, categoryGroups, setCategoryGroups }: {
   filtered: any[]; categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
 }) {
   const [sortDir, setSortDir] = useState<1 | -1>(-1);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const rows = useMemo(() => {
     const m: Record<string, { value: number; count: number; type: TxType; group: string }> = {};
     filtered.forEach((t) => {
@@ -838,6 +892,17 @@ function CategoriesTab({ filtered, categoryGroups, setCategoryGroups }: {
   const maxVal = Math.max(1, ...rows.map((r) => r.value));
   const total = rows.reduce((a, r) => a + r.value, 0);
   const anomalies = useMemo(() => detectAnomalies(filtered), [filtered]);
+
+  const toggleExpand = (name: string) => setExpanded((prev) => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
+
+  const subcatBreakdown = (categoryName: string, type: TxType) => {
+    const m: Record<string, number> = {};
+    filtered.filter((t) => t.category === categoryName && t.type === type).forEach((t) => {
+      const key = t.subcategory || "Sans sous-catégorie";
+      m[key] = (m[key] || 0) + t.amount;
+    });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -858,29 +923,49 @@ function CategoriesTab({ filtered, categoryGroups, setCategoryGroups }: {
           </div>
         </Panel>
       )}
-      <Panel title="Détail par catégorie" subtitle={`${rows.length} catégorie(s) · reclassez une catégorie via le menu Groupe pour affiner l'analyse`}
+      <Panel title="Détail par catégorie" subtitle={`${rows.length} catégorie(s) · cliquez sur une catégorie pour voir ses sous-catégories · reclassez le groupe via le menu`}
         right={
           <button onClick={() => setSortDir((d) => (d === 1 ? -1 : 1))} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
             <ArrowUpDown size={12} /> {sortDir === -1 ? "Plus élevé d'abord" : "Plus faible d'abord"}
           </button>
         }>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {rows.map((r) => (
-            <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 190, fontSize: 12.5, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>{r.name}</div>
-              <div style={{ flex: 1, background: COLOR.hairline, borderRadius: 4, height: 16, position: "relative" }}>
-                <div style={{ width: `${(r.value / maxVal) * 100}%`, height: "100%", borderRadius: 4, background: groupColor[r.group] || COLOR.inkMuted }} />
+          {rows.map((r) => {
+            const isOpen = expanded.has(r.name);
+            const subs = isOpen ? subcatBreakdown(r.name, r.type) : [];
+            const hasRealSubs = subs.some(([name]) => name !== "Sans sous-catégorie");
+            return (
+              <div key={r.name}>
+                <div onClick={() => toggleExpand(r.name)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+                  <ChevronRight size={13} color={COLOR.inkMuted} style={{ flexShrink: 0, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
+                  <div style={{ width: 178, fontSize: 12.5, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>{r.name}</div>
+                  <div style={{ flex: 1, background: COLOR.hairline, borderRadius: 4, height: 16, position: "relative" }}>
+                    <div style={{ width: `${(r.value / maxVal) * 100}%`, height: "100%", borderRadius: 4, background: groupColor[r.group] || COLOR.inkMuted }} />
+                  </div>
+                  <div style={{ width: 95, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flexShrink: 0 }}>{fmt(r.value)}</div>
+                  <div style={{ width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{total ? ((r.value / total) * 100).toFixed(1) : "0"}%</div>
+                  {r.type === "Dépense" ? (
+                    <select value={categoryGroups[r.name] || "Non classifié"} onClick={(e) => e.stopPropagation()} onChange={(e) => setCategoryGroups({ ...categoryGroups, [r.name]: e.target.value as Group })}
+                      style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: groupColor[categoryGroups[r.name] || "Non classifié"], padding: "5px 8px", fontSize: 11.5, fontFamily: "'Inter', sans-serif", flexShrink: 0, width: 128, cursor: "pointer" }}>
+                      {GROUPS.map((g) => <option key={g} value={g}>{g}</option>)}
+                    </select>
+                  ) : <div style={{ width: 128, flexShrink: 0, fontSize: 11.5, color: COLOR.goldSoft, textAlign: "center" }}>Revenu</div>}
+                </div>
+                {isOpen && (
+                  <div style={{ marginLeft: 25, marginTop: 8, marginBottom: 4, paddingLeft: 12, borderLeft: `2px solid ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 5 }}>
+                    {hasRealSubs ? subs.map(([name, val]) => (
+                      <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+                        <span style={{ color: name === "Sans sous-catégorie" ? COLOR.inkMuted : COLOR.ink, fontStyle: name === "Sans sous-catégorie" ? "italic" : "normal" }}>{name}</span>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(val)}</span>
+                      </div>
+                    )) : (
+                      <span style={{ fontSize: 11.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune sous-catégorie renseignée sur ces transactions</span>
+                    )}
+                  </div>
+                )}
               </div>
-              <div style={{ width: 95, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flexShrink: 0 }}>{fmt(r.value)}</div>
-              <div style={{ width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{total ? ((r.value / total) * 100).toFixed(1) : "0"}%</div>
-              {r.type === "Dépense" ? (
-                <select value={categoryGroups[r.name] || "Non classifié"} onChange={(e) => setCategoryGroups({ ...categoryGroups, [r.name]: e.target.value as Group })}
-                  style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: groupColor[categoryGroups[r.name] || "Non classifié"], padding: "5px 8px", fontSize: 11.5, fontFamily: "'Inter', sans-serif", flexShrink: 0, width: 128, cursor: "pointer" }}>
-                  {GROUPS.map((g) => <option key={g} value={g}>{g}</option>)}
-                </select>
-              ) : <div style={{ width: 128, flexShrink: 0, fontSize: 11.5, color: COLOR.goldSoft, textAlign: "center" }}>Revenu</div>}
-            </div>
-          ))}
+            );
+          })}
           {!rows.length && <EmptyState />}
         </div>
       </Panel>
@@ -1079,7 +1164,7 @@ function EnveloppesTab({ filtered, cap, setCap }: { filtered: any[]; cap: number
 // ============================================================
 // SIMULATEUR "ET SI"
 // ============================================================
-function SimulateurTab({ filtered }: { filtered: any[] }) {
+function SimulateurTab({ filtered, accounts }: { filtered: any[]; accounts: Account[] }) {
   const nonProdCats = useMemo(() => {
     const m: Record<string, number> = {};
     filtered.filter((t) => t.type === "Dépense" && t.group === "Non-productif").forEach((t) => { m[t.category] = (m[t.category] || 0) + t.amount; });
@@ -1106,9 +1191,10 @@ function SimulateurTab({ filtered }: { filtered: any[] }) {
   const monthlySaving = savings / monthsInRange;
 
   const projection = useMemo(() => {
-    const last = netWorthRaw[netWorthRaw.length - 1][1];
-    return [0, 6, 12, 24].map((n) => ({ mois: n === 0 ? "aujourd'hui" : `+${n}m`, sansAction: last + (n * (projectNetWorth(1).avgDelta)), avecAction: last + (n * (projectNetWorth(1).avgDelta + monthlySaving)) }));
-  }, [monthlySaving]);
+    const series = liveNetWorthSeries(accounts);
+    const last = series[series.length - 1][1];
+    return [0, 6, 12, 24].map((n) => ({ mois: n === 0 ? "aujourd'hui" : `+${n}m`, sansAction: last + (n * (projectNetWorth(1, series).avgDelta)), avecAction: last + (n * (projectNetWorth(1, series).avgDelta + monthlySaving)) }));
+  }, [monthlySaving, accounts]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -1158,9 +1244,9 @@ function SimulateurTab({ filtered }: { filtered: any[] }) {
 // ============================================================
 // PROJECTION TAB CONTENT (utilisé dans Aperçu section additionnelle — intégré ici pour Simulateur avancé)
 // ============================================================
-function ProjectionPanel() {
+function ProjectionPanel({ accounts }: { accounts: Account[] }) {
   const [months, setMonths] = useState(12);
-  const { points } = projectNetWorth(months);
+  const { points } = projectNetWorth(months, liveNetWorthSeries(accounts));
   return (
     <Panel title="Projection de valeur nette" subtitle={`Basée sur la tendance des 6 derniers relevés — bande optimiste/pessimiste (±1 écart-type)`}
       right={
@@ -1193,10 +1279,10 @@ function ProjectionPanel() {
 // ============================================================
 // OBJECTIF D'ÉPARGNE
 // ============================================================
-function GoalsPanel({ goals, setGoals }: { goals: Goal[]; setGoals: (g: Goal[]) => void }) {
+function GoalsPanel({ goals, setGoals, accounts }: { goals: Goal[]; setGoals: (g: Goal[]) => void; accounts: Account[] }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Goal, "id">>({ name: "", target: 1000000, current: 0, date: "" });
-  const { avgDelta } = projectNetWorth(1);
+  const { avgDelta } = projectNetWorth(1, liveNetWorthSeries(accounts));
 
   const add = () => { if (!form.name || form.target <= 0) return; setGoals([...goals, { ...form, id: uid("g") }]); setForm({ name: "", target: 1000000, current: 0, date: "" }); setAdding(false); };
   const update = (id: string, patch: Partial<Goal>) => setGoals(goals.map((g) => (g.id === id ? { ...g, ...patch } : g)));
@@ -1705,7 +1791,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
     setTransactions([...transactions, { ...form, id: uid() }]);
     setForm(emptyForm(allCategories)); setAdding(false);
   };
-  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, category: t.category, type: t.type, amount: t.amount, payee: t.payee, note: t.note }); };
+  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note }); };
   const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
@@ -1791,7 +1877,16 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           <div style={{ padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label><input type="date" style={inputStyle} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label><input style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} list="cat-list" /><datalist id="cat-list">{allCategories.map((c) => <option key={c} value={c} />)}</datalist></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label><input style={{ ...inputStyle, width: 180 }} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value, subcategory: "" })} list="cat-list" /><datalist id="cat-list">{allCategories.map((c) => <option key={c} value={c} />)}</datalist></div>
+              {getSubcategories(form.type, form.category).length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Sous-catégorie</label>
+                  <select style={{ ...inputStyle, width: 160 }} value={form.subcategory || ""} onChange={(e) => setForm({ ...form, subcategory: e.target.value })}>
+                    <option value="">—</option>
+                    {getSubcategories(form.type, form.category).map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as TxType })}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label><input style={inputStyle} type="number" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
               <button onClick={() => setShowAdvanced((s) => !s)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 32 }}>{showAdvanced ? "− options" : "+ bénéficiaire / note"}</button>
@@ -1852,7 +1947,10 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                     ) : (
                       <>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{dateLabelFull(t.date)}</td>
-                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}` }}>{t.category}{t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}</td>
+                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}` }}>
+                          {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
+                          {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
+                        </td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
                         <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>{t.group}</td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
@@ -1952,6 +2050,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
   const [quickCategory, setQuickCategory] = useState(allCategories[0] || "Aliments");
+  const [quickSubcategory, setQuickSubcategory] = useState("");
   const [quickType, setQuickType] = useState<TxType>("Dépense");
   const [quickAmount, setQuickAmount] = useState<number | "">("");
   const [justAdded, setJustAdded] = useState(false);
@@ -1977,7 +2076,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   const submit = () => {
     if (!quickCategory || !quickAmount || Number(quickAmount) <= 0) return;
-    setTransactions([...transactions, { id: uid(), date: quickDate, category: quickCategory, type: quickType, amount: Number(quickAmount) }]);
+    setTransactions([...transactions, { id: uid(), date: quickDate, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount) }]);
     setQuickAmount("");
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1200);
@@ -2014,9 +2113,18 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
-            <input style={{ ...inputStyle, width: 190 }} value={quickCategory} onChange={(e) => setQuickCategory(e.target.value)} list="cat-list-quick" />
+            <input style={{ ...inputStyle, width: 190 }} value={quickCategory} onChange={(e) => { setQuickCategory(e.target.value); setQuickSubcategory(""); }} list="cat-list-quick" />
             <datalist id="cat-list-quick">{allCategories.map((c) => <option key={c} value={c} />)}</datalist>
           </div>
+          {getSubcategories(quickType, quickCategory).length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Sous-catégorie</label>
+              <select style={{ ...inputStyle, width: 160 }} value={quickSubcategory} onChange={(e) => setQuickSubcategory(e.target.value)}>
+                <option value="">—</option>
+                {getSubcategories(quickType, quickCategory).map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label>
             <input type="number" value={quickAmount} onChange={(e) => setQuickAmount(e.target.value === "" ? "" : Number(e.target.value))}
@@ -2039,7 +2147,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
             <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: COLOR.surfaceRaised, borderRadius: 6 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block" }} />
-                <span style={{ fontSize: 12.5 }}>{t.category}</span>
+                <span style={{ fontSize: 12.5 }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</span>
                 <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{t.type}</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2238,7 +2346,7 @@ export default function GrandLivre() {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
   }
 
-  const lastNW = netWorthRaw[netWorthRaw.length - 1][1];
+  const lastNW = liveNetWorthSeries(accounts)[liveNetWorthSeries(accounts).length - 1][1];
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: "flex" }}>
@@ -2297,7 +2405,7 @@ export default function GrandLivre() {
             <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
           </div>
 
-          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} />}
+          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} />}
@@ -2307,11 +2415,11 @@ export default function GrandLivre() {
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
           {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
           {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} />}
-          {tab === "simulateur" && <SimulateurTab filtered={filtered} />}
+          {tab === "simulateur" && <SimulateurTab filtered={filtered} accounts={accounts} />}
           {tab === "objectif" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-              <GoalsPanel goals={goals} setGoals={setGoals} />
-              <ProjectionPanel />
+              <GoalsPanel goals={goals} setGoals={setGoals} accounts={accounts} />
+              <ProjectionPanel accounts={accounts} />
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
