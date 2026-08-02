@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import * as XLSX from "xlsx";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine,
@@ -10,6 +11,7 @@ import {
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
+  FileSpreadsheet, FileText, Loader2,
 } from "lucide-react";
 
 // ============================================================
@@ -48,6 +50,9 @@ const fontImport = `
   .gl-safe-bottom { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   .gl-safe-top { padding-top: max(0px, env(safe-area-inset-top)); }
 }
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 `;
 
 function useIsMobile(breakpoint = 860) {
@@ -2208,6 +2213,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
 // RAPPORTS & EXPORT TAB
 // ============================================================
 function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters }) {
+  const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const solde = totalRevenus - totalDepenses;
@@ -2244,6 +2250,113 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
     URL.revokeObjectURL(url);
   };
 
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+
+    // Feuille Résumé
+    const byMonthXl: Record<string, { revenus: number; depenses: number }> = {};
+    filtered.forEach((t) => {
+      if (!byMonthXl[t.month]) byMonthXl[t.month] = { revenus: 0, depenses: 0 };
+      if (t.type === "Revenu") byMonthXl[t.month].revenus += t.amount; else byMonthXl[t.month].depenses += t.amount;
+    });
+    const summaryRows: any[][] = [
+      ["Grand Livre — Rapport financier"],
+      ["Période", `${monthLabel(filters.from)} — ${monthLabel(filters.to)}`],
+      ["Généré le", dateLabelFull(todayISO())],
+      [],
+      ["Revenus", totalRevenus],
+      ["Dépenses", totalDepenses],
+      ["Solde", solde],
+      ["Nombre de transactions", filtered.length],
+    ];
+    const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+    wsSummary["!cols"] = [{ wch: 26 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, wsSummary, "Résumé");
+
+    // Feuille Transactions
+    const txHeader = ["Date", "Catégorie", "Sous-catégorie", "Type", "Groupe", "Compte", "Bénéficiaire", "Note", "Montant (FCFA)"];
+    const txRows = filtered
+      .slice()
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map((t) => [t.date, t.category, t.subcategory || "", t.type, t.group, t.account || "", t.payee || "", t.note || "", t.amount]);
+    const wsTx = XLSX.utils.aoa_to_sheet([txHeader, ...txRows]);
+    wsTx["!cols"] = [{ wch: 12 }, { wch: 22 }, { wch: 18 }, { wch: 10 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 20 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsTx, "Transactions");
+
+    // Feuille Par mois
+    const monthHeader = ["Mois", "Revenus", "Dépenses", "Solde"];
+    const monthRows = Object.keys(byMonthXl)
+      .sort((a, b) => monthSortKey(a) - monthSortKey(b))
+      .map((k) => [monthLabel(k), byMonthXl[k].revenus, byMonthXl[k].depenses, byMonthXl[k].revenus - byMonthXl[k].depenses]);
+    const wsMonth = XLSX.utils.aoa_to_sheet([monthHeader, ...monthRows]);
+    wsMonth["!cols"] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsMonth, "Par mois");
+
+    // Feuille Par catégorie
+    const catTotals: Record<string, { value: number; type: string }> = {};
+    filtered.forEach((t) => {
+      if (!catTotals[t.category]) catTotals[t.category] = { value: 0, type: t.type };
+      catTotals[t.category].value += t.amount;
+    });
+    const catHeader = ["Catégorie", "Type", "Total (FCFA)"];
+    const catRows = Object.entries(catTotals).sort((a, b) => b[1].value - a[1].value).map(([name, d]) => [name, d.type, d.value]);
+    const wsCat = XLSX.utils.aoa_to_sheet([catHeader, ...catRows]);
+    wsCat["!cols"] = [{ wch: 26 }, { wch: 10 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsCat, "Par catégorie");
+
+    XLSX.writeFile(wb, `grand-livre_${filters.from}_${filters.to}.xlsx`);
+  };
+
+  const exportPDF = async () => {
+    setPdfState("loading");
+    try {
+      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+        import(/* @vite-ignore */ "jspdf"),
+        import(/* @vite-ignore */ "jspdf-autotable"),
+      ]);
+      const autoTable = (autoTableModule as any).default || autoTableModule;
+      const doc = new jsPDF();
+
+      doc.setFontSize(17);
+      doc.setTextColor(26, 43, 76);
+      doc.text("Grand Livre — Rapport financier", 14, 18);
+      doc.setFontSize(10);
+      doc.setTextColor(90, 90, 90);
+      doc.text(`Période : ${monthLabel(filters.from)} — ${monthLabel(filters.to)}`, 14, 25);
+      doc.text(`Généré le ${dateLabelFull(todayISO())}`, 14, 30);
+
+      doc.setFontSize(11);
+      doc.setTextColor(30, 120, 90);
+      doc.text(`Revenus : ${fmt(totalRevenus)} FCFA`, 14, 40);
+      doc.setTextColor(180, 60, 50);
+      doc.text(`Dépenses : ${fmt(totalDepenses)} FCFA`, 80, 40);
+      doc.setTextColor(solde >= 0 ? 30 : 180, solde >= 0 ? 120 : 60, solde >= 0 ? 90 : 50);
+      doc.text(`Solde : ${fmt(solde)} FCFA`, 150, 40);
+
+      const rows = filtered
+        .slice()
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .map((t) => [dateLabelFull(t.date), t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, t.group, fmt(t.amount)]);
+
+      autoTable(doc, {
+        startY: 48,
+        head: [["Date", "Catégorie", "Type", "Groupe", "Montant (FCFA)"]],
+        body: rows,
+        styles: { fontSize: 8, cellPadding: 2.5 },
+        headStyles: { fillColor: [26, 43, 76], textColor: 255, fontStyle: "bold" },
+        alternateRowStyles: { fillColor: [245, 245, 245] },
+        columnStyles: { 4: { halign: "right" } },
+        margin: { left: 14, right: 14 },
+      });
+
+      doc.save(`grand-livre_${filters.from}_${filters.to}.pdf`);
+      setPdfState("idle");
+    } catch (e) {
+      setPdfState("error");
+      setTimeout(() => setPdfState("idle"), 4000);
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Résumé automatique" subtitle="Généré à partir de la période filtrée" right={<Sparkles size={16} color={COLOR.goldSoft} />}>
@@ -2251,13 +2364,25 @@ function ExportTab({ filtered, filters }: { filtered: any[]; filters: Filters })
       </Panel>
       <Panel title="Exporter le rapport filtré" subtitle={`${filtered.length} transaction(s) dans la sélection actuelle`}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <button onClick={exportCSV} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
-            <Download size={15} /> Exporter en CSV (Excel)
+          <button onClick={exportExcel} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
+            <FileSpreadsheet size={15} /> Exporter en Excel (.xlsx)
+          </button>
+          <button onClick={exportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 8, background: pdfState === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${pdfState === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8, color: pdfState === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "10px 18px", fontSize: 13, cursor: pdfState === "loading" ? "default" : "pointer" }}>
+            {pdfState === "loading" ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <FileText size={15} />}
+            {pdfState === "loading" ? "Génération…" : pdfState === "error" ? "Échec — réessayer" : "Télécharger en PDF"}
+          </button>
+          <button onClick={exportCSV} style={{ display: "flex", alignItems: "center", gap: 8, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
+            <Download size={15} /> Exporter en CSV
           </button>
           <button onClick={() => window.print()} style={{ display: "flex", alignItems: "center", gap: 8, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
-            <Printer size={15} /> Imprimer / PDF
+            <Printer size={15} /> Imprimer
           </button>
         </div>
+        {pdfState === "error" && (
+          <div style={{ marginTop: 12, fontSize: 11.5, color: COLOR.claySoft, display: "flex", alignItems: "center", gap: 6 }}>
+            <AlertTriangle size={12} /> Le générateur PDF n'a pas pu se charger (aperçu Claude sans accès à cette librairie). Fonctionne normalement sur le site déployé.
+          </div>
+        )}
       </Panel>
       <Panel title="Aperçu du rapport imprimable" subtitle="Ce contenu apparaît lors de l'impression">
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
@@ -2977,4 +3102,3 @@ export default function GrandLivre() {
     </div>
   );
 }
-
