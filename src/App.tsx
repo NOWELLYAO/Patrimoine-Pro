@@ -2798,60 +2798,82 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
-        <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label>
-            <input type="date" value={quickDate} onChange={(e) => setQuickDate(e.target.value)} style={{ ...inputStyle, width: 150 }} />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label>
-            <div style={{ display: "flex", gap: 6 }}>
-              {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
-                <button key={ty} onClick={() => { setQuickType(ty); setQuickSubcategory(""); setQuickCategory(defaultQuickCategory(transactions, ty)); }} style={{
-                  padding: "8px 16px", borderRadius: 6, fontSize: 12.5, cursor: "pointer",
-                  border: `1px solid ${quickType === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
-                  background: quickType === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
-                  color: quickType === ty ? (ty === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted,
-                }}>{ty}</button>
-              ))}
+        {(() => {
+          const subcats = getSubcategories(quickType, quickCategory);
+          const typeColor = quickType === "Revenu" ? COLOR.emerald : COLOR.clay;
+          const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
+          const nakedSelect: React.CSSProperties = {
+            background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600,
+            fontFamily: "'Fraunces', serif", padding: 0, cursor: "pointer", width: "100%", appearance: "none", WebkitAppearance: "none",
+          };
+          return (
+            <div style={{ background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.surface} 70%)`, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, overflow: "hidden" }}>
+              {/* Type + Date */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 20px 6px 20px" }}>
+                <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 16px" }}>
+                  <input type="date" value={quickDate} onChange={(e) => setQuickDate(e.target.value)}
+                    style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+                </div>
+                <div style={{ display: "flex", gap: 10, background: COLOR.surface, borderRadius: 24, padding: 5, border: `1px solid ${COLOR.hairline}` }}>
+                  <button onClick={() => { setQuickType("Dépense"); setQuickSubcategory(""); setQuickCategory(defaultQuickCategory(transactions, "Dépense")); }} title="Dépense" style={{
+                    width: 34, height: 34, borderRadius: "50%", border: "none", cursor: "pointer",
+                    background: quickType === "Dépense" ? COLOR.clay : "transparent", color: quickType === "Dépense" ? COLOR.bg : COLOR.claySoft,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}><Minus size={16} strokeWidth={2.5} /></button>
+                  <button onClick={() => { setQuickType("Revenu"); setQuickSubcategory(""); setQuickCategory(defaultQuickCategory(transactions, "Revenu")); }} title="Revenu" style={{
+                    width: 34, height: 34, borderRadius: "50%", border: "none", cursor: "pointer",
+                    background: quickType === "Revenu" ? COLOR.emerald : "transparent", color: quickType === "Revenu" ? COLOR.bg : COLOR.emeraldSoft,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}><Plus size={16} strokeWidth={2.5} /></button>
+                </div>
+              </div>
+
+              {/* Montant */}
+              <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "18px 24px 8px 24px" }}>
+                <div style={{ position: "absolute", fontSize: 56, fontWeight: 700, color: typeColor, opacity: 0.07, fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none", top: 10 }}>FCFA</div>
+                <input type="number" value={quickAmount} placeholder="0"
+                  onChange={(e) => setQuickAmount(e.target.value === "" ? "" : Number(e.target.value))}
+                  onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+                  style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 42, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 260 }} />
+              </div>
+
+              {/* Compte / Catégorie */}
+              <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "16px 20px" }}>
+                <div style={{ display: "flex", gap: 24 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={fieldLabel}>Compte</div>
+                    <select value={quickAccount} onChange={(e) => setQuickAccount(e.target.value)} style={nakedSelect}>
+                      {!accounts.length && <option value="">Aucun compte créé</option>}
+                      {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
+                    <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
+                    <select value={quickCategory} onChange={(e) => { setQuickCategory(e.target.value); setQuickSubcategory(""); }} style={{ ...nakedSelect, textAlign: "right" }}>
+                      {categoriesForType(transactions, quickType).map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    {subcats.length > 0 && (
+                      <select value={quickSubcategory} onChange={(e) => setQuickSubcategory(e.target.value)} style={{ ...nakedSelect, textAlign: "right", fontSize: 13, fontWeight: 400, color: COLOR.inkMuted, marginTop: 12, display: "block", fontFamily: "'Inter', sans-serif" }}>
+                        <option value="">— sous-catégorie —</option>
+                        {subcats.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    )}
+                  </div>
+                </div>
+
+                <button onClick={submit} disabled={!quickAmount || Number(quickAmount) <= 0} style={{
+                  width: "100%", marginTop: 18, padding: "14px 0", borderRadius: 12, border: "none",
+                  background: justAdded ? COLOR.emerald : (!quickAmount || Number(quickAmount) <= 0) ? COLOR.hairline : COLOR.gold,
+                  color: justAdded ? COLOR.bg : (!quickAmount || Number(quickAmount) <= 0) ? COLOR.inkMuted : COLOR.bg,
+                  fontSize: 14.5, fontWeight: 700, cursor: (!quickAmount || Number(quickAmount) <= 0) ? "default" : "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.15s",
+                }}>
+                  {justAdded ? <Check size={17} /> : null} {justAdded ? "Ajouté" : "Sauvegarder"}
+                </button>
+              </div>
             </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
-            <select style={{ ...inputStyle, width: 190 }} value={quickCategory} onChange={(e) => { setQuickCategory(e.target.value); setQuickSubcategory(""); }}>
-              {categoriesForType(transactions, quickType).map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          {getSubcategories(quickType, quickCategory).length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Sous-catégorie</label>
-              <select style={{ ...inputStyle, width: 160 }} value={quickSubcategory} onChange={(e) => setQuickSubcategory(e.target.value)}>
-                <option value="">—</option>
-                {getSubcategories(quickType, quickCategory).map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
-          )}
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label>
-            <input type="number" value={quickAmount} onChange={(e) => setQuickAmount(e.target.value === "" ? "" : Number(e.target.value))}
-              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-              style={{ ...inputStyle, width: 140 }} placeholder="0" autoFocus />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
-            <select style={{ ...inputStyle, width: 150 }} value={quickAccount} onChange={(e) => setQuickAccount(e.target.value)}>
-              {!accounts.length && <option value="">Aucun compte créé</option>}
-              {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
-            </select>
-          </div>
-          <button onClick={submit} style={{
-            display: "flex", alignItems: "center", gap: 6, background: justAdded ? COLOR.emerald : "rgba(201,162,39,0.16)",
-            border: `1px solid ${justAdded ? COLOR.emerald : COLOR.gold}`, borderRadius: 6,
-            color: justAdded ? COLOR.bg : COLOR.goldSoft, padding: "8px 16px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 34,
-          }}>
-            {justAdded ? <Check size={14} /> : <Plus size={14} />} {justAdded ? "Ajouté" : "Ajouter"}
-          </button>
-        </div>
+          );
+        })()}
       </Panel>
 
       <Panel title={`Entrées du ${dateLabelFull(quickDate)}`} subtitle={`Revenus ${fmt(sumFor((t) => t.date === quickDate).rev)} · Dépenses ${fmt(sumFor((t) => t.date === quickDate).dep)} · Solde ${fmt(sumFor((t) => t.date === quickDate).solde)}`}>
