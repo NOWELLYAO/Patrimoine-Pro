@@ -3119,19 +3119,13 @@ export default function GrandLivre() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   useEffect(() => {
     if (isMobile && mobileMenuOpen) {
-      const prevOverflow = document.body.style.overflow;
-      const prevPosition = document.body.style.position;
-      const scrollY = window.scrollY;
+      const prevHtmlOverflow = document.documentElement.style.overflow;
+      const prevBodyOverflow = document.body.style.overflow;
+      document.documentElement.style.overflow = "hidden";
       document.body.style.overflow = "hidden";
-      document.body.style.position = "fixed";
-      document.body.style.top = `-${scrollY}px`;
-      document.body.style.width = "100%";
       return () => {
-        document.body.style.overflow = prevOverflow;
-        document.body.style.position = prevPosition;
-        document.body.style.top = "";
-        document.body.style.width = "";
-        window.scrollTo(0, scrollY);
+        document.documentElement.style.overflow = prevHtmlOverflow;
+        document.body.style.overflow = prevBodyOverflow;
       };
     }
   }, [isMobile, mobileMenuOpen]);
@@ -3295,12 +3289,12 @@ export default function GrandLivre() {
       {(!isMobile || mobileMenuOpen) && (
         <>
           {isMobile && (
-            <div onClick={() => setMobileMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 210 }} />
+            <div onClick={() => setMobileMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 210, touchAction: "none" }} />
           )}
           <aside className="gl-noprint gl-scroll" style={{
             width: isMobile ? 268 : (sidebarOpen ? 226 : 0), flexShrink: 0, borderRight: `1px solid ${COLOR.hairline}`,
             transition: isMobile ? "none" : "width 0.2s", overflowY: isMobile ? "auto" : "hidden", overflowX: "hidden",
-            position: isMobile ? "fixed" : "static", top: 0, left: 0, height: isMobile ? "100vh" : "auto",
+            position: isMobile ? "fixed" : "static", top: 0, left: 0, height: isMobile ? "100dvh" : "auto", bottom: isMobile ? 0 : "auto",
             zIndex: isMobile ? 220 : "auto", background: isMobile ? COLOR.bg : "transparent",
             WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
