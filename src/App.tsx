@@ -8,7 +8,7 @@ import {
   TrendingDown, Filter, X, Plus, Pencil, Trash2, Save, RotateCcw, Search,
   ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight,
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
-  Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square,
+  Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
 } from "lucide-react";
 
@@ -42,7 +42,23 @@ const fontImport = `
   .gl-print-full { max-width: 100% !important; }
   body { background: white !important; }
 }
+.gl-scroll::-webkit-scrollbar { height: 5px; width: 5px; }
+.gl-scroll::-webkit-scrollbar-thumb { background: #2a362e; border-radius: 4px; }
+@supports (padding: max(0px)) {
+  .gl-safe-bottom { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .gl-safe-top { padding-top: max(0px, env(safe-area-inset-top)); }
+}
 `;
+
+function useIsMobile(breakpoint = 860) {
+  const [isMobile, setIsMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth < breakpoint : false));
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
 
 // ============================================================
 // TYPES
@@ -2332,8 +2348,8 @@ function JournalierTab({ filtered }: { filtered: any[] }) {
 // ============================================================
 // SAISIE RAPIDE FLOTTANTE — accessible depuis n'importe quel onglet
 // ============================================================
-function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups }: {
-  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[]; categoryGroups: Record<string, Group>;
+function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, isMobile }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[]; categoryGroups: Record<string, Group>; isMobile: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState(todayISO());
@@ -2363,11 +2379,11 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups }
   return (
     <>
       {open && (
-        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 90, backdropFilter: "blur(2px)" }} />
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 200, backdropFilter: "blur(2px)" }} />
       )}
       {open && (
         <div onClick={(e) => e.stopPropagation()} style={{
-          position: "fixed", bottom: 96, right: 24, width: 340, maxWidth: "calc(100vw - 32px)", zIndex: 100,
+          position: "fixed", bottom: isMobile ? 148 : 96, right: isMobile ? 16 : 24, left: isMobile ? 16 : "auto", width: isMobile ? "auto" : 340, maxWidth: "calc(100vw - 32px)", zIndex: 205,
           background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 14, padding: 20,
           boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
         }}>
@@ -2433,7 +2449,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups }
         </div>
       )}
       <button onClick={() => setOpen((o) => !o)} className="gl-noprint" style={{
-        position: "fixed", bottom: 28, right: 24, zIndex: 100, width: 56, height: 56, borderRadius: "50%",
+        position: "fixed", bottom: isMobile ? 82 : 28, right: 24, zIndex: 155, width: 56, height: 56, borderRadius: "50%",
         background: open ? COLOR.hairline : COLOR.gold, border: "none", color: COLOR.bg, cursor: "pointer",
         display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 20px rgba(201,162,39,0.4)",
         transition: "transform 0.15s", transform: open ? "rotate(45deg)" : "none",
@@ -2496,6 +2512,9 @@ export default function GrandLivre() {
   const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring);
   const [tab, setTab] = useState<Tab>("saisie");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const isMobile = useIsMobile();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(!isMobile);
 
   const allMonths = useMemo(() => {
     const s = new Set(transactions.map((t) => dateToMonthKey(t.date)));
@@ -2559,61 +2578,98 @@ export default function GrandLivre() {
   const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
 
   return (
-    <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: "flex" }}>
+    <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
       <style>{fontImport}</style>
 
-      {/* SIDEBAR */}
-      <aside className="gl-noprint" style={{ width: sidebarOpen ? 226 : 0, flexShrink: 0, borderRight: `1px solid ${COLOR.hairline}`, transition: "width 0.2s", overflow: "hidden" }}>
-        <div style={{ width: 226, padding: "24px 16px" }}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.16em", color: COLOR.gold, textTransform: "uppercase", marginBottom: 6, paddingLeft: 8 }}>XOF</div>
-          <h1 style={{ fontFamily: "'Fraunces', serif", fontWeight: 500, fontSize: 24, margin: "0 0 22px 0", paddingLeft: 8 }}>Grand Livre</h1>
-          {NAV.map((section) => (
-            <div key={section.section} style={{ marginBottom: 18 }}>
-              <div style={{ fontSize: 10, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.08em", padding: "0 8px 8px 8px" }}>{section.section}</div>
-              {section.items.map((item) => {
-                const Icon = item.icon; const active = tab === item.id;
-                return (
-                  <button key={item.id} onClick={() => setTab(item.id)} style={{
-                    display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
-                    background: active ? "rgba(201,162,39,0.1)" : "transparent", border: "none",
-                    borderLeft: active ? `2px solid ${COLOR.gold}` : "2px solid transparent",
-                    color: active ? COLOR.ink : COLOR.inkMuted, padding: "8px 8px 8px 10px", fontSize: 13, cursor: "pointer",
-                    borderRadius: 4, marginBottom: 2, fontFamily: "'Inter', sans-serif",
-                  }}>
-                    <Icon size={14} /> {item.label}
+      {/* SIDEBAR — poussé sur desktop, tiroir superposé sur mobile */}
+      {(!isMobile || mobileMenuOpen) && (
+        <>
+          {isMobile && (
+            <div onClick={() => setMobileMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 210 }} />
+          )}
+          <aside className="gl-noprint gl-scroll" style={{
+            width: isMobile ? 268 : (sidebarOpen ? 226 : 0), flexShrink: 0, borderRight: `1px solid ${COLOR.hairline}`,
+            transition: isMobile ? "none" : "width 0.2s", overflow: isMobile ? "auto" : "hidden",
+            position: isMobile ? "fixed" : "static", top: 0, left: 0, height: isMobile ? "100vh" : "auto",
+            zIndex: isMobile ? 220 : "auto", background: isMobile ? COLOR.bg : "transparent",
+          }}>
+            <div className="gl-safe-top" style={{ width: isMobile ? 268 : 226, padding: "24px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.16em", color: COLOR.gold, textTransform: "uppercase", paddingLeft: 8 }}>XOF</div>
+                {isMobile && (
+                  <button onClick={() => setMobileMenuOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", padding: 6 }}>
+                    <X size={18} />
                   </button>
-                );
-              })}
+                )}
+              </div>
+              <h1 style={{ fontFamily: "'Fraunces', serif", fontWeight: 500, fontSize: 24, margin: "0 0 22px 0", paddingLeft: 8 }}>Grand Livre</h1>
+              {NAV.map((section) => (
+                <div key={section.section} style={{ marginBottom: 18 }}>
+                  <div style={{ fontSize: 10, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.08em", padding: "0 8px 8px 8px" }}>{section.section}</div>
+                  {section.items.map((item) => {
+                    const Icon = item.icon; const active = tab === item.id;
+                    return (
+                      <button key={item.id} onClick={() => { setTab(item.id); setMobileMenuOpen(false); }} style={{
+                        display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+                        background: active ? "rgba(201,162,39,0.1)" : "transparent", border: "none",
+                        borderLeft: active ? `2px solid ${COLOR.gold}` : "2px solid transparent",
+                        color: active ? COLOR.ink : COLOR.inkMuted, padding: "10px 8px 10px 10px", fontSize: 13.5, cursor: "pointer",
+                        borderRadius: 4, marginBottom: 2, fontFamily: "'Inter', sans-serif",
+                      }}>
+                        <Icon size={15} /> {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      </aside>
+          </aside>
+        </>
+      )}
 
       {/* MAIN */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <header style={{ borderBottom: `1px solid ${COLOR.hairline}`, padding: "20px 32px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <button className="gl-noprint" onClick={() => setSidebarOpen((s) => !s)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: 7, cursor: "pointer", display: "flex" }}>
-                <Layers size={14} />
+        <header className="gl-safe-top" style={{ borderBottom: `1px solid ${COLOR.hairline}`, padding: isMobile ? "16px 16px" : "20px 32px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button className="gl-noprint" onClick={() => (isMobile ? setMobileMenuOpen(true) : setSidebarOpen((s) => !s))} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: 7, cursor: "pointer", display: "flex" }}>
+                {isMobile ? <Menu size={16} /> : <Layers size={14} />}
               </button>
-              <div>
+              {!isMobile && (
                 <div style={{ fontSize: 12.5, color: COLOR.inkMuted }}>
                   {allMonths.length ? `${monthLabel(allMonths[0])} — ${monthLabel(allMonths[allMonths.length - 1])}` : ""} · {transactions.length} transactions
                 </div>
-              </div>
+              )}
             </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.12em", color: COLOR.inkMuted, textTransform: "uppercase" }}>Valeur nette (dernier relevé)</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 26, fontWeight: 600, color: COLOR.goldSoft }}>{fmt(lastNW)}<span style={{ fontSize: 13, color: COLOR.inkMuted, marginLeft: 6 }}>FCFA</span></div>
+            <div style={{ textAlign: isMobile ? "left" : "right" }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: "0.1em", color: COLOR.inkMuted, textTransform: "uppercase" }}>Valeur nette</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: isMobile ? 21 : 26, fontWeight: 600, color: COLOR.goldSoft }}>{fmt(lastNW)}<span style={{ fontSize: 12, color: COLOR.inkMuted, marginLeft: 6 }}>FCFA</span></div>
             </div>
           </div>
         </header>
 
-        <main className="gl-print-full" style={{ maxWidth: 1180, padding: "24px 32px 60px 32px" }}>
+        <main className="gl-print-full" style={{ maxWidth: 1180, padding: isMobile ? "16px 14px 100px 14px" : "24px 32px 60px 32px" }}>
           {tab !== "saisie" && (
             <div className="gl-noprint" style={{ marginBottom: 20 }}>
-              <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
+              {isMobile ? (
+                <div>
+                  <button onClick={() => setFiltersOpen((o) => !o)} style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+                    background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "12px 16px",
+                    color: COLOR.goldSoft, fontSize: 13, cursor: "pointer",
+                  }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8 }}><Filter size={14} /> Filtres</span>
+                    <ChevronRight size={14} style={{ transform: filtersOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
+                  </button>
+                  {filtersOpen && (
+                    <div style={{ marginTop: 10 }}>
+                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
+              )}
             </div>
           )}
 
@@ -2662,12 +2718,48 @@ export default function GrandLivre() {
           )}
         </main>
 
-        <footer className="gl-noprint" style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 32px", textAlign: "center", color: COLOR.inkMuted, fontSize: 11.5, fontFamily: "'IBM Plex Mono', monospace" }}>
-          Grand Livre · {transactions.length} transactions · {loans.length} créance(s) suivie(s) · données stockées uniquement dans ce navigateur
-        </footer>
+        {!isMobile && (
+          <footer className="gl-noprint" style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 32px", textAlign: "center", color: COLOR.inkMuted, fontSize: 11.5, fontFamily: "'IBM Plex Mono', monospace" }}>
+            Grand Livre · {transactions.length} transactions · {loans.length} créance(s) suivie(s) · données stockées uniquement dans ce navigateur
+          </footer>
+        )}
       </div>
+
+      {isMobile && (
+        <nav className="gl-noprint gl-safe-bottom" style={{
+          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 150,
+          background: "rgba(14,22,17,0.96)", backdropFilter: "blur(10px)", borderTop: `1px solid ${COLOR.hairline}`,
+          display: "flex", justifyContent: "space-around", padding: "8px 4px 4px 4px",
+        }}>
+          {[
+            { id: "saisie" as Tab, label: "Saisie", icon: Clock },
+            { id: "apercu" as Tab, label: "Aperçu", icon: LayoutDashboard },
+            { id: "journal" as Tab, label: "Journal", icon: BookOpen },
+            { id: "comptes" as Tab, label: "Comptes", icon: Wallet },
+          ].map((item) => {
+            const Icon = item.icon; const active = tab === item.id;
+            return (
+              <button key={item.id} onClick={() => setTab(item.id)} style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 3, background: "transparent",
+                border: "none", color: active ? COLOR.goldSoft : COLOR.inkMuted, cursor: "pointer", padding: "6px 10px", flex: 1,
+              }}>
+                <Icon size={19} />
+                <span style={{ fontSize: 10 }}>{item.label}</span>
+              </button>
+            );
+          })}
+          <button onClick={() => setMobileMenuOpen(true)} style={{
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 3, background: "transparent",
+            border: "none", color: COLOR.inkMuted, cursor: "pointer", padding: "6px 10px", flex: 1,
+          }}>
+            <Menu size={19} />
+            <span style={{ fontSize: 10 }}>Menu</span>
+          </button>
+        </nav>
+      )}
+
       {tab !== "saisie" && (
-        <QuickAddFAB transactions={transactions} setTransactions={setTransactions} accounts={accounts} categoryGroups={resolvedGroups} />
+        <QuickAddFAB transactions={transactions} setTransactions={setTransactions} accounts={accounts} categoryGroups={resolvedGroups} isMobile={isMobile} />
       )}
     </div>
   );
