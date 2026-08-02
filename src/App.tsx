@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine,
@@ -59,6 +59,49 @@ function useIsMobile(breakpoint = 860) {
   }, [breakpoint]);
   return isMobile;
 }
+
+// ============================================================
+// SYNCHRONISATION CLOUD (Supabase) — désactivée automatiquement si les
+// variables d'environnement VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
+// ne sont pas définies (ex: aperçu dans Claude). Aucune dépendance ajoutée :
+// simples appels fetch() vers l'API REST de Supabase (PostgREST).
+// ============================================================
+function getEnvVar(name: string): string {
+  try {
+    // @ts-ignore — import.meta.env n'existe que dans un contexte Vite
+    return (typeof import.meta !== "undefined" && (import.meta as any).env && (import.meta as any).env[name]) || "";
+  } catch { return ""; }
+}
+const SUPABASE_URL = getEnvVar("VITE_SUPABASE_URL");
+const SUPABASE_ANON_KEY = getEnvVar("VITE_SUPABASE_ANON_KEY");
+const SYNC_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+
+async function fetchRemoteState(syncCode: string): Promise<any | null> {
+  if (!SYNC_ENABLED || !syncCode) return null;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows?.[0]?.data || null;
+  } catch { return null; }
+}
+async function pushRemoteState(syncCode: string, data: any): Promise<boolean> {
+  if (!SYNC_ENABLED || !syncCode) return false;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json", Prefer: "resolution=merge-duplicates",
+      },
+      body: JSON.stringify({ sync_code: syncCode, data, updated_at: new Date().toISOString() }),
+    });
+    return res.ok;
+  } catch { return false; }
+}
+
 
 // ============================================================
 // TYPES
@@ -1762,8 +1805,12 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // ============================================================
 // SAUVEGARDE & RESTAURATION
 // ============================================================
-function SauvegardeTab({ getSnapshot, restore }: { getSnapshot: () => any; restore: (data: any) => void }) {
+function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync }: {
+  getSnapshot: () => any; restore: (data: any) => void; syncCode: string; setSyncCode: (c: string) => void;
+  syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void;
+}) {
   const [status, setStatus] = useState<string | null>(null);
+  const [codeInput, setCodeInput] = useState(syncCode);
   const download = () => {
     const data = getSnapshot();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -1790,8 +1837,65 @@ function SauvegardeTab({ getSnapshot, restore }: { getSnapshot: () => any; resto
     reader.readAsText(file);
   };
 
+  const generateCode = () => {
+    const words = ["atelier", "lagune", "baobab", "kora", "orage", "savane", "azur", "grelot", "brume", "corail"];
+    const code = `${words[Math.floor(Math.random() * words.length)]}-${words[Math.floor(Math.random() * words.length)]}-${Math.floor(Math.random() * 900 + 100)}`;
+    setCodeInput(code);
+  };
+
+  const statusLabel: Record<string, { text: string; color: string }> = {
+    idle: { text: "Non connecté", color: COLOR.inkMuted },
+    syncing: { text: "Synchronisation…", color: COLOR.goldSoft },
+    synced: { text: `Synchronisé${lastSyncedAt ? " à " + lastSyncedAt : ""}`, color: COLOR.emeraldSoft },
+    error: { text: "Erreur de synchronisation", color: COLOR.claySoft },
+    disabled: { text: "Non configuré", color: COLOR.inkMuted },
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <Panel title="Synchronisation entre appareils" subtitle="Un même code de synchronisation, saisi sur ton iPhone et ton ordinateur, relie automatiquement tes données">
+        {syncStatus === "disabled" ? (
+          <div style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.7, display: "flex", gap: 10 }}>
+            <Info size={16} color={COLOR.gold} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span>
+              La synchronisation cloud n'est pas configurée sur ce déploiement — les variables d'environnement
+              <code style={{ color: COLOR.goldSoft }}> VITE_SUPABASE_URL</code> et <code style={{ color: COLOR.goldSoft }}>VITE_SUPABASE_ANON_KEY</code> sont
+              absentes. Ajoute-les dans les réglages Vercel du projet, puis redéploie. En attendant, utilise
+              l'export/import manuel ci-dessous pour transférer tes données entre appareils.
+            </span>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: statusLabel[syncStatus].color, display: "inline-block" }} />
+              <span style={{ fontSize: 12.5, color: statusLabel[syncStatus].color }}>{statusLabel[syncStatus].text}</span>
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 220 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Code de synchronisation</label>
+                <input style={inputStyle} value={codeInput} onChange={(e) => setCodeInput(e.target.value)} placeholder="ex: atelier-lagune-482" />
+              </div>
+              <button onClick={generateCode} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 12px", fontSize: 12, cursor: "pointer", height: 34 }}>Générer</button>
+              <button onClick={() => setSyncCode(codeInput.trim())} disabled={!codeInput.trim()} style={{ background: codeInput.trim() ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: codeInput.trim() ? COLOR.bg : COLOR.inkMuted, padding: "9px 16px", fontSize: 12.5, fontWeight: 600, cursor: codeInput.trim() ? "pointer" : "default", height: 34 }}>
+                {syncCode ? "Mettre à jour" : "Se connecter"}
+              </button>
+              {syncCode && (
+                <button onClick={() => { setSyncCode(""); setCodeInput(""); }} style={{ background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 6, color: COLOR.claySoft, padding: "9px 16px", fontSize: 12.5, cursor: "pointer", height: 34 }}>
+                  Déconnecter
+                </button>
+              )}
+            </div>
+            {syncCode && (
+              <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <button onClick={onForceSync} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+                  <RotateCcw size={12} /> Forcer la synchronisation
+                </button>
+                <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Saisis exactement le même code sur ton autre appareil pour le relier.</span>
+              </div>
+            )}
+          </>
+        )}
+      </Panel>
       <Panel title="Sauvegarde" subtitle="Toutes tes données vivent uniquement dans ce navigateur — exporte-les régulièrement pour ne rien perdre">
         <button onClick={download} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
           <Download size={15} /> Télécharger une sauvegarde complète (.json)
@@ -2515,6 +2619,11 @@ export default function GrandLivre() {
   const isMobile = useIsMobile();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(!isMobile);
+  const [syncCode, setSyncCode, syncCodeLoaded] = usePersistentState<string>("gl-sync-code", "");
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "synced" | "error" | "disabled">(SYNC_ENABLED ? "idle" : "disabled");
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const skipNextPush = useRef(false);
+  const pushTimer = useRef<any>(null);
 
   const allMonths = useMemo(() => {
     const s = new Set(transactions.map((t) => dateToMonthKey(t.date)));
@@ -2570,7 +2679,54 @@ export default function GrandLivre() {
     });
   }, [txWithGroup, filters]);
 
-  const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded;
+  const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded;
+
+  // Tire l'état distant au chargement si un code de synchronisation est défini.
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    let cancelled = false;
+    (async () => {
+      setSyncStatus("syncing");
+      const remote = await fetchRemoteState(syncCode);
+      if (cancelled) return;
+      if (remote) {
+        skipNextPush.current = true;
+        if (remote.transactions) setTransactions(remote.transactions);
+        if (remote.categoryGroups) setCategoryGroups(remote.categoryGroups);
+        if (remote.categoryScope) setCategoryScope(remote.categoryScope);
+        if (remote.rules) setRules(remote.rules);
+        if (remote.loans) setLoans(remote.loans);
+        if (typeof remote.envelopeCap === "number") setEnvelopeCap(remote.envelopeCap);
+        if (remote.accounts) setAccounts(remote.accounts);
+        if (remote.budgets) setBudgets(remote.budgets);
+        if (remote.goals) setGoals(remote.goals);
+        if (remote.recurring) setRecurring(remote.recurring);
+        setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+      }
+      setSyncStatus("synced");
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allLoaded, syncCode]);
+
+  // Pousse l'état local vers le cloud après chaque modification (avec un court délai
+  // pour regrouper les changements rapprochés et éviter de spammer l'API).
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    if (skipNextPush.current) { skipNextPush.current = false; return; }
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(async () => {
+      setSyncStatus("syncing");
+      const ok = await pushRemoteState(syncCode, {
+        transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+      });
+      setSyncStatus(ok ? "synced" : "error");
+      if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+    }, 1500);
+    return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, syncCode, allLoaded]);
+
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
   }
@@ -2642,7 +2798,13 @@ export default function GrandLivre() {
               )}
             </div>
             <div style={{ textAlign: isMobile ? "left" : "right" }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: "0.1em", color: COLOR.inkMuted, textTransform: "uppercase" }}>Valeur nette</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: isMobile ? "flex-start" : "flex-end" }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: "0.1em", color: COLOR.inkMuted, textTransform: "uppercase" }}>Valeur nette</div>
+                {SYNC_ENABLED && syncCode && (
+                  <span title={syncStatus === "synced" ? "Synchronisé" : syncStatus === "syncing" ? "Synchronisation…" : "Erreur de synchronisation"}
+                    style={{ width: 6, height: 6, borderRadius: "50%", display: "inline-block", background: syncStatus === "synced" ? COLOR.emerald : syncStatus === "syncing" ? COLOR.gold : COLOR.clay }} />
+                )}
+              </div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: isMobile ? 21 : 26, fontWeight: 600, color: COLOR.goldSoft }}>{fmt(lastNW)}<span style={{ fontSize: 12, color: COLOR.inkMuted, marginLeft: 6 }}>FCFA</span></div>
             </div>
           </div>
@@ -2713,6 +2875,19 @@ export default function GrandLivre() {
                 if (data.budgets) setBudgets(data.budgets);
                 if (data.goals) setGoals(data.goals);
                 if (data.recurring) setRecurring(data.recurring);
+              }}
+              syncCode={syncCode}
+              setSyncCode={setSyncCode}
+              syncStatus={syncStatus}
+              lastSyncedAt={lastSyncedAt}
+              onForceSync={async () => {
+                if (!syncCode) return;
+                setSyncStatus("syncing");
+                const ok = await pushRemoteState(syncCode, {
+                  transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+                });
+                setSyncStatus(ok ? "synced" : "error");
+                if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
               }}
             />
           )}
