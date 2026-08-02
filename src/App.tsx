@@ -399,6 +399,15 @@ function categoriesForType(transactions: Transaction[], type: TxType): string[] 
   known.forEach((c) => used.add(c));
   return Array.from(used).sort((a, b) => a.localeCompare(b, "fr"));
 }
+function defaultQuickCategory(transactions: Transaction[], type: TxType): string {
+  const list = categoriesForType(transactions, type);
+  if (type === "Dépense" && list.includes("Aliments")) return "Aliments";
+  return list[0] || "";
+}
+function defaultQuickAccount(accounts: Account[]): string {
+  const found = accounts.find((a) => a.name === "SALAIRE");
+  return found ? found.name : (accounts[0]?.name || "");
+}
 const groupColor: Record<string, string> = {
   "Nécessaire": COLOR.slateBlue, "Productif": COLOR.emerald, "Non-productif": COLOR.clay,
   "Non classifié": COLOR.inkMuted, "Revenu": COLOR.goldSoft,
@@ -2744,11 +2753,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
-  const [quickCategory, setQuickCategory] = useState(() => categoriesForType(transactions, "Dépense")[0] || "Aliments");
+  const [quickCategory, setQuickCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
   const [quickSubcategory, setQuickSubcategory] = useState("");
   const [quickType, setQuickType] = useState<TxType>("Dépense");
   const [quickAmount, setQuickAmount] = useState<number | "">("");
-  const [quickAccount, setQuickAccount] = useState(() => accounts[0]?.name || "");
+  const [quickAccount, setQuickAccount] = useState(() => defaultQuickAccount(accounts));
   const [justAdded, setJustAdded] = useState(false);
 
   const today = todayISO();
@@ -2798,7 +2807,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label>
             <div style={{ display: "flex", gap: 6 }}>
               {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
-                <button key={ty} onClick={() => { setQuickType(ty); setQuickSubcategory(""); setQuickCategory(categoriesForType(transactions, ty)[0] || ""); }} style={{
+                <button key={ty} onClick={() => { setQuickType(ty); setQuickSubcategory(""); setQuickCategory(defaultQuickCategory(transactions, ty)); }} style={{
                   padding: "8px 16px", borderRadius: 6, fontSize: 12.5, cursor: "pointer",
                   border: `1px solid ${quickType === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
                   background: quickType === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
@@ -2948,10 +2957,10 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState(todayISO());
   const [type, setType] = useState<TxType>("Dépense");
-  const [category, setCategory] = useState(() => categoriesForType(transactions, "Dépense")[0] || "");
+  const [category, setCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
   const [subcategory, setSubcategory] = useState("");
   const [amount, setAmount] = useState<number | "">("");
-  const [account, setAccount] = useState(() => accounts[0]?.name || "");
+  const [account, setAccount] = useState(() => defaultQuickAccount(accounts));
   const [justAdded, setJustAdded] = useState(false);
 
   const submit = () => {
@@ -2965,7 +2974,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const changeType = (ty: TxType) => {
     setType(ty);
     setSubcategory("");
-    setCategory(categoriesForType(transactions, ty)[0] || "");
+    setCategory(defaultQuickCategory(transactions, ty));
   };
 
   const group = category ? (type === "Revenu" ? "Revenu" : (categoryGroups[category] || "Non classifié")) : "Revenu";
@@ -3108,6 +3117,24 @@ export default function GrandLivre() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const isMobile = useIsMobile();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  useEffect(() => {
+    if (isMobile && mobileMenuOpen) {
+      const prevOverflow = document.body.style.overflow;
+      const prevPosition = document.body.style.position;
+      const scrollY = window.scrollY;
+      document.body.style.overflow = "hidden";
+      document.body.style.position = "fixed";
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.width = "100%";
+      return () => {
+        document.body.style.overflow = prevOverflow;
+        document.body.style.position = prevPosition;
+        document.body.style.top = "";
+        document.body.style.width = "";
+        window.scrollTo(0, scrollY);
+      };
+    }
+  }, [isMobile, mobileMenuOpen]);
   const [filtersOpen, setFiltersOpen] = useState(!isMobile);
   const [syncCode, setSyncCode, syncCodeLoaded] = usePersistentState<string>("gl-sync-code", "");
 
@@ -3272,9 +3299,10 @@ export default function GrandLivre() {
           )}
           <aside className="gl-noprint gl-scroll" style={{
             width: isMobile ? 268 : (sidebarOpen ? 226 : 0), flexShrink: 0, borderRight: `1px solid ${COLOR.hairline}`,
-            transition: isMobile ? "none" : "width 0.2s", overflow: isMobile ? "auto" : "hidden",
+            transition: isMobile ? "none" : "width 0.2s", overflowY: isMobile ? "auto" : "hidden", overflowX: "hidden",
             position: isMobile ? "fixed" : "static", top: 0, left: 0, height: isMobile ? "100vh" : "auto",
             zIndex: isMobile ? 220 : "auto", background: isMobile ? COLOR.bg : "transparent",
+            WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
             <div className="gl-safe-top" style={{ width: isMobile ? 268 : 226, padding: "24px 16px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
@@ -3467,4 +3495,3 @@ export default function GrandLivre() {
     </div>
   );
 }
-
