@@ -50,9 +50,18 @@ const fontImport = `
   .gl-safe-bottom { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   .gl-safe-top { padding-top: max(0px, env(safe-area-inset-top)); }
 }
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type=number] {
+  -moz-appearance: textfield;
+}
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
 `;
 
 function useIsMobile(breakpoint = 860) {
@@ -674,6 +683,66 @@ function generateInsights(filtered: any[]): Insight[] {
 
   const order: Record<InsightKind, number> = { alerte: 0, conseil: 1, positif: 2 };
   return insights.sort((a, b) => order[a.kind] - order[b.kind]);
+}
+
+// ============================================================
+// SÉLECTEUR CATÉGORIE + SOUS-CATÉGORIE AVEC RECHERCHE
+// ============================================================
+function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalue, onSelect }: {
+  open: boolean; onClose: () => void; transactions: Transaction[]; type: TxType; value: string; subvalue: string;
+  onSelect: (cat: string, sub: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  useEffect(() => { if (open) setQuery(""); }, [open]);
+  if (!open) return null;
+
+  const rows: { cat: string; sub: string; label: string }[] = [];
+  categoriesForType(transactions, type).forEach((c) => {
+    const subs = getSubcategories(type, c);
+    rows.push({ cat: c, sub: "", label: c });
+    subs.forEach((s) => rows.push({ cat: c, sub: s, label: `${c} · ${s}` }));
+  });
+  const q = query.trim().toLowerCase();
+  const filtered = q ? rows.filter((r) => r.label.toLowerCase().includes(q)) : rows;
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 480, maxHeight: "78vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16 }}>Choisir une catégorie</div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
+        </div>
+        <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "8px 10px", WebkitOverflowScrolling: "touch" }}>
+          {filtered.map((r) => {
+            const active = value === r.cat && subvalue === r.sub;
+            return (
+              <button key={r.cat + "|" + r.sub} onClick={() => { onSelect(r.cat, r.sub); onClose(); }} style={{
+                width: "100%", textAlign: "left", padding: "12px 14px", borderRadius: 8, marginBottom: 2,
+                background: active ? "rgba(201,162,39,0.12)" : "transparent", border: "none", cursor: "pointer",
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}>
+                <span style={{ fontSize: 13.5, color: COLOR.ink }}>
+                  {r.cat}{r.sub && <span style={{ color: COLOR.inkMuted }}> · {r.sub}</span>}
+                </span>
+                {active && <Check size={14} color={COLOR.goldSoft} />}
+              </button>
+            );
+          })}
+          {!filtered.length && <div style={{ padding: "30px 10px", textAlign: "center", color: COLOR.inkMuted, fontSize: 13 }}>Aucun résultat pour "{query}"</div>}
+        </div>
+        <div className="gl-safe-bottom" style={{ padding: "12px 16px", borderTop: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ position: "relative" }}>
+            <Search size={14} color={COLOR.inkMuted} style={{ position: "absolute", left: 12, top: 12 }} />
+            <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher catégorie ou sous-catégorie…"
+              style={{ width: "100%", background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "11px 14px 11px 34px", color: COLOR.ink, fontSize: 14, boxSizing: "border-box", outline: "none" }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function InsightsPanel({ filtered }: { filtered: any[] }) {
@@ -1543,7 +1612,7 @@ function EnveloppesTab({ filtered, cap, setCap }: { filtered: any[]; cap: number
             <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
               <Target size={14} color={COLOR.inkMuted} />
               <label style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Plafond mensuel (FCFA)</label>
-              <input type="number" value={cap} onChange={(e) => setCap(Number(e.target.value) || 0)} style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.ink, padding: "6px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, width: 130 }} />
+              <input type="number" inputMode="numeric" value={cap} onChange={(e) => setCap(Number(e.target.value) || 0)} style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.ink, padding: "6px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, width: 130 }} />
             </div>
           </div>
         </div>
@@ -1716,8 +1785,8 @@ function GoalsPanel({ goals, setGoals, accounts, transactions }: { goals: Goal[]
       {adding && (
         <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nom</label><input style={{ ...inputStyle, width: 180 }} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Voyage, voiture, patrimoine…" /></div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Cible (FCFA)</label><input type="number" style={{ ...inputStyle, width: 150 }} value={form.target} onChange={(e) => setForm({ ...form, target: Number(e.target.value) || 0 })} /></div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Déjà atteint (FCFA)</label><input type="number" style={{ ...inputStyle, width: 150 }} value={form.current} onChange={(e) => setForm({ ...form, current: Number(e.target.value) || 0 })} /></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Cible (FCFA)</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 150 }} value={form.target} onChange={(e) => setForm({ ...form, target: Number(e.target.value) || 0 })} /></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Déjà atteint (FCFA)</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 150 }} value={form.current} onChange={(e) => setForm({ ...form, current: Number(e.target.value) || 0 })} /></div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date cible</label><input style={{ ...inputStyle, width: 120 }} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} placeholder="déc. 2027" /></div>
           <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
         </div>
@@ -1734,7 +1803,7 @@ function GoalsPanel({ goals, setGoals, accounts, transactions }: { goals: Goal[]
                 <button onClick={() => remove(g.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
               </div>
               <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-                <input type="number" value={g.current} onChange={(e) => update(g.id, { current: Number(e.target.value) || 0 })} style={{ ...inputStyle, width: 140 }} />
+                <input type="number" inputMode="numeric" value={g.current} onChange={(e) => update(g.id, { current: Number(e.target.value) || 0 })} style={{ ...inputStyle, width: 140 }} />
                 <span style={{ alignSelf: "center", color: COLOR.inkMuted, fontSize: 12 }}>/ {fmt(g.target)} FCFA {g.date && `· ${g.date}`}</span>
               </div>
               <div style={{ height: 10, background: COLOR.hairline, borderRadius: 5, overflow: "hidden" }}>
@@ -1824,7 +1893,7 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
         {adding && (
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Personne</label><input style={{ ...inputStyle, width: 160 }} value={form.person} onChange={(e) => setForm({ ...form, person: e.target.value })} /></div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Mois (AAAA_M)</label><input style={{ ...inputStyle, width: 100 }} value={form.dateGiven} onChange={(e) => setForm({ ...form, dateGiven: e.target.value })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Note</label><input style={{ ...inputStyle, width: 180 }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
             <button onClick={add} style={{ display: "flex", alignItems: "center", gap: 6, background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}><Save size={13} /> Enregistrer</button>
@@ -1877,7 +1946,7 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nom</label><input style={{ ...inputStyle, width: 170 }} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={{ ...inputStyle, width: 150 }} value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as Account["kind"] })}>{kinds.map((k) => <option key={k} value={k}>{k}</option>)}</select></div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Solde de départ (FCFA)</label><input type="number" style={{ ...inputStyle, width: 160 }} value={form.openingBalance} onChange={(e) => setForm({ ...form, openingBalance: Number(e.target.value) || 0 })} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Solde de départ (FCFA)</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 160 }} value={form.openingBalance} onChange={(e) => setForm({ ...form, openingBalance: Number(e.target.value) || 0 })} /></div>
             <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
           </div>
         )}
@@ -1899,7 +1968,7 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
                 {isEditingOpening && (
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${COLOR.hairline}` }}>
                     <label style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Solde de départ (avant suivi dans l'app)</label>
-                    <input type="number" value={a.openingBalance} onChange={(e) => update(a.id, { openingBalance: Number(e.target.value) || 0 })} style={{ ...inputStyle, width: 150 }} />
+                    <input type="number" inputMode="numeric" value={a.openingBalance} onChange={(e) => update(a.id, { openingBalance: Number(e.target.value) || 0 })} style={{ ...inputStyle, width: 150 }} />
                   </div>
                 )}
               </div>
@@ -1959,7 +2028,7 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
                 {categoriesForType(transactions, "Dépense").map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Limite mensuelle</label><input type="number" style={{ ...inputStyle, width: 150 }} value={form.amount} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) || 0 })} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Limite mensuelle</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 150 }} value={form.amount} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) || 0 })} /></div>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: COLOR.inkMuted }}><input type="checkbox" checked={form.rollover} onChange={(e) => setForm({ ...form, rollover: e.target.checked })} /> Reconduction</label>
             <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
           </div>
@@ -1991,7 +2060,7 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
                       <option value="">Vers…</option>
                       {budgets.filter((x) => x.id !== b.id).map((x) => <option key={x.id} value={x.id}>{x.category}</option>)}
                     </select>
-                    <input type="number" style={{ ...inputStyle, width: 120 }} value={transferAmount || ""} onChange={(e) => setTransferAmount(Number(e.target.value) || 0)} placeholder="Montant" />
+                    <input type="number" inputMode="numeric" style={{ ...inputStyle, width: 120 }} value={transferAmount || ""} onChange={(e) => setTransferAmount(Number(e.target.value) || 0)} placeholder="Montant" />
                     <button onClick={doTransfer} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}>Confirmer</button>
                   </div>
                 )}
@@ -2108,7 +2177,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
               </select>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => { const ty = e.target.value as TxType; setForm({ ...form, type: ty, category: categoriesForType(transactions, ty)[0] || "" }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Fréquence</label><select style={inputStyle} value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as RecurringTemplate["frequency"] })}><option>Hebdomadaire</option><option>Mensuelle</option><option>Annuelle</option></select></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Prochaine échéance</label><input type="date" style={inputStyle} value={form.nextDate} onChange={(e) => setForm({ ...form, nextDate: e.target.value })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
@@ -2443,7 +2512,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                 </div>
               )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => { const ty = e.target.value as TxType; setForm({ ...form, type: ty, subcategory: "", category: categoriesForType(transactions, ty)[0] || "" }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label><input style={inputStyle} type="number" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label><input style={inputStyle} type="number" inputMode="numeric" value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
                 <select style={{ ...inputStyle, width: 150 }} value={form.account || ""} onChange={(e) => setForm({ ...form, account: e.target.value })}>
@@ -2518,7 +2587,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                             {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
                           </select>
                         </td>
-                        <td style={{ padding: 6 }}><input style={{ ...inputStyle, textAlign: "right" }} type="number" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} /></td>
+                        <td style={{ padding: 6 }}><input style={{ ...inputStyle, textAlign: "right" }} type="number" inputMode="numeric" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} /></td>
                         <td style={{ padding: 6, whiteSpace: "nowrap" }}><button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button><button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button></td>
                       </>
                     ) : (
@@ -2759,6 +2828,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [quickAmount, setQuickAmount] = useState<number | "">("");
   const [quickAccount, setQuickAccount] = useState(() => defaultQuickAccount(accounts));
   const [justAdded, setJustAdded] = useState(false);
+  const [catPickerOpen, setCatPickerOpen] = useState(false);
 
   const today = todayISO();
   const currentMonthKey = dateToMonthKey(today);
@@ -2799,7 +2869,6 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
         {(() => {
-          const subcats = getSubcategories(quickType, quickCategory);
           const typeColor = quickType === "Revenu" ? COLOR.emerald : COLOR.clay;
           const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
           const nakedSelect: React.CSSProperties = {
@@ -2831,7 +2900,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
               {/* Montant */}
               <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "18px 24px 8px 24px" }}>
                 <div style={{ position: "absolute", fontSize: 56, fontWeight: 700, color: typeColor, opacity: 0.07, fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none", top: 10 }}>FCFA</div>
-                <input type="number" value={quickAmount} placeholder="0"
+                <input type="number" inputMode="numeric" value={quickAmount} placeholder="0"
                   onChange={(e) => setQuickAmount(e.target.value === "" ? "" : Number(e.target.value))}
                   onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                   style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 42, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 260 }} />
@@ -2849,17 +2918,16 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                   </div>
                   <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
                     <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
-                    <select value={quickCategory} onChange={(e) => { setQuickCategory(e.target.value); setQuickSubcategory(""); }} style={{ ...nakedSelect, textAlign: "right" }}>
-                      {categoriesForType(transactions, quickType).map((c) => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                    {subcats.length > 0 && (
-                      <select value={quickSubcategory} onChange={(e) => setQuickSubcategory(e.target.value)} style={{ ...nakedSelect, textAlign: "right", fontSize: 13, fontWeight: 400, color: COLOR.inkMuted, marginTop: 12, display: "block", fontFamily: "'Inter', sans-serif" }}>
-                        <option value="">— sous-catégorie —</option>
-                        {subcats.map((s) => <option key={s} value={s}>{s}</option>)}
-                      </select>
+                    <button onClick={() => setCatPickerOpen(true)} style={{ ...nakedSelect, textAlign: "right", cursor: "pointer", display: "block" }}>
+                      {quickCategory || "Choisir…"}
+                    </button>
+                    {quickSubcategory && (
+                      <div style={{ textAlign: "right", fontSize: 13, color: COLOR.inkMuted, marginTop: 4 }}>{quickSubcategory}</div>
                     )}
                   </div>
                 </div>
+                <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={quickType}
+                  value={quickCategory} subvalue={quickSubcategory} onSelect={(c, s) => { setQuickCategory(c); setQuickSubcategory(s); }} />
 
                 <button onClick={submit} disabled={!quickAmount || Number(quickAmount) <= 0} style={{
                   width: "100%", marginTop: 18, padding: "14px 0", borderRadius: 12, border: "none",
@@ -2985,6 +3053,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [account, setAccount] = useState(() => defaultQuickAccount(accounts));
   const [note, setNote] = useState("");
   const [justAdded, setJustAdded] = useState(false);
+  const [catPickerOpen, setCatPickerOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -3016,7 +3085,6 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     setCategory(defaultQuickCategory(transactions, ty));
   };
 
-  const subcats = getSubcategories(type, category);
   const typeColor = type === "Revenu" ? COLOR.emerald : COLOR.clay;
 
   const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
@@ -3089,7 +3157,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                 fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
               }}>FCFA</div>
               <input
-                type="number" value={amount} placeholder="0" autoFocus
+                type="number" inputMode="numeric" value={amount} placeholder="0" autoFocus
                 onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
                 onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                 style={{
@@ -3119,17 +3187,16 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                 </div>
                 <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
                   <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
-                  <select value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(""); }} style={{ ...nakedSelect, textAlign: "right" }}>
-                    {categoriesForType(transactions, type).map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                  {subcats.length > 0 && (
-                    <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={{ ...nakedSelect, textAlign: "right", fontSize: 13, fontWeight: 400, color: COLOR.inkMuted, marginTop: 12, display: "block", fontFamily: "'Inter', sans-serif" }}>
-                      <option value="">— sous-catégorie —</option>
-                      {subcats.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
+                  <button onClick={() => setCatPickerOpen(true)} style={{ ...nakedSelect, textAlign: "right", cursor: "pointer", display: "block" }}>
+                    {category || "Choisir…"}
+                  </button>
+                  {subcategory && (
+                    <div style={{ textAlign: "right", fontSize: 13, color: COLOR.inkMuted, marginTop: 4 }}>{subcategory}</div>
                   )}
                 </div>
               </div>
+              <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
+                value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
               <button onClick={submit} disabled={!amount || Number(amount) <= 0} style={{
                 width: "100%", marginTop: 16, padding: "15px 0", borderRadius: 14, border: "none",
