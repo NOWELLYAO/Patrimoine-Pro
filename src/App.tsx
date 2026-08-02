@@ -2961,17 +2961,29 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [subcategory, setSubcategory] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [account, setAccount] = useState(() => defaultQuickAccount(accounts));
-  const [payee, setPayee] = useState("");
   const [note, setNote] = useState("");
   const [justAdded, setJustAdded] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      const prevHtmlOverflow = document.documentElement.style.overflow;
+      const prevBodyOverflow = document.body.style.overflow;
+      document.documentElement.style.overflow = "hidden";
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.documentElement.style.overflow = prevHtmlOverflow;
+        document.body.style.overflow = prevBodyOverflow;
+      };
+    }
+  }, [open]);
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
     setTransactions([...transactions, {
       id: uid(), date, category, subcategory: subcategory || undefined, type, amount: Number(amount),
-      account: account || undefined, payee: payee || undefined, note: note || undefined,
+      account: account || undefined, note: note || undefined,
     }]);
-    setAmount(""); setPayee(""); setNote("");
+    setAmount(""); setNote("");
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1000);
   };
@@ -3010,7 +3022,8 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
           <div style={{
             width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100%" : "min(720px, 92vh)",
             display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
-            borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`, overflow: "hidden",
+            borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`,
+            overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
             {/* Header : fermer + sélecteur de type */}
             <div className="gl-safe-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px" }}>
@@ -3088,18 +3101,12 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                     {categoriesForType(transactions, type).map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                   {subcats.length > 0 && (
-                    <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={{ ...nakedSelect, textAlign: "right", fontSize: 13, fontWeight: 400, color: COLOR.inkMuted, marginTop: 2, fontFamily: "'Inter', sans-serif" }}>
+                    <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={{ ...nakedSelect, textAlign: "right", fontSize: 13, fontWeight: 400, color: COLOR.inkMuted, marginTop: 12, display: "block", fontFamily: "'Inter', sans-serif" }}>
                       <option value="">— sous-catégorie —</option>
                       {subcats.map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>
                   )}
                 </div>
-              </div>
-
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, paddingTop: 14, borderTop: `1px solid ${COLOR.hairline}` }}>
-                <Users size={15} color={COLOR.inkMuted} />
-                <input value={payee} onChange={(e) => setPayee(e.target.value)} placeholder="Bénéficiaire (optionnel)"
-                  style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 13.5, fontFamily: "'Inter', sans-serif" }} />
               </div>
 
               <button onClick={submit} disabled={!amount || Number(amount) <= 0} style={{
