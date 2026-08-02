@@ -11,7 +11,7 @@ import {
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
-  FileSpreadsheet, FileText, Loader2,
+  FileSpreadsheet, FileText, Loader2, Minus,
 } from "lucide-react";
 
 // ============================================================
@@ -2961,12 +2961,17 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [subcategory, setSubcategory] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [account, setAccount] = useState(() => defaultQuickAccount(accounts));
+  const [payee, setPayee] = useState("");
+  const [note, setNote] = useState("");
   const [justAdded, setJustAdded] = useState(false);
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    setTransactions([...transactions, { id: uid(), date, category, subcategory: subcategory || undefined, type, amount: Number(amount), account: account || undefined }]);
-    setAmount("");
+    setTransactions([...transactions, {
+      id: uid(), date, category, subcategory: subcategory || undefined, type, amount: Number(amount),
+      account: account || undefined, payee: payee || undefined, note: note || undefined,
+    }]);
+    setAmount(""); setPayee(""); setNote("");
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1000);
   };
@@ -2977,88 +2982,140 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     setCategory(defaultQuickCategory(transactions, ty));
   };
 
-  const group = category ? (type === "Revenu" ? "Revenu" : (categoryGroups[category] || "Non classifié")) : "Revenu";
+  const subcats = getSubcategories(type, category);
+  const typeColor = type === "Revenu" ? COLOR.emerald : COLOR.clay;
+
+  const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
+  const nakedSelect: React.CSSProperties = {
+    background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600,
+    fontFamily: "'Fraunces', serif", padding: 0, cursor: "pointer", width: "100%", appearance: "none",
+    WebkitAppearance: "none",
+  };
 
   return (
     <>
-      {open && (
-        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 200, backdropFilter: "blur(2px)" }} />
-      )}
-      {open && (
-        <div onClick={(e) => e.stopPropagation()} style={{
-          position: "fixed", bottom: isMobile ? 148 : 96, right: isMobile ? 16 : 24, left: isMobile ? 16 : "auto", width: isMobile ? "auto" : 340, maxWidth: "calc(100vw - 32px)", zIndex: 205,
-          background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 14, padding: 20,
-          boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
-        }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>Saisie rapide</div>
-            <button onClick={() => setOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={16} /></button>
-          </div>
-
-          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-            {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
-              <button key={ty} onClick={() => changeType(ty)} style={{
-                flex: 1, padding: "8px 0", borderRadius: 6, fontSize: 12.5, cursor: "pointer",
-                border: `1px solid ${type === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
-                background: type === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
-                color: type === ty ? (ty === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted,
-              }}>{ty}</button>
-            ))}
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div>
-              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, marginTop: 4 }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
-              <select value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(""); }} style={{ ...inputStyle, marginTop: 4 }}>
-                {categoriesForType(transactions, type).map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            {getSubcategories(type, category).length > 0 && (
-              <div>
-                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Sous-catégorie</label>
-                <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={{ ...inputStyle, marginTop: 4 }}>
-                  <option value="">—</option>
-                  {getSubcategories(type, category).map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label>
-                <input type="number" value={amount} onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
-                  onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                  style={{ ...inputStyle, marginTop: 4 }} placeholder="0" autoFocus />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
-                <select value={account} onChange={(e) => setAccount(e.target.value)} style={{ ...inputStyle, marginTop: 4 }}>
-                  {!accounts.length && <option value="">Aucun</option>}
-                  {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
-                </select>
-              </div>
-            </div>
-            <button onClick={submit} style={{
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 4,
-              background: justAdded ? COLOR.emerald : "rgba(201,162,39,0.16)", border: `1px solid ${justAdded ? COLOR.emerald : COLOR.gold}`,
-              borderRadius: 8, color: justAdded ? COLOR.bg : COLOR.goldSoft, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer",
-            }}>
-              {justAdded ? <Check size={15} /> : <Plus size={15} />} {justAdded ? "Ajouté" : "Ajouter"}
-            </button>
-          </div>
-        </div>
-      )}
-      <button onClick={() => setOpen((o) => !o)} className="gl-noprint" style={{
+      <button onClick={() => setOpen(true)} className="gl-noprint" style={{
         position: "fixed", bottom: isMobile ? 82 : 28, right: 24, zIndex: 155, width: 56, height: 56, borderRadius: "50%",
-        background: open ? COLOR.hairline : COLOR.gold, border: "none", color: COLOR.bg, cursor: "pointer",
+        background: COLOR.gold, border: "none", color: COLOR.bg, cursor: "pointer",
         display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 20px rgba(201,162,39,0.4)",
-        transition: "transform 0.15s", transform: open ? "rotate(45deg)" : "none",
       }}>
         <Plus size={26} />
       </button>
+
+      {open && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg,
+          display: "flex", justifyContent: "center", alignItems: isMobile ? "stretch" : "center",
+        }}>
+          <div style={{
+            width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100%" : "min(720px, 92vh)",
+            display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
+            borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`, overflow: "hidden",
+          }}>
+            {/* Header : fermer + sélecteur de type */}
+            <div className="gl-safe-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px" }}>
+              <button onClick={() => setOpen(false)} style={{
+                width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
+                color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+              }}>
+                <X size={18} />
+              </button>
+              <div style={{ display: "flex", gap: 10, background: COLOR.surface, borderRadius: 24, padding: 5, border: `1px solid ${COLOR.hairline}` }}>
+                <button onClick={() => changeType("Dépense")} title="Dépense" style={{
+                  width: 38, height: 38, borderRadius: "50%", border: "none", cursor: "pointer",
+                  background: type === "Dépense" ? COLOR.clay : "transparent", color: type === "Dépense" ? COLOR.bg : COLOR.claySoft,
+                  display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s",
+                }}>
+                  <Minus size={18} strokeWidth={2.5} />
+                </button>
+                <button onClick={() => changeType("Revenu")} title="Revenu" style={{
+                  width: 38, height: 38, borderRadius: "50%", border: "none", cursor: "pointer",
+                  background: type === "Revenu" ? COLOR.emerald : "transparent", color: type === "Revenu" ? COLOR.bg : COLOR.emeraldSoft,
+                  display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s",
+                }}>
+                  <Plus size={18} strokeWidth={2.5} />
+                </button>
+              </div>
+              <div style={{ width: 40 }} />
+            </div>
+
+            {/* Date */}
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+              <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+                  style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+              </div>
+            </div>
+
+            {/* Montant — zone centrale */}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative", padding: "10px 24px", minHeight: 0 }}>
+              <div style={{
+                position: "absolute", fontSize: 72, fontWeight: 700, color: typeColor, opacity: 0.07,
+                fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
+              }}>FCFA</div>
+              <input
+                type="number" value={amount} placeholder="0" autoFocus
+                onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
+                onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+                style={{
+                  position: "relative", background: "transparent", border: "none", outline: "none",
+                  color: COLOR.ink, fontSize: 52, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace",
+                  textAlign: "center", width: "100%", maxWidth: 280,
+                }}
+              />
+              <input
+                value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ajouter une note"
+                style={{
+                  position: "relative", background: "transparent", border: "none", outline: "none", marginTop: 14,
+                  color: COLOR.inkMuted, fontSize: 14, fontFamily: "'Inter', sans-serif", textAlign: "center", width: "100%",
+                }}
+              />
+            </div>
+
+            {/* Bas : compte / catégorie / bénéficiaire / enregistrer */}
+            <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 20px", background: COLOR.surface }} className="gl-safe-bottom">
+              <div style={{ display: "flex", gap: 20 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={fieldLabel}>Compte</div>
+                  <select value={account} onChange={(e) => setAccount(e.target.value)} style={nakedSelect}>
+                    {!accounts.length && <option value="">Aucun</option>}
+                    {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
+                  <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
+                  <select value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(""); }} style={{ ...nakedSelect, textAlign: "right" }}>
+                    {categoriesForType(transactions, type).map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  {subcats.length > 0 && (
+                    <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={{ ...nakedSelect, textAlign: "right", fontSize: 13, fontWeight: 400, color: COLOR.inkMuted, marginTop: 2, fontFamily: "'Inter', sans-serif" }}>
+                      <option value="">— sous-catégorie —</option>
+                      {subcats.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, paddingTop: 14, borderTop: `1px solid ${COLOR.hairline}` }}>
+                <Users size={15} color={COLOR.inkMuted} />
+                <input value={payee} onChange={(e) => setPayee(e.target.value)} placeholder="Bénéficiaire (optionnel)"
+                  style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 13.5, fontFamily: "'Inter', sans-serif" }} />
+              </div>
+
+              <button onClick={submit} disabled={!amount || Number(amount) <= 0} style={{
+                width: "100%", marginTop: 16, padding: "15px 0", borderRadius: 14, border: "none",
+                background: justAdded ? COLOR.emerald : (!amount || Number(amount) <= 0) ? COLOR.hairline : COLOR.gold,
+                color: justAdded ? COLOR.bg : (!amount || Number(amount) <= 0) ? COLOR.inkMuted : COLOR.bg,
+                fontSize: 15.5, fontWeight: 700, cursor: (!amount || Number(amount) <= 0) ? "default" : "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.15s",
+              }}>
+                {justAdded ? <Check size={18} /> : null}
+                {justAdded ? "Ajouté" : "Sauvegarder"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
