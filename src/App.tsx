@@ -402,6 +402,9 @@ const GROUPS: Group[] = ["Nécessaire", "Productif", "Non-productif", "Non class
 function getSubcategories(type: TxType, category: string): string[] {
   return (type === "Dépense" ? depSubcategories[category] : revSubcategories[category]) || [];
 }
+function normalizeText(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
 function categoriesForType(transactions: Transaction[], type: TxType): string[] {
   const used = new Set(transactions.filter((t) => t.type === type).map((t) => t.category));
   const known = Object.keys(type === "Dépense" ? depSubcategories : revSubcategories);
@@ -702,8 +705,8 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
     rows.push({ cat: c, sub: "", label: c });
     subs.forEach((s) => rows.push({ cat: c, sub: s, label: `${c} · ${s}` }));
   });
-  const q = query.trim().toLowerCase();
-  const filtered = q ? rows.filter((r) => r.label.toLowerCase().includes(q)) : rows;
+  const q = normalizeText(query.trim());
+  const filtered = q ? rows.filter((r) => normalizeText(r.label).includes(q)) : rows;
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
@@ -3354,7 +3357,7 @@ export default function GrandLivre() {
       if (filters.group !== "Tous" && t.group !== filters.group) return false;
       if (filters.scope !== "Tous" && t.scope !== filters.scope) return false;
       if (filters.category !== "Toutes" && t.category !== filters.category) return false;
-      if (filters.search && !t.category.toLowerCase().includes(filters.search.toLowerCase())) return false;
+      if (filters.search && !normalizeText(t.category).includes(normalizeText(filters.search))) return false;
       return true;
     });
   }, [txWithGroup, filters]);
