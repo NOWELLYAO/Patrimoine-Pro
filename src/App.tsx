@@ -2329,6 +2329,121 @@ function JournalierTab({ filtered }: { filtered: any[] }) {
   );
 }
 
+// ============================================================
+// SAISIE RAPIDE FLOTTANTE — accessible depuis n'importe quel onglet
+// ============================================================
+function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[]; categoryGroups: Record<string, Group>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(todayISO());
+  const [type, setType] = useState<TxType>("Dépense");
+  const [category, setCategory] = useState(() => categoriesForType(transactions, "Dépense")[0] || "");
+  const [subcategory, setSubcategory] = useState("");
+  const [amount, setAmount] = useState<number | "">("");
+  const [account, setAccount] = useState(() => accounts[0]?.name || "");
+  const [justAdded, setJustAdded] = useState(false);
+
+  const submit = () => {
+    if (!category || !amount || Number(amount) <= 0) return;
+    setTransactions([...transactions, { id: uid(), date, category, subcategory: subcategory || undefined, type, amount: Number(amount), account: account || undefined }]);
+    setAmount("");
+    setJustAdded(true);
+    setTimeout(() => setJustAdded(false), 1000);
+  };
+
+  const changeType = (ty: TxType) => {
+    setType(ty);
+    setSubcategory("");
+    setCategory(categoriesForType(transactions, ty)[0] || "");
+  };
+
+  const group = category ? (type === "Revenu" ? "Revenu" : (categoryGroups[category] || "Non classifié")) : "Revenu";
+
+  return (
+    <>
+      {open && (
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 90, backdropFilter: "blur(2px)" }} />
+      )}
+      {open && (
+        <div onClick={(e) => e.stopPropagation()} style={{
+          position: "fixed", bottom: 96, right: 24, width: 340, maxWidth: "calc(100vw - 32px)", zIndex: 100,
+          background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 14, padding: 20,
+          boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>Saisie rapide</div>
+            <button onClick={() => setOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={16} /></button>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
+              <button key={ty} onClick={() => changeType(ty)} style={{
+                flex: 1, padding: "8px 0", borderRadius: 6, fontSize: 12.5, cursor: "pointer",
+                border: `1px solid ${type === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
+                background: type === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
+                color: type === ty ? (ty === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted,
+              }}>{ty}</button>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div>
+              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, marginTop: 4 }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie</label>
+              <select value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(""); }} style={{ ...inputStyle, marginTop: 4 }}>
+                {categoriesForType(transactions, type).map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            {getSubcategories(type, category).length > 0 && (
+              <div>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Sous-catégorie</label>
+                <select value={subcategory} onChange={(e) => setSubcategory(e.target.value)} style={{ ...inputStyle, marginTop: 4 }}>
+                  <option value="">—</option>
+                  {getSubcategories(type, category).map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant (FCFA)</label>
+                <input type="number" value={amount} onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
+                  onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+                  style={{ ...inputStyle, marginTop: 4 }} placeholder="0" autoFocus />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
+                <select value={account} onChange={(e) => setAccount(e.target.value)} style={{ ...inputStyle, marginTop: 4 }}>
+                  {!accounts.length && <option value="">Aucun</option>}
+                  {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <button onClick={submit} style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 4,
+              background: justAdded ? COLOR.emerald : "rgba(201,162,39,0.16)", border: `1px solid ${justAdded ? COLOR.emerald : COLOR.gold}`,
+              borderRadius: 8, color: justAdded ? COLOR.bg : COLOR.goldSoft, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer",
+            }}>
+              {justAdded ? <Check size={15} /> : <Plus size={15} />} {justAdded ? "Ajouté" : "Ajouter"}
+            </button>
+          </div>
+        </div>
+      )}
+      <button onClick={() => setOpen((o) => !o)} className="gl-noprint" style={{
+        position: "fixed", bottom: 28, right: 24, zIndex: 100, width: 56, height: 56, borderRadius: "50%",
+        background: open ? COLOR.hairline : COLOR.gold, border: "none", color: COLOR.bg, cursor: "pointer",
+        display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 20px rgba(201,162,39,0.4)",
+        transition: "transform 0.15s", transform: open ? "rotate(45deg)" : "none",
+      }}>
+        <Plus size={26} />
+      </button>
+    </>
+  );
+}
+
 // ============================================================ END OF PART 6 — App component follows in part 7
 // ============================================================
 // MAIN APP
@@ -2496,9 +2611,11 @@ export default function GrandLivre() {
         </header>
 
         <main className="gl-print-full" style={{ maxWidth: 1180, padding: "24px 32px 60px 32px" }}>
-          <div className="gl-noprint" style={{ marginBottom: 20 }}>
-            <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
-          </div>
+          {tab !== "saisie" && (
+            <div className="gl-noprint" style={{ marginBottom: 20 }}>
+              <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
+            </div>
+          )}
 
           {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
@@ -2549,6 +2666,9 @@ export default function GrandLivre() {
           Grand Livre · {transactions.length} transactions · {loans.length} créance(s) suivie(s) · données stockées uniquement dans ce navigateur
         </footer>
       </div>
+      {tab !== "saisie" && (
+        <QuickAddFAB transactions={transactions} setTransactions={setTransactions} accounts={accounts} categoryGroups={resolvedGroups} />
+      )}
     </div>
   );
 }
