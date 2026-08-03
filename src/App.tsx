@@ -736,22 +736,22 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
   onSelect: (cat: string, sub: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  useEffect(() => { if (open) setQuery(""); }, [open]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  useEffect(() => { if (open) { setQuery(""); setExpanded(new Set(value ? [value] : [])); } }, [open, value]);
   if (!open) return null;
 
-  const rows: { cat: string; sub: string; label: string }[] = [];
-  categoriesForType(transactions, type).forEach((c) => {
-    const subs = getSubcategories(type, c);
-    rows.push({ cat: c, sub: "", label: c });
-    subs.forEach((s) => rows.push({ cat: c, sub: s, label: `${c} · ${s}` }));
-  });
+  const cats = categoriesForType(transactions, type);
   const q = normalizeText(query.trim());
-  const filtered = q ? rows.filter((r) => normalizeText(r.label).includes(q)) : rows;
+  const filteredCats = q
+    ? cats.filter((c) => normalizeText(c).includes(q) || getSubcategories(type, c).some((s) => normalizeText(s).includes(q)))
+    : cats;
+
+  const toggleExpand = (c: string) => setExpanded((prev) => { const n = new Set(prev); n.has(c) ? n.delete(c) : n.add(c); return n; });
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        width: "100%", maxWidth: 480, maxHeight: "78vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        width: "100%", maxWidth: 480, maxHeight: "80vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
         display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -759,22 +759,46 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
           <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
         </div>
         <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "8px 10px", WebkitOverflowScrolling: "touch" }}>
-          {filtered.map((r) => {
-            const active = value === r.cat && subvalue === r.sub;
+          {filteredCats.map((c) => {
+            const subs = getSubcategories(type, c);
+            const matchesQuery = q && (normalizeText(c).includes(q) || subs.some((s) => normalizeText(s).includes(q)));
+            const isExpanded = expanded.has(c) || !!matchesQuery;
+            const isCatSelected = value === c && !subvalue;
+            const visibleSubs = q ? subs.filter((s) => normalizeText(c).includes(q) || normalizeText(s).includes(q)) : subs;
             return (
-              <button key={r.cat + "|" + r.sub} onClick={() => { onSelect(r.cat, r.sub); onClose(); }} style={{
-                width: "100%", textAlign: "left", padding: "12px 14px", borderRadius: 8, marginBottom: 2,
-                background: active ? "rgba(201,162,39,0.12)" : "transparent", border: "none", cursor: "pointer",
-                display: "flex", justifyContent: "space-between", alignItems: "center",
-              }}>
-                <span style={{ fontSize: 13.5, color: COLOR.ink }}>
-                  {r.cat}{r.sub && <span style={{ color: COLOR.inkMuted }}> · {r.sub}</span>}
-                </span>
-                {active && <Check size={14} color={COLOR.goldSoft} />}
-              </button>
+              <div key={c}>
+                <button
+                  onClick={() => { onSelect(c, ""); if (subs.length) toggleExpand(c); else onClose(); }}
+                  style={{
+                    width: "100%", textAlign: "left", padding: "12px 14px", borderRadius: 8, marginBottom: 2,
+                    background: isCatSelected ? "rgba(201,162,39,0.12)" : "transparent", border: "none", cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: COLOR.ink, fontWeight: isCatSelected ? 600 : 400 }}>
+                    {subs.length > 0 && <ChevronRight size={13} color={COLOR.inkMuted} style={{ transform: isExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />}
+                    {c}
+                  </span>
+                  {isCatSelected && <Check size={14} color={COLOR.goldSoft} />}
+                </button>
+                {isExpanded && subs.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "4px 8px 14px 33px" }}>
+                    {visibleSubs.map((s) => {
+                      const active = value === c && subvalue === s;
+                      return (
+                        <button key={s} onClick={() => { onSelect(c, s); onClose(); }} style={{
+                          padding: "7px 14px", borderRadius: 16, fontSize: 12.5, cursor: "pointer", whiteSpace: "nowrap",
+                          border: `1px solid ${active ? COLOR.gold : COLOR.hairline}`,
+                          background: active ? COLOR.gold : COLOR.surfaceInput,
+                          color: active ? COLOR.bg : COLOR.inkMuted, fontWeight: active ? 600 : 400,
+                        }}>{s}</button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
-          {!filtered.length && <div style={{ padding: "30px 10px", textAlign: "center", color: COLOR.inkMuted, fontSize: 13 }}>Aucun résultat pour "{query}"</div>}
+          {!filteredCats.length && <div style={{ padding: "30px 10px", textAlign: "center", color: COLOR.inkMuted, fontSize: 13 }}>Aucun résultat pour "{query}"</div>}
         </div>
         <div className="gl-safe-bottom" style={{ padding: "12px 16px", borderTop: `1px solid ${COLOR.hairline}` }}>
           <div style={{ position: "relative" }}>
@@ -1970,6 +1994,11 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
   const catTx = catTxAll.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
   const total = catTx.reduce((a, t) => a + t.amount, 0);
 
+  // Détecte le cas où la sous-catégorie choisie n'a jamais été renseignée sur les transactions
+  // existantes, alors que la catégorie parente, elle, contient bien des données.
+  const hasAnySubcatData = subcategory ? transactions.some((t) => t.category === category && t.type === type && t.subcategory === subcategory) : true;
+  const parentCatTotal = useMemo(() => transactions.filter((t) => t.category === category && t.type === type).reduce((a, t) => a + t.amount, 0), [transactions, category, type]);
+
   const monthsInRange = allMonths.filter((m) => { const k = monthSortKey(m); return k >= fk && k <= tk; });
   const byMonth = monthsInRange.map((m) => ({ month: m, label: monthLabel(m), value: catTxAll.filter((t) => t.month === m).reduce((a, t) => a + t.amount, 0) }));
   const avg = byMonth.length ? mean(byMonth.map((m) => m.value)) : 0;
@@ -2016,6 +2045,19 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
         </div>
         <CategoryPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} transactions={transactions} type={type}
           value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
+
+        {subcategory && !hasAnySubcatData && parentCatTotal > 0 && (
+          <div style={{ display: "flex", gap: 10, padding: "12px 14px", background: "rgba(201,162,39,0.08)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, marginBottom: 18 }}>
+            <Info size={15} color={COLOR.goldSoft} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.55 }}>
+              Aucune transaction n'a la sous-catégorie <b style={{ color: COLOR.ink }}>"{subcategory}"</b> renseignée pour l'instant — c'est normal pour les données
+              historiques importées, qui n'ont que la catégorie. <b style={{ color: COLOR.goldSoft }}>{fmt(parentCatTotal)} FCFA</b> existent au total dans "{category}" toutes sous-catégories confondues.{" "}
+              <button onClick={() => setSubcategory("")} style={{ background: "none", border: "none", color: COLOR.goldSoft, textDecoration: "underline", cursor: "pointer", padding: 0, fontSize: 12.5 }}>
+                Voir toute la catégorie
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 34, fontWeight: 600, color: type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>
           {type === "Dépense" ? "−" : "+"}{fmt(total)} <span style={{ fontSize: 15, color: COLOR.inkMuted }}>FCFA</span>
