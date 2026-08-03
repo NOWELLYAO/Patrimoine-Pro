@@ -11,7 +11,7 @@ import {
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
-  FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle,
+  FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon,
 } from "lucide-react";
 
 // ============================================================
@@ -441,18 +441,18 @@ function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boo
   const [state, setState] = useState<T>(initial);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage?.get(key, false);
-        if (res) setState(JSON.parse(res.value));
-      } catch {}
-      setLoaded(true);
-    })();
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) setState(JSON.parse(raw));
+    } catch {}
+    setLoaded(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     if (!loaded) return;
-    window.storage?.set(key, JSON.stringify(state), false).catch(() => {});
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch {}
   }, [state, loaded]);
   return [state, setState, loaded];
 }
@@ -1792,6 +1792,141 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     </div>
   );
 }
+
+// ============================================================
+// PRINCIPALES CATÉGORIES — anneau coloré, pastilles de mois, comparaison
+// ============================================================
+const DONUT_COLORS = [COLOR.emerald, COLOR.slateBlue, COLOR.gold, COLOR.violet, COLOR.clay, COLOR.emeraldSoft, COLOR.slateBlueSoft, COLOR.goldSoft];
+
+function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
+  transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[];
+}) {
+  const withGroup = useMemo(
+    () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") })),
+    [transactions, categoryGroups]
+  );
+
+  const lastMonth = allMonths[allMonths.length - 1] || "";
+  const pillMonths = allMonths.slice(-3);
+  const [selectedMonth, setSelectedMonth] = useState(lastMonth);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customFrom, setCustomFrom] = useState(lastMonth);
+  const [customTo, setCustomTo] = useState(lastMonth);
+  const [typeView, setTypeView] = useState<TxType>("Dépense");
+
+  const range = customOpen ? { from: customFrom, to: customTo } : { from: selectedMonth, to: selectedMonth };
+  const fk = monthSortKey(range.from), tk = monthSortKey(range.to);
+  const periodTx = withGroup.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk && t.type === typeView; });
+  const total = periodTx.reduce((a, t) => a + t.amount, 0);
+
+  // Période précédente de même longueur, immédiatement avant
+  const spanMonths = Math.max(1, tk - fk + 1);
+  const prevTo = fk - 1, prevFrom = fk - spanMonths;
+  const prevTx = withGroup.filter((t) => { const k = monthSortKey(t.month); return k >= prevFrom && k <= prevTo && t.type === typeView; });
+  const prevTotal = prevTx.reduce((a, t) => a + t.amount, 0);
+  const delta = total - prevTotal;
+  const deltaPct = prevTotal !== 0 ? (delta / prevTotal) * 100 : (total !== 0 ? 100 : 0);
+  const improved = typeView === "Dépense" ? delta <= 0 : delta >= 0;
+
+  const byCat: Record<string, number> = {};
+  periodTx.forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+  const catList = Object.entries(byCat)
+    .map(([name, value]) => ({ name, value, pct: total ? (value / total) * 100 : 0 }))
+    .sort((a, b) => b.value - a.value);
+  const donutData = catList.map((c, i) => ({ ...c, color: DONUT_COLORS[i % DONUT_COLORS.length] }));
+
+  const periodLabel = customOpen
+    ? (customFrom === customTo ? monthLabel(customFrom) : `${monthLabel(customFrom)} — ${monthLabel(customTo)}`)
+    : monthLabel(selectedMonth);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <Panel>
+        <div className="gl-noprint" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 }}>
+          {pillMonths.map((m) => (
+            <button key={m} onClick={() => { setSelectedMonth(m); setCustomOpen(false); }} style={{
+              padding: "8px 18px", borderRadius: 20, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap",
+              border: `1px solid ${!customOpen && selectedMonth === m ? COLOR.gold : COLOR.hairline}`,
+              background: !customOpen && selectedMonth === m ? COLOR.gold : "transparent",
+              color: !customOpen && selectedMonth === m ? COLOR.bg : COLOR.inkMuted, fontWeight: !customOpen && selectedMonth === m ? 600 : 400,
+            }}>{monthLabel(m)}</button>
+          ))}
+          <button onClick={() => setCustomOpen((o) => !o)} style={{
+            padding: "8px 18px", borderRadius: 20, fontSize: 13, cursor: "pointer",
+            border: `1px solid ${customOpen ? COLOR.gold : COLOR.hairline}`,
+            background: customOpen ? COLOR.gold : "transparent", color: customOpen ? COLOR.bg : COLOR.inkMuted, fontWeight: customOpen ? 600 : 400,
+          }}>Personnalisé…</button>
+        </div>
+
+        {customOpen && (
+          <div className="gl-noprint" style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+            <Select label="Du mois" value={customFrom} onChange={setCustomFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+            <Select label="Au mois" value={customTo} onChange={setCustomTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+          </div>
+        )}
+
+        <div className="gl-noprint" style={{ display: "flex", gap: 6, marginBottom: 20 }}>
+          {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
+            <button key={ty} onClick={() => setTypeView(ty)} style={{
+              padding: "6px 14px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+              border: `1px solid ${typeView === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : COLOR.hairline}`,
+              background: typeView === ty ? (ty === "Revenu" ? "rgba(63,156,122,0.15)" : "rgba(193,84,63,0.15)") : "transparent",
+              color: typeView === ty ? (ty === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted,
+            }}>{ty === "Dépense" ? "Dépenses" : "Revenus"}</button>
+          ))}
+        </div>
+
+        {donutData.length ? (
+          <ResponsiveContainer width="100%" height={280}>
+            <PieChart>
+              <Pie data={donutData} dataKey="value" nameKey="name" innerRadius={85} outerRadius={130} paddingAngle={2} startAngle={90} endAngle={-270}>
+                {donutData.map((d) => <Cell key={d.name} fill={d.color} stroke={COLOR.surface} strokeWidth={2} />)}
+              </Pie>
+              <Tooltip content={<CustomTooltip />} />
+            </PieChart>
+          </ResponsiveContainer>
+        ) : <EmptyState />}
+
+        <div style={{ textAlign: "center", marginTop: 4 }}>
+          <div style={{ fontSize: 12, color: COLOR.inkMuted, marginBottom: 6 }}>Vs. période précédente</div>
+          <div style={{ fontSize: 18, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+            <span style={{ color: improved ? COLOR.emeraldSoft : COLOR.claySoft, display: "flex", alignItems: "center", gap: 4 }}>
+              {delta >= 0 ? <TrendingUp size={15} /> : <TrendingDown size={15} />} {fmt(Math.abs(delta))} FCFA
+            </span>
+            <span style={{ color: COLOR.inkMuted }}>|</span>
+            <span style={{ color: improved ? COLOR.emeraldSoft : COLOR.claySoft }}>
+              {delta >= 0 ? "+" : "−"}{Math.abs(deltaPct).toFixed(0)}%
+            </span>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 24, paddingTop: 18, borderTop: `1px solid ${COLOR.hairline}` }}>
+          <span style={{ fontSize: 15, color: COLOR.inkMuted }}>{typeView === "Dépense" ? "Dépenses" : "Revenus"} · {periodLabel}</span>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 24, fontWeight: 600, color: typeView === "Dépense" ? COLOR.claySoft : COLOR.emeraldSoft }}>{fmt(total)} FCFA</span>
+        </div>
+      </Panel>
+
+      <Panel title="Détail par catégorie">
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {donutData.map((c) => (
+            <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: `${c.color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <span style={{ width: 12, height: 12, borderRadius: "50%", background: c.color, display: "inline-block" }} />
+              </div>
+              <div style={{ flex: 1, fontSize: 14, color: COLOR.ink }}>{c.name}</div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: COLOR.ink }}>{fmt(c.value)} FCFA</div>
+                <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{c.pct.toFixed(0)}%</div>
+              </div>
+            </div>
+          ))}
+          {!donutData.length && <EmptyState text="Aucune transaction pour cette période." />}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 // ============================================================ END OF PART 4 — continued below
 // ============================================================
 // ENVELOPPES TAB (avec alertes)
@@ -3754,7 +3889,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -3765,6 +3900,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "flux", label: "Flux & Calendrier", icon: Workflow },
     { id: "comparatif", label: "Comparatif annuel", icon: BarChart3 },
     { id: "comparateur", label: "Comparateur", icon: GitCompare },
+    { id: "topcategories", label: "Principales catégories", icon: PieChartIcon },
   ]},
   { section: "Budget", items: [
     { id: "mensuel", label: "Rapport mensuel", icon: CalendarRange },
@@ -4077,6 +4213,7 @@ export default function GrandLivre() {
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
+          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
