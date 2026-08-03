@@ -11,7 +11,7 @@ import {
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
-  FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon,
+  FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon, Activity,
 } from "lucide-react";
 
 // ============================================================
@@ -1807,12 +1807,16 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
   );
 
   const lastMonth = allMonths[allMonths.length - 1] || "";
-  const pillMonths = allMonths.slice(-3);
+  const pillMonths = allMonths;
   const [selectedMonth, setSelectedMonth] = useState(lastMonth);
   const [customOpen, setCustomOpen] = useState(false);
   const [customFrom, setCustomFrom] = useState(lastMonth);
   const [customTo, setCustomTo] = useState(lastMonth);
   const [typeView, setTypeView] = useState<TxType>("Dépense");
+  const pillScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    pillScrollRef.current?.scrollTo({ left: pillScrollRef.current.scrollWidth, behavior: "auto" });
+  }, []);
 
   const range = customOpen ? { from: customFrom, to: customTo } : { from: selectedMonth, to: selectedMonth };
   const fk = monthSortKey(range.from), tk = monthSortKey(range.to);
@@ -1842,17 +1846,17 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel>
-        <div className="gl-noprint" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 }}>
+        <div ref={pillScrollRef} className="gl-noprint gl-scroll" style={{ display: "flex", gap: 8, flexWrap: "nowrap", overflowX: "auto", marginBottom: 20, paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
           {pillMonths.map((m) => (
             <button key={m} onClick={() => { setSelectedMonth(m); setCustomOpen(false); }} style={{
-              padding: "8px 18px", borderRadius: 20, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap",
+              padding: "8px 18px", borderRadius: 20, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
               border: `1px solid ${!customOpen && selectedMonth === m ? COLOR.gold : COLOR.hairline}`,
               background: !customOpen && selectedMonth === m ? COLOR.gold : "transparent",
               color: !customOpen && selectedMonth === m ? COLOR.bg : COLOR.inkMuted, fontWeight: !customOpen && selectedMonth === m ? 600 : 400,
             }}>{monthLabel(m)}</button>
           ))}
           <button onClick={() => setCustomOpen((o) => !o)} style={{
-            padding: "8px 18px", borderRadius: 20, fontSize: 13, cursor: "pointer",
+            padding: "8px 18px", borderRadius: 20, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
             border: `1px solid ${customOpen ? COLOR.gold : COLOR.hairline}`,
             background: customOpen ? COLOR.gold : "transparent", color: customOpen ? COLOR.bg : COLOR.inkMuted, fontWeight: customOpen ? 600 : 400,
           }}>Personnalisé…</button>
@@ -1921,6 +1925,137 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
             </div>
           ))}
           {!donutData.length && <EmptyState text="Aucune transaction pour cette période." />}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// ============================================================
+// APERÇU DE CATÉGORIE — courbe d'évolution, moyenne, sélecteur avec "Changer"
+// ============================================================
+function trailingRange(allMonths: string[], n: number): [string, string] {
+  const cur = dateToMonthKey(todayISO());
+  const curK = monthSortKey(cur);
+  const from = allMonths.find((m) => monthSortKey(m) >= curK - (n - 1)) || allMonths[0] || cur;
+  return [from, cur];
+}
+
+function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
+  transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[];
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [type, setType] = useState<TxType>("Dépense");
+  const [category, setCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
+  const [subcategory, setSubcategory] = useState("");
+  const [presetKey, setPresetKey] = useState("6m");
+
+  const presets: { key: string; label: string; range: () => [string, string] }[] = [
+    { key: "mtd", label: "MTD", range: () => { const k = dateToMonthKey(todayISO()); return [k, k]; } },
+    { key: "ytd", label: "Depuis le début de l'année", range: () => { const y = todayISO().slice(0, 4); const jan = allMonths.find((m) => m.startsWith(y)) || dateToMonthKey(todayISO()); return [jan, dateToMonthKey(todayISO())]; } },
+    { key: "1m", label: "1M", range: () => trailingRange(allMonths, 1) },
+    { key: "3m", label: "3M", range: () => trailingRange(allMonths, 3) },
+    { key: "6m", label: "6M", range: () => trailingRange(allMonths, 6) },
+    { key: "1a", label: "1A", range: () => trailingRange(allMonths, 12) },
+    { key: "all", label: "Tout", range: () => [allMonths[0] || dateToMonthKey(todayISO()), allMonths[allMonths.length - 1] || dateToMonthKey(todayISO())] },
+  ];
+  const activePreset = presets.find((p) => p.key === presetKey) || presets[4];
+  const [from, to] = activePreset.range();
+
+  const catTxAll = useMemo(
+    () => transactions.filter((t) => t.category === category && t.type === type && (!subcategory || t.subcategory === subcategory)).map((t) => ({ ...t, month: dateToMonthKey(t.date) })),
+    [transactions, category, type, subcategory]
+  );
+  const fk = monthSortKey(from), tk = monthSortKey(to);
+  const catTx = catTxAll.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
+  const total = catTx.reduce((a, t) => a + t.amount, 0);
+
+  const monthsInRange = allMonths.filter((m) => { const k = monthSortKey(m); return k >= fk && k <= tk; });
+  const byMonth = monthsInRange.map((m) => ({ month: m, label: monthLabel(m), value: catTxAll.filter((t) => t.month === m).reduce((a, t) => a + t.amount, 0) }));
+  const avg = byMonth.length ? mean(byMonth.map((m) => m.value)) : 0;
+
+  const changeType = (ty: TxType) => { setType(ty); setCategory(defaultQuickCategory(transactions, ty)); setSubcategory(""); };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <Panel>
+        <div className="gl-noprint gl-scroll" style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 18, paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
+          {presets.map((p) => (
+            <button key={p.key} onClick={() => setPresetKey(p.key)} style={{
+              padding: "8px 16px", borderRadius: 20, fontSize: 12.5, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+              border: `1px solid ${presetKey === p.key ? COLOR.gold : COLOR.hairline}`,
+              background: presetKey === p.key ? COLOR.gold : "transparent",
+              color: presetKey === p.key ? COLOR.bg : COLOR.inkMuted, fontWeight: presetKey === p.key ? 600 : 400,
+            }}>{p.label}</button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 16px", background: COLOR.surfaceRaised, borderRadius: 12, marginBottom: 18, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: `${type === "Revenu" ? COLOR.emerald : COLOR.clay}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Layers size={17} color={type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft} />
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: COLOR.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {category}{subcategory && <span style={{ color: COLOR.inkMuted, fontWeight: 400 }}> · {subcategory}</span>}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+            <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
+              {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
+                <button key={ty} onClick={() => changeType(ty)} style={{
+                  padding: "4px 10px", borderRadius: 12, fontSize: 11, cursor: "pointer", border: "none",
+                  background: type === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : "transparent",
+                  color: type === ty ? COLOR.bg : COLOR.inkMuted,
+                }}>{ty}</button>
+              ))}
+            </div>
+            <button onClick={() => setPickerOpen(true)} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, color: COLOR.goldSoft, padding: "7px 16px", fontSize: 12.5, cursor: "pointer" }}>
+              Changer
+            </button>
+          </div>
+        </div>
+        <CategoryPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} transactions={transactions} type={type}
+          value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
+
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 34, fontWeight: 600, color: type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>
+          {type === "Dépense" ? "−" : "+"}{fmt(total)} <span style={{ fontSize: 15, color: COLOR.inkMuted }}>FCFA</span>
+        </div>
+        <div style={{ fontSize: 12.5, color: COLOR.inkMuted, marginTop: 4, marginBottom: 20 }}>
+          {monthsInRange.length ? `${monthLabel(monthsInRange[0])} — ${monthLabel(monthsInRange[monthsInRange.length - 1])}` : "Aucune donnée"}
+        </div>
+
+        {byMonth.length ? (
+          <ResponsiveContainer width="100%" height={240}>
+            <AreaChart data={byMonth} margin={{ left: 0, right: 10, top: 20 }}>
+              <defs>
+                <linearGradient id="catGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={type === "Revenu" ? COLOR.emerald : COLOR.clay} stopOpacity={0.4} />
+                  <stop offset="100%" stopColor={type === "Revenu" ? COLOR.emerald : COLOR.clay} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+              <XAxis dataKey="label" tick={{ fill: COLOR.inkMuted, fontSize: 9.5 }} interval={byMonth.length > 12 ? Math.floor(byMonth.length / 8) : 0} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+              <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
+              <Tooltip content={<CustomTooltip />} />
+              <ReferenceLine y={avg} stroke={COLOR.slateBlueSoft} strokeDasharray="5 4"
+                label={{ value: `Moyenne : ${fmt(avg)} FCFA`, position: "insideTopRight", fill: COLOR.slateBlueSoft, fontSize: 10.5 }} />
+              <Area type="monotone" dataKey="value" name={category} stroke={type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft} strokeWidth={2} fill="url(#catGrad)" />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : <EmptyState />}
+      </Panel>
+
+      <Panel title="Détail mensuel">
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {byMonth.slice().reverse().map((m) => (
+            <div key={m.month} style={{ display: "flex", justifyContent: "space-between", padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <span style={{ fontSize: 14, color: COLOR.ink }}>{m.label}</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: m.value ? (type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted }}>
+                {m.value ? `${type === "Dépense" ? "−" : "+"}${fmt(m.value)} FCFA` : "—"}
+              </span>
+            </div>
+          ))}
+          {!byMonth.length && <EmptyState text="Aucune donnée pour cette période." />}
         </div>
       </Panel>
     </div>
@@ -3889,7 +4024,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -3901,6 +4036,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "comparatif", label: "Comparatif annuel", icon: BarChart3 },
     { id: "comparateur", label: "Comparateur", icon: GitCompare },
     { id: "topcategories", label: "Principales catégories", icon: PieChartIcon },
+    { id: "categoryoverview", label: "Aperçu de catégorie", icon: Activity },
   ]},
   { section: "Budget", items: [
     { id: "mensuel", label: "Rapport mensuel", icon: CalendarRange },
@@ -4214,6 +4350,7 @@ export default function GrandLivre() {
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "topcategories" && <TopCategoriesTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
+          {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
