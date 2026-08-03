@@ -344,10 +344,12 @@ const seedRecurring: RecurringTemplate[] = [
 // ============================================================
 const MONTH_NAMES = ["janv","fév","mars","avr","mai","juin","juil","août","sept","oct","nov","déc"];
 function monthLabel(m: string) {
+  if (!m || typeof m !== "string" || !m.includes("_")) return "—";
   const [y, mm] = m.split("_");
   return `${MONTH_NAMES[parseInt(mm, 10) - 1]} ${y.slice(2)}`;
 }
 function monthSortKey(m: string) {
+  if (!m || typeof m !== "string" || !m.includes("_")) return 0;
   const [y, mm] = m.split("_");
   return parseInt(y, 10) * 12 + parseInt(mm, 10);
 }
@@ -364,10 +366,12 @@ function pad2(n: number) { return n < 10 ? `0${n}` : `${n}`; }
 function todayISO() { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
 function nowTime() { const d = new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
 function dateToMonthKey(date: string) {
+  if (!date || typeof date !== "string" || !date.includes("-")) return dateToMonthKey(todayISO());
   const [y, m] = date.split("-");
   return `${parseInt(y, 10)}_${parseInt(m, 10)}`;
 }
 function monthKeyToFirstDate(monthKey: string) {
+  if (!monthKey || typeof monthKey !== "string" || !monthKey.includes("_")) return todayISO();
   const [y, m] = monthKey.split("_");
   return `${y}-${pad2(parseInt(m, 10))}-01`;
 }
@@ -4155,7 +4159,7 @@ export default function GrandLivre() {
   const pushTimer = useRef<any>(null);
 
   const allMonths = useMemo(() => {
-    const s = new Set(transactions.map((t) => dateToMonthKey(t.date)));
+    const s = new Set(transactions.filter((t) => t).map((t) => dateToMonthKey(t.date)));
     return Array.from(s).sort((a, b) => monthSortKey(a) - monthSortKey(b));
   }, [transactions]);
 
@@ -4186,8 +4190,9 @@ export default function GrandLivre() {
     return out;
   }, [categoryGroups, allCategories, rules]);
 
-  const txWithGroup = useMemo(() => transactions.map((t) => ({
+  const txWithGroup = useMemo(() => transactions.filter((t) => t && typeof t.amount === "number").map((t) => ({
     ...t,
+    date: t.date || todayISO(),
     month: dateToMonthKey(t.date),
     group: t.type === "Revenu" ? "Revenu" : (resolvedGroups[t.category] || "Non classifié"),
     scope: categoryScope[t.category] || "Personnel",
