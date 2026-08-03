@@ -4175,10 +4175,19 @@ export default function GrandLivre() {
   };
   const [filters, setFilters] = useState<Filters>(defaultFilters);
 
+  // Se re-synchronise sur la vraie période disponible dès que les données réelles sont chargées
+  // (localStorage / Supabase) — évite que le filtre reste bloqué sur la période calculée au tout
+  // premier rendu (avant que les données réelles ne soient prêtes), qui peut différer une fois
+  // les données effectivement chargées.
+  const allMonthsKey = allMonths.join(",");
   useEffect(() => {
-    if (allMonths.length && (!filters.from || !filters.to)) setFilters((f) => ({ ...f, from: allMonths[0], to: allMonths[allMonths.length - 1] }));
+    if (!allMonths.length) return;
+    const rangeStillValid = allMonths.includes(filters.from) && allMonths.includes(filters.to);
+    if (!rangeStillValid) {
+      setFilters((f) => ({ ...f, from: allMonths[0], to: allMonths[allMonths.length - 1] }));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allMonths.length]);
+  }, [allMonthsKey]);
 
   // applique les règles de catégorisation aux catégories inconnues
   const resolvedGroups = useMemo(() => {
