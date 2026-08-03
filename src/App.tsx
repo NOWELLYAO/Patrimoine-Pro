@@ -285,8 +285,9 @@ const netWorthRaw: [string, number][] = [
 ];
 
 // Solde réel d'un compte = solde de départ + mouvements des transactions qui lui sont liées.
-// Les transactions sans compte assigné (données historiques importées) n'affectent aucun
-// solde, puisqu'elles sont déjà reflétées dans le solde de départ au moment du suivi.
+// Depuis l'import complet de l'historique (3046 transactions, chacune avec son vrai compte),
+// le solde de départ de chaque compte est à 0 : tout est désormais reconstitué depuis les
+// transactions elles-mêmes, plutôt que depuis un solde figé au moment de la mise en place.
 function accountBalance(acc: Account, transactions: Transaction[]): number {
   let net = 0;
   transactions.forEach((t) => {
