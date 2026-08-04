@@ -9,7 +9,7 @@ import {
   TrendingDown, Filter, X, Plus, Pencil, Trash2, Save, RotateCcw, Search,
   ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight,
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
-  Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu,
+  Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu, ChevronDown,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
   FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon, Activity,
 } from "lucide-react";
@@ -1842,10 +1842,25 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
   const [customFrom, setCustomFrom] = useState(lastMonth);
   const [customTo, setCustomTo] = useState(lastMonth);
   const [typeView, setTypeView] = useState<TxType>("Dépense");
+  const [expandedCat, setExpandedCat] = useState<string | null>(null);
   const pillScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     pillScrollRef.current?.scrollTo({ left: pillScrollRef.current.scrollWidth, behavior: "auto" });
   }, []);
+
+  useEffect(() => { setExpandedCat(null); }, [typeView, selectedMonth, customFrom, customTo, customOpen]);
+
+  const subcatFor = (catName: string) => {
+    const rows: Record<string, number> = {};
+    periodTx.filter((t) => t.category === catName).forEach((t) => {
+      const key = t.subcategory || "Sans sous-catégorie";
+      rows[key] = (rows[key] || 0) + t.amount;
+    });
+    const catTotal = byCat[catName] || 0;
+    return Object.entries(rows)
+      .map(([name, value]) => ({ name, value, pct: catTotal ? (value / catTotal) * 100 : 0 }))
+      .sort((a, b) => b.value - a.value);
+  };
 
   const range = customOpen ? { from: customFrom, to: customTo } : { from: selectedMonth, to: selectedMonth };
   const fk = monthSortKey(range.from), tk = monthSortKey(range.to);
@@ -1941,18 +1956,44 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
 
       <Panel title="Détail par catégorie">
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {donutData.map((c) => (
-            <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
-              <div style={{ width: 40, height: 40, borderRadius: 10, background: `${c.color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <span style={{ width: 12, height: 12, borderRadius: "50%", background: c.color, display: "inline-block" }} />
+          {donutData.map((c) => {
+            const isOpen = expandedCat === c.name;
+            const subs = isOpen ? subcatFor(c.name) : [];
+            return (
+              <div key={c.name}>
+                <div
+                  onClick={() => setExpandedCat(isOpen ? null : c.name)}
+                  style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 0", borderBottom: isOpen ? "none" : `1px solid ${COLOR.hairline}`, cursor: "pointer" }}
+                >
+                  <div style={{ width: 40, height: 40, borderRadius: 10, background: `${c.color}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <span style={{ width: 12, height: 12, borderRadius: "50%", background: c.color, display: "inline-block" }} />
+                  </div>
+                  <div style={{ flex: 1, fontSize: 14, color: COLOR.ink, display: "flex", alignItems: "center", gap: 6 }}>
+                    {c.name}
+                    <ChevronDown size={14} color={COLOR.inkMuted} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: COLOR.ink }}>{fmt(c.value)} FCFA</div>
+                    <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{c.pct.toFixed(0)}%</div>
+                  </div>
+                </div>
+                {isOpen && (
+                  <div style={{ padding: "0 0 14px 54px", display: "flex", flexDirection: "column", gap: 2, borderBottom: `1px solid ${COLOR.hairline}` }}>
+                    {subs.map((s) => (
+                      <div key={s.name} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", fontSize: 13 }}>
+                        <span style={{ color: COLOR.inkMuted }}>{s.name}</span>
+                        <span style={{ display: "flex", gap: 10 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(s.value)} FCFA</span>
+                          <span style={{ color: COLOR.inkMuted, minWidth: 32, textAlign: "right" }}>{s.pct.toFixed(0)}%</span>
+                        </span>
+                      </div>
+                    ))}
+                    {!subs.length && <div style={{ fontSize: 13, color: COLOR.inkMuted, padding: "7px 0" }}>Aucune sous-catégorie pour cette période.</div>}
+                  </div>
+                )}
               </div>
-              <div style={{ flex: 1, fontSize: 14, color: COLOR.ink }}>{c.name}</div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: COLOR.ink }}>{fmt(c.value)} FCFA</div>
-                <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{c.pct.toFixed(0)}%</div>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {!donutData.length && <EmptyState text="Aucune transaction pour cette période." />}
         </div>
       </Panel>
@@ -1978,6 +2019,7 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
   const [category, setCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
   const [subcategory, setSubcategory] = useState("");
   const [presetKey, setPresetKey] = useState("6m");
+  const [granularity, setGranularity] = useState<"mois" | "jour">("mois");
 
   const presets: { key: string; label: string; range: () => [string, string] }[] = [
     { key: "mtd", label: "MTD", range: () => { const k = dateToMonthKey(todayISO()); return [k, k]; } },
@@ -2005,8 +2047,32 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
   const parentCatTotal = useMemo(() => transactions.filter((t) => t.category === category && t.type === type).reduce((a, t) => a + t.amount, 0), [transactions, category, type]);
 
   const monthsInRange = allMonths.filter((m) => { const k = monthSortKey(m); return k >= fk && k <= tk; });
-  const byMonth = monthsInRange.map((m) => ({ month: m, label: monthLabel(m), value: catTxAll.filter((t) => t.month === m).reduce((a, t) => a + t.amount, 0) }));
-  const avg = byMonth.length ? mean(byMonth.map((m) => m.value)) : 0;
+  const byMonth = monthsInRange.map((m) => ({ key: m, label: monthLabel(m), value: catTxAll.filter((t) => t.month === m).reduce((a, t) => a + t.amount, 0) }));
+
+  // Vue journalière : un point par jour civil couvert par la fenêtre sélectionnée
+  // (bornes du 1er jour du premier mois au dernier jour du dernier mois de la plage),
+  // avec la somme des transactions de la catégorie/sous-catégorie tombant ce jour-là.
+  const byDay = useMemo(() => {
+    if (granularity !== "jour") return [];
+    const start = monthKeyToFirstDate(from);
+    const [endY, endM] = to.split("_");
+    const lastDayOfEndMonth = new Date(parseInt(endY, 10), parseInt(endM, 10), 0).getDate();
+    const end = `${endY}-${pad2(parseInt(endM, 10))}-${pad2(lastDayOfEndMonth)}`;
+    const byDate: Record<string, number> = {};
+    catTxAll.forEach((t) => { byDate[t.date] = (byDate[t.date] || 0) + t.amount; });
+    const days: { key: string; label: string; value: number }[] = [];
+    const cur = new Date(start + "T00:00:00");
+    const endD = new Date(end + "T00:00:00");
+    while (cur <= endD) {
+      const iso = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      days.push({ key: iso, label: dateLabelShort(iso), value: byDate[iso] || 0 });
+      cur.setDate(cur.getDate() + 1);
+    }
+    return days;
+  }, [granularity, catTxAll, from, to]);
+
+  const series = granularity === "jour" ? byDay : byMonth;
+  const avg = series.length ? mean(series.map((m) => m.value)) : 0;
 
   const changeType = (ty: TxType) => { setType(ty); setCategory(defaultQuickCategory(transactions, ty)); setSubcategory(""); };
 
@@ -2034,6 +2100,15 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+            <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
+              {(["mois", "jour"] as const).map((g) => (
+                <button key={g} onClick={() => setGranularity(g)} style={{
+                  padding: "4px 10px", borderRadius: 12, fontSize: 11, cursor: "pointer", border: "none",
+                  background: granularity === g ? COLOR.gold : "transparent",
+                  color: granularity === g ? COLOR.bg : COLOR.inkMuted,
+                }}>{g === "mois" ? "Mois" : "Jour"}</button>
+              ))}
+            </div>
             <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
               {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
                 <button key={ty} onClick={() => changeType(ty)} style={{
@@ -2069,11 +2144,12 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
         </div>
         <div style={{ fontSize: 12.5, color: COLOR.inkMuted, marginTop: 4, marginBottom: 20 }}>
           {monthsInRange.length ? `${monthLabel(monthsInRange[0])} — ${monthLabel(monthsInRange[monthsInRange.length - 1])}` : "Aucune donnée"}
+          {granularity === "jour" && series.length ? ` · ${series.length} jours` : ""}
         </div>
 
-        {byMonth.length ? (
+        {series.length ? (
           <ResponsiveContainer width="100%" height={240}>
-            <AreaChart data={byMonth} margin={{ left: 0, right: 10, top: 20 }}>
+            <AreaChart data={series} margin={{ left: 0, right: 10, top: 20 }}>
               <defs>
                 <linearGradient id="catGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={type === "Revenu" ? COLOR.emerald : COLOR.clay} stopOpacity={0.4} />
@@ -2081,7 +2157,7 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
                 </linearGradient>
               </defs>
               <CartesianGrid stroke={COLOR.hairline} vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: COLOR.inkMuted, fontSize: 9.5 }} interval={byMonth.length > 12 ? Math.floor(byMonth.length / 8) : 0} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+              <XAxis dataKey="label" tick={{ fill: COLOR.inkMuted, fontSize: 9.5 }} interval={series.length > 12 ? Math.floor(series.length / (granularity === "jour" ? 10 : 8)) : 0} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
               <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
               <Tooltip content={<CustomTooltip />} />
               <ReferenceLine y={avg} stroke={COLOR.slateBlueSoft} strokeDasharray="5 4"
@@ -2092,17 +2168,20 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
         ) : <EmptyState />}
       </Panel>
 
-      <Panel title="Détail mensuel">
+      <Panel title={granularity === "jour" ? "Détail journalier" : "Détail mensuel"}>
         <div style={{ display: "flex", flexDirection: "column" }}>
-          {byMonth.slice().reverse().map((m) => (
-            <div key={m.month} style={{ display: "flex", justifyContent: "space-between", padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          {series.slice().reverse().filter((m) => granularity === "mois" || m.value).map((m) => (
+            <div key={m.key} style={{ display: "flex", justifyContent: "space-between", padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
               <span style={{ fontSize: 14, color: COLOR.ink }}>{m.label}</span>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: m.value ? (type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted }}>
                 {m.value ? `${type === "Dépense" ? "−" : "+"}${fmt(m.value)} FCFA` : "—"}
               </span>
             </div>
           ))}
-          {!byMonth.length && <EmptyState text="Aucune donnée pour cette période." />}
+          {!series.length && <EmptyState text="Aucune donnée pour cette période." />}
+          {granularity === "jour" && series.length > 0 && series.every((m) => !m.value) && (
+            <EmptyState text="Aucune transaction certains jours de cette période." />
+          )}
         </div>
       </Panel>
     </div>
