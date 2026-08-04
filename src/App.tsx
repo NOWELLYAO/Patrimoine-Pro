@@ -1827,8 +1827,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
 // ============================================================
 const DONUT_COLORS = [COLOR.emerald, COLOR.slateBlue, COLOR.gold, COLOR.violet, COLOR.clay, COLOR.emeraldSoft, COLOR.slateBlueSoft, COLOR.goldSoft];
 
-function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
-  transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[];
+function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMonths, accounts }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; categoryGroups: Record<string, Group>; allMonths: string[]; accounts: Account[];
 }) {
   const withGroup = useMemo(
     () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") })),
@@ -1843,12 +1843,16 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
   const [customTo, setCustomTo] = useState(lastMonth);
   const [typeView, setTypeView] = useState<TxType>("Dépense");
   const [expandedCat, setExpandedCat] = useState<string | null>(null);
+  const [expandedSub, setExpandedSub] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<Omit<Transaction, "id"> | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const pillScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     pillScrollRef.current?.scrollTo({ left: pillScrollRef.current.scrollWidth, behavior: "auto" });
   }, []);
 
-  useEffect(() => { setExpandedCat(null); }, [typeView, selectedMonth, customFrom, customTo, customOpen]);
+  useEffect(() => { setExpandedCat(null); setExpandedSub(null); }, [typeView, selectedMonth, customFrom, customTo, customOpen]);
 
   const subcatFor = (catName: string) => {
     const rows: Record<string, number> = {};
@@ -1861,6 +1865,14 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
       .map(([name, value]) => ({ name, value, pct: catTotal ? (value / catTotal) * 100 : 0 }))
       .sort((a, b) => b.value - a.value);
   };
+  const txFor = (catName: string, subName: string) =>
+    periodTx
+      .filter((t) => t.category === catName && (t.subcategory || "Sans sous-catégorie") === subName)
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, time: t.time, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note, account: t.account }); };
+  const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
+  const removeTx = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
   const range = customOpen ? { from: customFrom, to: customTo } : { from: selectedMonth, to: selectedMonth };
   const fk = monthSortKey(range.from), tk = monthSortKey(range.to);
@@ -1979,15 +1991,65 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
                 </div>
                 {isOpen && (
                   <div style={{ padding: "0 0 14px 54px", display: "flex", flexDirection: "column", gap: 2, borderBottom: `1px solid ${COLOR.hairline}` }}>
-                    {subs.map((s) => (
-                      <div key={s.name} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", fontSize: 13 }}>
-                        <span style={{ color: COLOR.inkMuted }}>{s.name}</span>
-                        <span style={{ display: "flex", gap: 10 }}>
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(s.value)} FCFA</span>
-                          <span style={{ color: COLOR.inkMuted, minWidth: 32, textAlign: "right" }}>{s.pct.toFixed(0)}%</span>
-                        </span>
-                      </div>
-                    ))}
+                    {subs.map((s) => {
+                      const subOpen = expandedSub === `${c.name}::${s.name}`;
+                      const subTx = subOpen ? txFor(c.name, s.name) : [];
+                      return (
+                        <div key={s.name}>
+                          <div
+                            onClick={() => setExpandedSub(subOpen ? null : `${c.name}::${s.name}`)}
+                            style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", fontSize: 13, cursor: "pointer" }}
+                          >
+                            <span style={{ color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 5 }}>
+                              <ChevronDown size={11} color={COLOR.inkMuted} style={{ transform: subOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                              {s.name}
+                            </span>
+                            <span style={{ display: "flex", gap: 10 }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(s.value)} FCFA</span>
+                              <span style={{ color: COLOR.inkMuted, minWidth: 32, textAlign: "right" }}>{s.pct.toFixed(0)}%</span>
+                            </span>
+                          </div>
+                          {subOpen && (
+                            <div style={{ padding: "2px 0 10px 16px", display: "flex", flexDirection: "column", gap: 6 }}>
+                              {subTx.map((t) => (
+                                <div key={t.id} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "8px 10px" }}>
+                                  {editingId === t.id && editForm ? (
+                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                                      <input type="date" style={{ ...inputStyle, width: 130 }} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} />
+                                      <select style={{ ...inputStyle, width: 150 }} value={editForm.subcategory || ""} onChange={(e) => setEditForm({ ...editForm, subcategory: e.target.value })}>
+                                        <option value="">— sous-catégorie —</option>
+                                        {getSubcategories(editForm.type, editForm.category).map((sc) => <option key={sc} value={sc}>{sc}</option>)}
+                                      </select>
+                                      <select style={{ ...inputStyle, width: 130 }} value={editForm.account || ""} onChange={(e) => setEditForm({ ...editForm, account: e.target.value })}>
+                                        {!accounts.length && <option value="">Aucun compte</option>}
+                                        {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                                      </select>
+                                      <input style={{ ...inputStyle, width: 110, textAlign: "right" }} type="number" inputMode="numeric" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} />
+                                      <button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button>
+                                      <button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button>
+                                    </div>
+                                  ) : (
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                                      <div style={{ fontSize: 12.5, color: COLOR.ink, fontFamily: "'IBM Plex Mono', monospace" }}>
+                                        {dateLabelFull(t.date)}
+                                        {t.account && <span style={{ color: COLOR.inkMuted }}> · {t.account}</span>}
+                                        {t.payee && <span style={{ color: COLOR.inkMuted }}> · {t.payee}</span>}
+                                      </div>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)} FCFA</span>
+                                        <button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={12} /></button>
+                                        <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={12} /></button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                              {!subTx.length && <div style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Aucune transaction.</div>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                     {!subs.length && <div style={{ fontSize: 13, color: COLOR.inkMuted, padding: "7px 0" }}>Aucune sous-catégorie pour cette période.</div>}
                   </div>
                 )}
@@ -1997,6 +2059,14 @@ function TopCategoriesTab({ transactions, categoryGroups, allMonths }: {
           {!donutData.length && <EmptyState text="Aucune transaction pour cette période." />}
         </div>
       </Panel>
+
+      <ConfirmDialog
+        open={!!confirmDeleteId}
+        title="Supprimer cette transaction ?"
+        message="Cette action est définitive. Le montant ne sera plus comptabilisé nulle part dans l'app."
+        onConfirm={() => { if (confirmDeleteId) removeTx(confirmDeleteId); setConfirmDeleteId(null); }}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
     </div>
   );
 }
@@ -4485,7 +4555,7 @@ export default function GrandLivre() {
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
+          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
