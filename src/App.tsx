@@ -302,12 +302,42 @@ function totalAccountsBalance(accounts: Account[], transactions: Transaction[]):
 
 // Remplace (ou ajoute) le dernier point par le total réel des comptes — la valeur nette
 // affichée reflète alors l'état actuel des comptes plutôt qu'un relevé historique figé.
+// Historique RÉEL de valeur nette, mois par mois, reconstitué à partir des soldes de
+// départ des comptes + du cumul des vraies transactions (plutôt qu'une série fictive).
+// Remplace l'ancienne série de démonstration figée, qui produisait des variations
+// erratiques sans rapport avec les données réelles de l'utilisateur.
+function computeMonthlyNetWorthSeries(accounts: Account[], transactions: Transaction[]): [string, number][] {
+  const base = accounts.reduce((a, acc) => a + acc.openingBalance, 0);
+  if (!transactions.length) return [[dateToMonthKey(todayISO()), base]];
+  const months = Array.from(new Set(transactions.map((t) => dateToMonthKey(t.date)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+  const curKey = dateToMonthKey(todayISO());
+  const allMonths = monthSortKey(curKey) <= monthSortKey(months[months.length - 1]) ? months : [...months, curKey];
+  // Complète les mois manquants entre le premier et le dernier pour une courbe continue.
+  const seq: string[] = [];
+  let cursor = allMonths[0];
+  const lastM = allMonths[allMonths.length - 1];
+  while (monthSortKey(cursor) <= monthSortKey(lastM)) {
+    seq.push(cursor);
+    const [y, m] = cursor.split("_").map(Number);
+    const next = new Date(y, m, 1); // m est déjà 1-indexé ici -> avance d'un mois
+    cursor = `${next.getFullYear()}_${next.getMonth() + 1}`;
+  }
+  let running = base;
+  const byMonthDelta: Record<string, number> = {};
+  transactions.forEach((t) => {
+    const mk = dateToMonthKey(t.date);
+    byMonthDelta[mk] = (byMonthDelta[mk] || 0) + (t.type === "Revenu" ? t.amount : -t.amount);
+  });
+  return seq.map((mk) => { running += byMonthDelta[mk] || 0; return [mk, running] as [string, number]; });
+}
+
 function liveNetWorthSeries(accounts: Account[], transactions: Transaction[]): [string, number][] {
   const total = totalAccountsBalance(accounts, transactions);
+  const series = computeMonthlyNetWorthSeries(accounts, transactions);
   const curKey = dateToMonthKey(todayISO());
-  const lastKey = netWorthRaw[netWorthRaw.length - 1][0];
-  if (lastKey === curKey) return [...netWorthRaw.slice(0, -1), [lastKey, total]];
-  return [...netWorthRaw, [curKey, total]];
+  const lastKey = series[series.length - 1][0];
+  if (lastKey === curKey) return [...series.slice(0, -1), [lastKey, total]];
+  return [...series, [curKey, total]];
 }
 
 const seedLoans: Loan[] = [
@@ -620,11 +650,29 @@ function computeHealthScore(tauxEpargne: number, pctNonProd: number, monthlyReve
   return { savingsScore, nonProdScore, stabilityScore, overall, grade, gradeColor };
 }
 
+// Statistiques robustes : la médiane et l'écart absolu médian (MAD, mis à l'échelle
+// pour être comparable à un écart-type) sont beaucoup moins sensibles à UN mois
+// exceptionnel qu'une simple moyenne + écart-type classiques.
+function median(arr: number[]): number {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const n = s.length;
+  return n % 2 === 0 ? (s[n / 2 - 1] + s[n / 2]) / 2 : s[(n - 1) / 2];
+}
+function madStdev(arr: number[]): number {
+  const m = median(arr);
+  const dev = arr.map((v) => Math.abs(v - m));
+  return median(dev) * 1.4826; // facteur de mise à l'échelle standard pour approcher un écart-type
+}
+
 function projectNetWorth(months = 12, series: [string, number][] = netWorthRaw) {
-  const recent = series.slice(-6);
+  // Fenêtre plus large (jusqu'à 9 relevés au lieu de 6) pour qu'un seul mois
+  // exceptionnel pèse moins sur la tendance et l'incertitude calculées.
+  const windowSize = Math.min(9, series.length);
+  const recent = series.slice(-windowSize);
   const deltas = recent.slice(1).map((v, i) => v[1] - recent[i][1]);
-  const avgDelta = mean(deltas);
-  const sd = stdev(deltas);
+  const avgDelta = median(deltas);
+  const sd = madStdev(deltas);
   const last = series[series.length - 1][1];
   const points = [];
   for (let i = 0; i <= months; i++) {
@@ -633,6 +681,7 @@ function projectNetWorth(months = 12, series: [string, number][] = netWorthRaw) 
       central: last + avgDelta * i,
       haut: last + (avgDelta + sd) * i,
       bas: last + (avgDelta - sd) * i,
+      range: [last + (avgDelta - sd) * i, last + (avgDelta + sd) * i],
     });
   }
   return { points, avgDelta, sd };
@@ -2877,8 +2926,8 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
   const [months, setMonths] = useState(12);
   const { points } = projectNetWorth(months, liveNetWorthSeries(accounts, transactions));
   return (
-    <PanelWithHelp title="Projection de valeur nette" subtitle={`Basée sur la tendance des 6 derniers relevés — bande optimiste/pessimiste (±1 écart-type)`}
-      explain="La ligne dorée centrale prolonge la moyenne d'évolution de ta valeur nette sur les 6 derniers mois. Les deux lignes pointillées (vert=optimiste, rouge=prudent) montrent une fourchette réaliste autour de cette projection, basée sur la variabilité récente de ton patrimoine. C'est une extrapolation statistique, pas une garantie — un gros achat ou une rentrée d'argent imprévue peut la faire dévier."
+    <PanelWithHelp title="Projection de valeur nette" subtitle="Basée sur la tendance médiane des derniers relevés — bande optimiste/pessimiste robuste aux écarts ponctuels"
+      explain="La ligne dorée centrale prolonge la variation médiane de ta valeur nette sur tes derniers mois (jusqu'à 9). Les deux lignes pointillées (vert=optimiste, rouge=prudent) montrent une fourchette autour de cette projection, basée sur l'écart absolu médian plutôt qu'un écart-type classique — un seul mois exceptionnel (gros achat, rentrée imprévue) pèse donc beaucoup moins sur la prévision qu'avant. C'est une extrapolation statistique, pas une garantie."
       right={
         <div style={{ display: "flex", gap: 6 }}>
           {[6, 12, 24].map((m) => (
@@ -2895,8 +2944,7 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
           <XAxis dataKey="mois" tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
           <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
           <Tooltip content={<CustomTooltip />} />
-          <Area type="monotone" dataKey="haut" stroke="none" fill={COLOR.gold} fillOpacity={0.08} />
-          <Area type="monotone" dataKey="bas" stroke="none" fill={COLOR.bg} fillOpacity={1} />
+          <Area type="monotone" dataKey="range" stroke="none" fill={COLOR.gold} fillOpacity={0.14} />
           <Line type="monotone" dataKey="central" name="Projection centrale" stroke={COLOR.goldSoft} strokeWidth={2.5} dot={false} />
           <Line type="monotone" dataKey="haut" name="Scénario optimiste" stroke={COLOR.emeraldSoft} strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
           <Line type="monotone" dataKey="bas" name="Scénario prudent" stroke={COLOR.claySoft} strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
