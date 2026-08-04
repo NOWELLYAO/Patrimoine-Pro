@@ -10,7 +10,7 @@ import {
   ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight,
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu, ChevronDown,
-  Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail,
+  Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail, Rocket,
   FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon, Activity,
 } from "lucide-react";
 
@@ -225,6 +225,18 @@ const defaultCategoryGroups: Record<string, Group> = {"Logement":"Nécessaire","
 const defaultCategoryScope: Record<string, Scope> = {
   "GRUNDFOS": "Business", "INVEST SGO": "Business", "Création Entreprise ECO PUMP AFRIK": "Business",
   "Vente Pompe": "Business", "ECO PUMP": "Business",
+};
+
+// Activités : suivi de rentabilité par activité réelle plutôt que par compte —
+// l'argent circule souvent entre comptes (ex: salaire épuisé → on puise sur Petty
+// Cash ou Revenus MAZDA), donc le compte n'est pas un indicateur fiable de
+// l'activité. La catégorie, elle, garde son sens économique réel.
+const defaultActivities: string[] = ["Personnel", "Mazda", "GRUNDFOS", "Vente Pompe", "Logement"];
+const defaultCategoryActivity: Record<string, string> = {
+  "Achat Mazda": "Mazda", "Voiture": "Mazda", "Revenus Location Mazda": "Mazda",
+  "GRUNDFOS": "GRUNDFOS",
+  "Vente Pompe": "Vente Pompe",
+  "Logement": "Logement",
 };
 
 // Hiérarchie catégorie → sous-catégories, telle que définie dans MoneyCoach.
@@ -3109,8 +3121,167 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 }
 
 // ============================================================
-// CRÉANCES (PRÊTS) TAB
+// ACTIVITÉS & RENTABILITÉ — suivi par activité réelle (pas par compte, car
+// l'argent circule entre comptes) : marge, ROI et délai de remboursement estimé.
 // ============================================================
+function ActivitiesTab({ transactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories }: {
+  transactions: Transaction[]; activities: string[]; setActivities: (a: string[]) => void;
+  categoryActivity: Record<string, string>; setCategoryActivity: (m: Record<string, string>) => void;
+  activityCapital: Record<string, number>; setActivityCapital: (m: Record<string, number>) => void;
+  allCategories: string[];
+}) {
+  const [newActivity, setNewActivity] = useState("");
+  const [confirmDeleteActivity, setConfirmDeleteActivity] = useState<string | null>(null);
+
+  const activityFor = (cat: string) => categoryActivity[cat] || "Personnel";
+  const allActivities = Array.from(new Set(["Personnel", ...activities]));
+
+  const addActivity = () => {
+    const name = newActivity.trim();
+    if (!name || allActivities.includes(name)) return;
+    setActivities([...activities, name]);
+    setNewActivity("");
+  };
+  const deleteActivity = (name: string) => {
+    setActivities(activities.filter((a) => a !== name));
+    const next = { ...categoryActivity };
+    Object.keys(next).forEach((c) => { if (next[c] === name) delete next[c]; });
+    setCategoryActivity(next);
+    const nextCap = { ...activityCapital };
+    delete nextCap[name];
+    setActivityCapital(nextCap);
+  };
+
+  const stats = useMemo(() => {
+    return allActivities.map((act) => {
+      const tx = transactions.filter((t) => activityFor(t.category) === act);
+      const revenus = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+      const depenses = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+      const marge = revenus - depenses;
+      const capital = activityCapital[act] || 0;
+
+      // Moyenne mensuelle de marge sur les mois où l'activité a eu du mouvement, pour estimer un délai de remboursement.
+      const byMonth: Record<string, number> = {};
+      tx.forEach((t) => { const mk = dateToMonthKey(t.date); byMonth[mk] = (byMonth[mk] || 0) + (t.type === "Revenu" ? t.amount : -t.amount); });
+      const monthlyMargins = Object.values(byMonth);
+      const avgMonthly = monthlyMargins.length ? mean(monthlyMargins) : 0;
+
+      const roiPct = capital > 0 ? (marge / capital) * 100 : null;
+      const remaining = capital > 0 ? Math.max(0, capital - marge) : 0;
+      const monthsLeft = capital > 0 && marge < capital && avgMonthly > 0 ? Math.ceil(remaining / avgMonthly) : null;
+      const paidOff = capital > 0 && marge >= capital;
+
+      return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length };
+    }).filter((s) => s.count > 0 || s.capital > 0);
+  }, [transactions, categoryActivity, activityCapital, allActivities]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <PanelWithHelp title="Rentabilité par activité" subtitle="Basée sur la catégorie de chaque transaction, pas sur le compte — l'argent circule souvent entre comptes"
+        explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé.">
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {stats.map((s) => (
+            <div key={s.act} style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 18 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+                <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, color: COLOR.ink, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Rocket size={15} color={COLOR.goldSoft} /> {s.act}
+                  <span style={{ fontSize: 11, color: COLOR.inkMuted, fontFamily: "'IBM Plex Mono', monospace" }}>({s.count} tx)</span>
+                </div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 700, color: s.marge >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>
+                  {s.marge >= 0 ? "+" : ""}{fmt(s.marge)} FCFA
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, marginBottom: s.capital > 0 ? 14 : 0 }}>
+                <div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Revenus</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.emeraldSoft }}>{fmt(s.revenus)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Dépenses</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.claySoft }}>{fmt(s.depenses)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Marge / mois (moy.)</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: s.avgMonthly >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(s.avgMonthly)}</div>
+                </div>
+                {s.capital > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>ROI</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: (s.roiPct || 0) >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{s.roiPct?.toFixed(0)}%</div>
+                  </div>
+                )}
+              </div>
+              {s.capital > 0 && (
+                <div>
+                  <div style={{ height: 8, background: COLOR.hairline, borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${Math.min(100, (s.marge / s.capital) * 100).toFixed(1)}%`, background: s.paidOff ? COLOR.emerald : COLOR.gold, transition: "width 0.3s" }} />
+                  </div>
+                  <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 6 }}>
+                    Capital investi : {fmt(s.capital)} FCFA · {s.paidOff
+                      ? <span style={{ color: COLOR.emeraldSoft }}>investissement remboursé ✓</span>
+                      : s.monthsLeft !== null
+                        ? `reste ${fmt(s.remaining)} FCFA — remboursement estimé dans ~${s.monthsLeft} mois au rythme actuel`
+                        : `reste ${fmt(s.remaining)} FCFA — rythme actuel insuffisant pour estimer un délai`}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          {!stats.length && <EmptyState text="Aucune activité avec des transactions pour l'instant." />}
+        </div>
+      </PanelWithHelp>
+
+      <Panel title="Gérer les activités" subtitle="Ajoute une activité, et renseigne un capital investi si tu veux suivre un retour sur investissement (ex : achat d'un véhicule)">
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <input style={{ ...inputStyle, flex: 1 }} placeholder="Nouvelle activité (ex : Vente Pompe)" value={newActivity}
+            onChange={(e) => setNewActivity(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addActivity(); }} />
+          <button onClick={addActivity} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+            <Plus size={13} /> Ajouter
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {activities.map((a) => (
+            <div key={a} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${COLOR.hairline}`, gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, color: COLOR.ink }}>{a}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <label style={{ fontSize: 11, color: COLOR.inkMuted }}>Capital investi</label>
+                <input type="number" inputMode="numeric" style={{ ...inputStyle, width: 130, textAlign: "right" }}
+                  value={activityCapital[a] || ""} placeholder="0"
+                  onChange={(e) => setActivityCapital({ ...activityCapital, [a]: Number(e.target.value) })} />
+                <button onClick={() => setConfirmDeleteActivity(a)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+              </div>
+            </div>
+          ))}
+          {!activities.length && <EmptyState text="Aucune activité personnalisée. « Personnel » reste le fourre-tout par défaut." />}
+        </div>
+      </Panel>
+
+      <Panel title="Assigner chaque catégorie à une activité" subtitle="Par catégorie, indépendamment du compte utilisé pour la transaction">
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {allCategories.map((c) => (
+            <div key={c} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <span style={{ fontSize: 12.5 }}>{c}</span>
+              <select value={activityFor(c)} onChange={(e) => setCategoryActivity({ ...categoryActivity, [c]: e.target.value })}
+                style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: activityFor(c) === "Personnel" ? COLOR.inkMuted : COLOR.goldSoft, padding: "5px 8px", fontSize: 11.5, width: 160 }}>
+                {allActivities.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <ConfirmDialog
+        open={!!confirmDeleteActivity}
+        title={`Supprimer l'activité "${confirmDeleteActivity}" ?`}
+        message="Les catégories qui y étaient rattachées repasseront automatiquement en « Personnel ». Le capital investi renseigné sera perdu."
+        onConfirm={() => { if (confirmDeleteActivity) deleteActivity(confirmDeleteActivity); setConfirmDeleteActivity(null); }}
+        onCancel={() => setConfirmDeleteActivity(null)}
+      />
+    </div>
+  );
+}
+
+
 function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Loan, "id">>({ person: "", amount: 0, dateGiven: "2026_8", status: "En attente", notes: "" });
@@ -3177,9 +3348,78 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
   const remove = (id: string) => setAccounts(accounts.filter((a) => a.id !== id));
   const total = totalAccountsBalance(accounts, transactions);
 
+  // Consommation par compte sur une période — indépendant du solde temps réel ci-dessus.
+  const withMonth = useMemo(() => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date) })), [transactions]);
+  const allMonths = useMemo(() => Array.from(new Set(withMonth.map((t) => t.month))).sort((a, b) => monthSortKey(a) - monthSortKey(b)), [withMonth]);
+  const lastMonth = allMonths[allMonths.length - 1] || dateToMonthKey(todayISO());
+  const [periodFrom, setPeriodFrom] = useState(allMonths[0] || lastMonth);
+  const [periodTo, setPeriodTo] = useState(lastMonth);
+
+  const applyPreset = (key: string) => {
+    if (key === "1m") { setPeriodFrom(lastMonth); setPeriodTo(lastMonth); }
+    else if (key === "3m") { setPeriodFrom(trailingRange(allMonths, 3)[0]); setPeriodTo(lastMonth); }
+    else if (key === "6m") { setPeriodFrom(trailingRange(allMonths, 6)[0]); setPeriodTo(lastMonth); }
+    else if (key === "1a") { setPeriodFrom(trailingRange(allMonths, 12)[0]); setPeriodTo(lastMonth); }
+    else if (key === "tout") { setPeriodFrom(allMonths[0] || lastMonth); setPeriodTo(lastMonth); }
+  };
+
+  const periodTx = useMemo(() => {
+    const fk = monthSortKey(periodFrom), tk = monthSortKey(periodTo);
+    return withMonth.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
+  }, [withMonth, periodFrom, periodTo]);
+
+  const consoParAccount = useMemo(() => accounts.map((a) => {
+    const tx = periodTx.filter((t) => t.account === a.name);
+    const depenses = tx.filter((t) => t.type === "Dépense").reduce((s, t) => s + t.amount, 0);
+    const revenus = tx.filter((t) => t.type === "Revenu").reduce((s, t) => s + t.amount, 0);
+    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length };
+  }).sort((x, y) => y.depenses - x.depenses), [accounts, periodTx]);
+
+  const totalConsoDep = consoParAccount.reduce((a, c) => a + c.depenses, 0);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Kpi label="Total des comptes (temps réel)" value={fmt(total)} tone={COLOR.goldSoft} icon={Wallet} />
+
+      <PanelWithHelp title="Consommation par compte" subtitle={`${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`}
+        explain="Le solde ci-dessus est un instantané à aujourd'hui. Ce panneau, lui, montre ce qui a réellement transité sur chaque compte pendant une période choisie : combien en a été dépensé (consommation), combien y est entré (revenus), et le mouvement net. Utile pour voir, par exemple, à quel point Petty Cash ou SALAIRE ont été sollicités sur les 3 derniers mois."
+        right={
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {[["1m", "1M"], ["3m", "3M"], ["6m", "6M"], ["1a", "1A"], ["tout", "Tout"]].map(([key, label]) => (
+              <button key={key} onClick={() => applyPreset(key)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted, borderRadius: 6, padding: "6px 10px", fontSize: 11.5, cursor: "pointer" }}>{label}</button>
+            ))}
+            <Select label="Du" value={periodFrom} onChange={setPeriodFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+            <Select label="Au" value={periodTo} onChange={setPeriodTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+          </div>
+        }>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {consoParAccount.map((c) => (
+            <div key={c.account.id} style={{ padding: "12px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontSize: 13 }}>{c.account.name} <span style={{ color: COLOR.inkMuted, fontSize: 11 }}>· {c.count} transaction(s)</span></div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: c.net >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>
+                  {c.net >= 0 ? "+" : ""}{fmt(c.net)} FCFA
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 20, fontSize: 11.5 }}>
+                <span style={{ color: COLOR.claySoft }}>Consommé : <strong style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(c.depenses)}</strong></span>
+                <span style={{ color: COLOR.emeraldSoft }}>Reçu : <strong style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(c.revenus)}</strong></span>
+                {totalConsoDep > 0 && c.depenses > 0 && (
+                  <span style={{ color: COLOR.inkMuted }}>{((c.depenses / totalConsoDep) * 100).toFixed(0)}% de la conso totale</span>
+                )}
+              </div>
+              {(c.depenses > 0 || c.revenus > 0) && (
+                <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginTop: 8, background: COLOR.hairline }}>
+                  {c.depenses > 0 && <div style={{ width: `${(c.depenses / (c.depenses + c.revenus)) * 100}%`, background: COLOR.clay }} />}
+                  {c.revenus > 0 && <div style={{ width: `${(c.revenus / (c.depenses + c.revenus)) * 100}%`, background: COLOR.emerald }} />}
+                </div>
+              )}
+            </div>
+          ))}
+          {!consoParAccount.length && <EmptyState text="Aucun compte." />}
+        </div>
+      </PanelWithHelp>
+
       <Panel title="Comptes" subtitle="Le solde de chaque compte se met à jour automatiquement dès qu'une transaction lui est liée"
         right={
           <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
@@ -4748,7 +4988,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -4774,6 +5014,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "simulateur", label: "Simulateur", icon: SlidersHorizontal },
     { id: "objectif", label: "Objectifs & Projection", icon: Gauge },
     { id: "business", label: "Business / Personnel", icon: Briefcase },
+    { id: "activites", label: "Activités & Rentabilité", icon: Rocket },
     { id: "creances", label: "Créances", icon: HandCoins },
     { id: "comptes", label: "Comptes", icon: Wallet },
     { id: "payees", label: "Bénéficiaires", icon: Users },
@@ -4790,6 +5031,9 @@ export default function GrandLivre() {
   const [transactions, setTransactions, txLoaded] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions);
   const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups);
   const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope);
+  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities);
+  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity);
+  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {});
   const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules);
   const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans);
   const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000);
@@ -4920,6 +5164,9 @@ export default function GrandLivre() {
       if (remote.budgets) setBudgets(remote.budgets);
       if (remote.goals) setGoals(remote.goals);
       if (remote.recurring) setRecurring(remote.recurring);
+      if (remote.activities) setActivities(remote.activities);
+      if (remote.categoryActivity) setCategoryActivity(remote.categoryActivity);
+      if (remote.activityCapital) setActivityCapital(remote.activityCapital);
       setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }
     setSyncStatus("synced");
@@ -4962,13 +5209,14 @@ export default function GrandLivre() {
       setSyncStatus("syncing");
       const ok = await pushRemoteState(syncCode, {
         transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+        activities, categoryActivity, activityCapital,
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }, 1500);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, syncCode, allLoaded]);
 
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
@@ -5100,6 +5348,7 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
@@ -5110,6 +5359,7 @@ export default function GrandLivre() {
             <SauvegardeTab
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+                activities, categoryActivity, activityCapital,
               })}
               restore={(data: any) => {
                 if (data.transactions) setTransactions(data.transactions);
@@ -5122,6 +5372,9 @@ export default function GrandLivre() {
                 if (data.budgets) setBudgets(data.budgets);
                 if (data.goals) setGoals(data.goals);
                 if (data.recurring) setRecurring(data.recurring);
+                if (data.activities) setActivities(data.activities);
+                if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
+                if (data.activityCapital) setActivityCapital(data.activityCapital);
               }}
               syncCode={syncCode}
               setSyncCode={setSyncCode}
