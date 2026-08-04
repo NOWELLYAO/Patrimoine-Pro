@@ -2922,9 +2922,38 @@ function SimulateurTab({ filtered, accounts, transactions }: { filtered: any[]; 
 // ============================================================
 // PROJECTION TAB CONTENT (utilisé dans Aperçu section additionnelle — intégré ici pour Simulateur avancé)
 // ============================================================
+function ProjectionTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0]?.payload;
+  if (!p) return null;
+  return (
+    <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "12px 16px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, minWidth: 190, boxShadow: "0 8px 24px rgba(0,0,0,0.35)" }}>
+      <div style={{ color: COLOR.inkMuted, marginBottom: 8, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        {p.mois === "aujourd'hui" ? "Aujourd'hui" : `Dans ${p.mois.replace("+", "")}`}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginBottom: 4 }}>
+        <span style={{ color: COLOR.goldSoft }}>● Central</span>
+        <span style={{ color: COLOR.ink, fontWeight: 600 }}>{fmt(p.central)} FCFA</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginBottom: 4 }}>
+        <span style={{ color: COLOR.emeraldSoft }}>● Optimiste</span>
+        <span style={{ color: COLOR.ink }}>{fmt(p.haut)} FCFA</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+        <span style={{ color: COLOR.claySoft }}>● Prudent</span>
+        <span style={{ color: COLOR.ink }}>{fmt(p.bas)} FCFA</span>
+      </div>
+    </div>
+  );
+}
+
 function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; transactions: Transaction[] }) {
   const [months, setMonths] = useState(12);
-  const { points } = projectNetWorth(months, liveNetWorthSeries(accounts, transactions));
+  const { points, avgDelta } = projectNetWorth(months, liveNetWorthSeries(accounts, transactions));
+  const startVal = points[0]?.central ?? 0;
+  const endPoint = points[points.length - 1];
+  const trendUp = avgDelta >= 0;
+
   return (
     <PanelWithHelp title="Projection de valeur nette" subtitle="Basée sur la tendance médiane des derniers relevés — bande optimiste/pessimiste robuste aux écarts ponctuels"
       explain="La ligne dorée centrale prolonge la variation médiane de ta valeur nette sur tes derniers mois (jusqu'à 9). Les deux lignes pointillées (vert=optimiste, rouge=prudent) montrent une fourchette autour de cette projection, basée sur l'écart absolu médian plutôt qu'un écart-type classique — un seul mois exceptionnel (gros achat, rentrée imprévue) pèse donc beaucoup moins sur la prévision qu'avant. C'est une extrapolation statistique, pas une garantie."
@@ -2938,13 +2967,37 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
           ))}
         </div>
       }>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 22 }}>
+        <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "12px 16px" }}>
+          <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Aujourd'hui</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 17, fontWeight: 600, color: COLOR.ink }}>{fmt(startVal)}<span style={{ fontSize: 11, color: COLOR.inkMuted, marginLeft: 4 }}>FCFA</span></div>
+        </div>
+        <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.gold}`, borderRadius: 10, padding: "12px 16px" }}>
+          <div style={{ fontSize: 10.5, color: COLOR.goldSoft, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Projection à {months} mois</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 17, fontWeight: 600, color: COLOR.ink, display: "flex", alignItems: "center", gap: 6 }}>
+            {fmt(endPoint?.central ?? 0)}<span style={{ fontSize: 11, color: COLOR.inkMuted }}>FCFA</span>
+            {trendUp ? <TrendingUp size={14} color={COLOR.emeraldSoft} /> : <TrendingDown size={14} color={COLOR.claySoft} />}
+          </div>
+        </div>
+        <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "12px 16px" }}>
+          <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Fourchette à {months} mois</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.ink }}>
+            <span style={{ color: COLOR.claySoft }}>{fmt(endPoint?.bas ?? 0)}</span>
+            <span style={{ color: COLOR.inkMuted }}> — </span>
+            <span style={{ color: COLOR.emeraldSoft }}>{fmt(endPoint?.haut ?? 0)}</span>
+          </div>
+        </div>
+      </div>
+
       <ResponsiveContainer width="100%" height={260}>
         <AreaChart data={points} margin={{ left: 0, right: 10, top: 10 }}>
           <CartesianGrid stroke={COLOR.hairline} vertical={false} />
           <XAxis dataKey="mois" tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
           <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
-          <Tooltip content={<CustomTooltip />} />
-          <Area type="monotone" dataKey="range" stroke="none" fill={COLOR.gold} fillOpacity={0.14} />
+          <Tooltip content={<ProjectionTooltip />} />
+          <Legend wrapperStyle={{ fontSize: 11.5, color: COLOR.inkMuted, paddingTop: 8 }} />
+          <Area type="monotone" dataKey="range" stroke="none" fill={COLOR.gold} fillOpacity={0.14} legendType="none" />
           <Line type="monotone" dataKey="central" name="Projection centrale" stroke={COLOR.goldSoft} strokeWidth={2.5} dot={false} />
           <Line type="monotone" dataKey="haut" name="Scénario optimiste" stroke={COLOR.emeraldSoft} strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
           <Line type="monotone" dataKey="bas" name="Scénario prudent" stroke={COLOR.claySoft} strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
