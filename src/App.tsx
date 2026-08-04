@@ -661,8 +661,14 @@ function detectAnomalies(filtered: any[]) {
 // ============================================================
 type InsightKind = "alerte" | "conseil" | "positif";
 interface Insight { kind: InsightKind; title: string; text: string; }
+interface CatFocus {
+  typeView: TxType; periodLabel: string;
+  catList: { name: string; value: number; pct: number }[];
+  prevByCat: Record<string, number>;
+  total: number; prevTotal: number; delta: number; deltaPct: number;
+}
 
-function generateInsights(filtered: any[]): Insight[] {
+function generateInsights(filtered: any[], catFocus?: CatFocus): Insight[] {
   const insights: Insight[] = [];
   const revenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const depenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
@@ -727,6 +733,75 @@ function generateInsights(filtered: any[]): Insight[] {
 
   if (!insights.length) {
     insights.push({ kind: "positif", title: "Rien à signaler", text: "Aucune alerte particulière sur cette période — les indicateurs sont dans des plages normales." });
+  }
+
+  // Analyse ciblée sur les "Principales catégories" (période + type actuellement filtrés)
+  if (catFocus && catFocus.catList.length) {
+    const { typeView, periodLabel, catList, prevByCat, total: cfTotal, delta: cfDelta, deltaPct: cfDeltaPct } = catFocus;
+    const verbeType = typeView === "Dépense" ? "dépenses" : "revenus";
+    const cfImproved = typeView === "Dépense" ? cfDelta <= 0 : cfDelta >= 0;
+
+    // Tendance globale sur la période filtrée vs période précédente équivalente
+    if (Math.abs(cfDeltaPct) >= 8) {
+      insights.push({
+        kind: cfImproved ? "positif" : (Math.abs(cfDeltaPct) >= 20 ? "alerte" : "conseil"),
+        title: `${verbeType[0].toUpperCase()}${verbeType.slice(1)} ${cfDelta >= 0 ? "en hausse" : "en baisse"} de ${Math.abs(cfDeltaPct).toFixed(0)}%`,
+        text: `Sur ${periodLabel}, les ${verbeType} s'élèvent à ${fmt(cfTotal)} FCFA contre ${fmt(catFocus.prevTotal)} FCFA sur la période comparable précédente, soit ${cfDelta >= 0 ? "+" : "−"}${fmt(Math.abs(cfDelta))} FCFA.`,
+      });
+    }
+
+    // Concentration sur la catégorie dominante
+    const top = catList[0];
+    if (top) {
+      if (top.pct >= 40) {
+        insights.push({ kind: "alerte", title: `"${top.name}" concentre l'essentiel`, text: `Cette catégorie représente à elle seule ${top.pct.toFixed(0)}% des ${verbeType} de la période (${fmt(top.value)} FCFA) — une forte concentration qui mérite d'être questionnée si elle n'est pas structurelle (loyer, salaire fixe…).` });
+      } else if (top.pct >= 25) {
+        insights.push({ kind: "conseil", title: `"${top.name}" en tête`, text: `Premier poste de la période avec ${top.pct.toFixed(0)}% du total (${fmt(top.value)} FCFA). À garder à l'œil si elle continue de progresser.` });
+      }
+    }
+
+    // Catégorie avec la plus forte progression vs période précédente
+    let biggestMover: { name: string; prevVal: number; curVal: number; pct: number } | null = null;
+    catList.forEach((c) => {
+      const prevVal = prevByCat[c.name] || 0;
+      if (prevVal > 0) {
+        const pct = ((c.value - prevVal) / prevVal) * 100;
+        if (pct >= 50 && (!biggestMover || pct > biggestMover.pct)) biggestMover = { name: c.name, prevVal, curVal: c.value, pct };
+      } else if (c.value > 0 && !biggestMover) {
+        biggestMover = { name: c.name, prevVal: 0, curVal: c.value, pct: 100 };
+      }
+    });
+    if (biggestMover) {
+      const bm = biggestMover as { name: string; prevVal: number; curVal: number; pct: number };
+      insights.push({
+        kind: typeView === "Dépense" ? "alerte" : "positif",
+        title: `Forte progression sur "${bm.name}"`,
+        text: bm.prevVal > 0
+          ? `Passée de ${fmt(bm.prevVal)} à ${fmt(bm.curVal)} FCFA (+${bm.pct.toFixed(0)}%) par rapport à la période précédente — le principal moteur de la variation observée.`
+          : `Nouvelle sur cette période, pour ${fmt(bm.curVal)} FCFA — absente ou négligeable lors de la période précédente.`,
+      });
+    }
+
+    // Catégorie en forte baisse (bonne nouvelle côté dépenses)
+    let biggestDrop: { name: string; prevVal: number; curVal: number; pct: number } | null = null;
+    Object.entries(prevByCat).forEach(([name, prevVal]) => {
+      const curVal = catList.find((c) => c.name === name)?.value || 0;
+      if (prevVal > 0 && curVal < prevVal) {
+        const pct = ((curVal - prevVal) / prevVal) * 100;
+        if (pct <= -40 && (!biggestDrop || pct < biggestDrop.pct)) biggestDrop = { name, prevVal, curVal, pct };
+      }
+    });
+    if (biggestDrop && typeView === "Dépense") {
+      const bd = biggestDrop as { name: string; prevVal: number; curVal: number; pct: number };
+      insights.push({ kind: "positif", title: `Nette baisse sur "${bd.name}"`, text: `Passée de ${fmt(bd.prevVal)} à ${fmt(bd.curVal)} FCFA (${bd.pct.toFixed(0)}%) — un effort payant à maintenir.` });
+    }
+
+    // Diversification : beaucoup de petites catégories résiduelles
+    const smallCats = catList.filter((c) => c.pct < 3);
+    if (smallCats.length >= 8) {
+      const smallTotal = smallCats.reduce((a, c) => a + c.value, 0);
+      insights.push({ kind: "conseil", title: "Beaucoup de petites lignes éparses", text: `${smallCats.length} catégories pèsent chacune moins de 3% (${fmt(smallTotal)} FCFA cumulés). Les regrouper ou les revoir pourrait simplifier le suivi sans perte d'information utile.` });
+    }
   }
 
   const order: Record<InsightKind, number> = { alerte: 0, conseil: 1, positif: 2 };
@@ -818,8 +893,140 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
 }
 
 // ============================================================
-// CONFIRMATION AVANT SUPPRESSION
+// FICHE DE MODIFICATION — même style visuel que "Saisie rapide",
+// réutilisable partout où on veut éditer une transaction existante.
 // ============================================================
+function TransactionEditSheet({ open, transaction, transactions, accounts, onClose, onSave, onDelete }: {
+  open: boolean; transaction: Transaction | null; transactions: Transaction[]; accounts: Account[];
+  onClose: () => void; onSave: (t: Transaction) => void; onDelete: (id: string) => void;
+}) {
+  const [date, setDate] = useState(todayISO());
+  const [time, setTime] = useState(nowTime());
+  const [type, setType] = useState<TxType>("Dépense");
+  const [category, setCategory] = useState("");
+  const [subcategory, setSubcategory] = useState("");
+  const [amount, setAmount] = useState<number | "">("");
+  const [account, setAccount] = useState("");
+  const [catPickerOpen, setCatPickerOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (open && transaction) {
+      setDate(transaction.date); setTime(transaction.time || nowTime()); setType(transaction.type);
+      setCategory(transaction.category); setSubcategory(transaction.subcategory || "");
+      setAmount(transaction.amount); setAccount(transaction.account || defaultQuickAccount(accounts));
+      setSaved(false);
+    }
+  }, [open, transaction]);
+
+  if (!open || !transaction) return null;
+  const typeColor = type === "Revenu" ? COLOR.emerald : COLOR.clay;
+  const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
+  const nakedSelect: React.CSSProperties = {
+    background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600,
+    fontFamily: "'Fraunces', serif", padding: 0, cursor: "pointer", width: "100%", appearance: "none", WebkitAppearance: "none",
+  };
+
+  const submit = () => {
+    if (!category || !amount || Number(amount) <= 0) return;
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined });
+    setSaved(true);
+    setTimeout(() => { setSaved(false); onClose(); }, 700);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 450, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 0 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, maxHeight: "92vh", overflowY: "auto" }} className="gl-scroll">
+        <div style={{ background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.surface} 70%)`, border: `1px solid ${COLOR.hairline}`, borderBottom: "none", borderRadius: "16px 16px 0 0", overflow: "hidden" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px 0 20px" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, color: COLOR.goldSoft }}>Modifier la transaction</div>
+            <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
+          </div>
+          {/* Type + Date */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px 6px 20px", flexWrap: "wrap", gap: 10 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 16px" }}>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+                  style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+              </div>
+              <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 16px" }}>
+                <input type="time" value={time} onChange={(e) => setTime(e.target.value)}
+                  style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, background: COLOR.surface, borderRadius: 24, padding: 5, border: `1px solid ${COLOR.hairline}` }}>
+              <button onClick={() => { setType("Dépense"); setSubcategory(""); }} title="Dépense" style={{
+                width: 34, height: 34, borderRadius: "50%", border: "none", cursor: "pointer",
+                background: type === "Dépense" ? COLOR.clay : "transparent", color: type === "Dépense" ? COLOR.bg : COLOR.claySoft,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}><Minus size={16} strokeWidth={2.5} /></button>
+              <button onClick={() => { setType("Revenu"); setSubcategory(""); }} title="Revenu" style={{
+                width: 34, height: 34, borderRadius: "50%", border: "none", cursor: "pointer",
+                background: type === "Revenu" ? COLOR.emerald : "transparent", color: type === "Revenu" ? COLOR.bg : COLOR.emeraldSoft,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}><Plus size={16} strokeWidth={2.5} /></button>
+            </div>
+          </div>
+
+          {/* Montant */}
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 24px 8px 24px" }}>
+            <div style={{ position: "absolute", fontSize: 56, fontWeight: 700, color: typeColor, opacity: 0.07, fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none", top: 6 }}>FCFA</div>
+            <input type="number" inputMode="numeric" value={amount} placeholder="0"
+              onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+              style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 42, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 260 }} />
+          </div>
+
+          {/* Compte / Catégorie */}
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "16px 20px" }}>
+            <div style={{ display: "flex", gap: 24 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={fieldLabel}>Compte</div>
+                <select value={account} onChange={(e) => setAccount(e.target.value)} style={nakedSelect}>
+                  {!accounts.length && <option value="">Aucun compte créé</option>}
+                  {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
+              <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
+                <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
+                <button onClick={() => setCatPickerOpen(true)} style={{ ...nakedSelect, textAlign: "right", cursor: "pointer", display: "block" }}>
+                  {category || "Choisir…"}
+                </button>
+                {subcategory && <div style={{ textAlign: "right", fontSize: 13, color: COLOR.inkMuted, marginTop: 4 }}>{subcategory}</div>}
+              </div>
+            </div>
+            <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
+              value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
+
+            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+              <button onClick={() => setConfirmDelete(true)} style={{
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "14px 18px", borderRadius: 12,
+                border: `1px solid ${COLOR.clay}`, background: "rgba(193,84,63,0.1)", color: COLOR.claySoft, fontSize: 13.5, cursor: "pointer",
+              }}><Trash2 size={15} /> Supprimer</button>
+              <button onClick={submit} disabled={!amount || Number(amount) <= 0} style={{
+                flex: 1, padding: "14px 0", borderRadius: 12, border: "none",
+                background: saved ? COLOR.emerald : (!amount || Number(amount) <= 0) ? COLOR.hairline : COLOR.gold,
+                color: saved ? COLOR.bg : (!amount || Number(amount) <= 0) ? COLOR.inkMuted : COLOR.bg,
+                fontSize: 14.5, fontWeight: 700, cursor: (!amount || Number(amount) <= 0) ? "default" : "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.15s",
+              }}>{saved ? <Check size={17} /> : null} {saved ? "Mis à jour" : "Mettre à jour"}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Supprimer cette transaction ?"
+        message="Cette action est définitive. Le montant ne sera plus comptabilisé nulle part dans l'app."
+        onConfirm={() => { setConfirmDelete(false); onDelete(transaction.id); onClose(); }}
+        onCancel={() => setConfirmDelete(false)}
+      />
+    </div>
+  );
+}
+
+
 function ConfirmDialog({ open, title, message, onConfirm, onCancel, confirmLabel = "Supprimer" }: {
   open: boolean; title: string; message: string; onConfirm: () => void; onCancel: () => void; confirmLabel?: string;
 }) {
@@ -845,15 +1052,15 @@ function ConfirmDialog({ open, title, message, onConfirm, onCancel, confirmLabel
   );
 }
 
-function InsightsPanel({ filtered }: { filtered: any[] }) {
-  const insights = useMemo(() => generateInsights(filtered), [filtered]);
+function InsightsPanel({ filtered, catFocus, title, subtitle }: { filtered: any[]; catFocus?: CatFocus; title?: string; subtitle?: string }) {
+  const insights = useMemo(() => generateInsights(filtered, catFocus), [filtered, catFocus]);
   const styleFor: Record<InsightKind, { bg: string; border: string; color: string; icon: any }> = {
     alerte: { bg: "rgba(193,84,63,0.08)", border: COLOR.clay, color: COLOR.claySoft, icon: AlertTriangle },
     conseil: { bg: "rgba(201,162,39,0.08)", border: COLOR.gold, color: COLOR.goldSoft, icon: Info },
     positif: { bg: "rgba(63,156,122,0.08)", border: COLOR.emerald, color: COLOR.emeraldSoft, icon: Check },
   };
   return (
-    <Panel title="Analyse & conseils" subtitle="Généré automatiquement à partir de la période et des filtres actifs">
+    <Panel title={title || "Analyse & conseils"} subtitle={subtitle || "Généré automatiquement à partir de la période et des filtres actifs"}>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {insights.map((ins, i) => {
           const s = styleFor[ins.kind];
@@ -1844,8 +2051,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   const [typeView, setTypeView] = useState<TxType>("Dépense");
   const [expandedCat, setExpandedCat] = useState<string | null>(null);
   const [expandedSub, setExpandedSub] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<Omit<Transaction, "id"> | null>(null);
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const pillScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1870,8 +2076,8 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
       .filter((t) => t.category === catName && (t.subcategory || "Sans sous-catégorie") === subName)
       .sort((a, b) => b.date.localeCompare(a.date));
 
-  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, time: t.time, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note, account: t.account }); };
-  const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
+  const startEdit = (t: Transaction) => setEditingTx(t);
+  const saveEdit = (t: Transaction) => setTransactions(transactions.map((x) => (x.id === t.id ? t : x)));
   const removeTx = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
   const range = customOpen ? { from: customFrom, to: customTo } : { from: selectedMonth, to: selectedMonth };
@@ -1888,6 +2094,10 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   const deltaPct = prevTotal !== 0 ? (delta / prevTotal) * 100 : (total !== 0 ? 100 : 0);
   const improved = typeView === "Dépense" ? delta <= 0 : delta >= 0;
 
+  const periodAllTypesTx = withGroup.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
+  const prevByCat: Record<string, number> = {};
+  prevTx.forEach((t) => { prevByCat[t.category] = (prevByCat[t.category] || 0) + t.amount; });
+
   const byCat: Record<string, number> = {};
   periodTx.forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
   const catList = Object.entries(byCat)
@@ -1898,6 +2108,109 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   const periodLabel = customOpen
     ? (customFrom === customTo ? monthLabel(customFrom) : `${monthLabel(customFrom)} — ${monthLabel(customTo)}`)
     : monthLabel(selectedMonth);
+
+  const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
+
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const summaryRows: any[][] = [
+      ["Grand Livre — Principales catégories"],
+      ["Période", periodLabel],
+      ["Type", typeView],
+      ["Généré le", dateLabelFull(todayISO())],
+      [],
+      [`Total ${typeView === "Dépense" ? "dépenses" : "revenus"}`, total],
+      ["Vs. période précédente (FCFA)", delta],
+      ["Vs. période précédente (%)", `${delta >= 0 ? "+" : "−"}${Math.abs(deltaPct).toFixed(1)}%`],
+    ];
+    const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+    wsSummary["!cols"] = [{ wch: 30 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, wsSummary, "Résumé");
+
+    const catHeader = ["Catégorie", "Montant (FCFA)", "% du total"];
+    const catRows = catList.map((c) => [c.name, c.value, `${c.pct.toFixed(1)}%`]);
+    const wsCat = XLSX.utils.aoa_to_sheet([catHeader, ...catRows]);
+    wsCat["!cols"] = [{ wch: 26 }, { wch: 16 }, { wch: 12 }];
+    XLSX.utils.book_append_sheet(wb, wsCat, "Par catégorie");
+
+    const subHeader = ["Catégorie", "Sous-catégorie", "Montant (FCFA)", "% de la catégorie"];
+    const subRows: any[][] = [];
+    catList.forEach((c) => { subcatFor(c.name).forEach((s) => subRows.push([c.name, s.name, s.value, `${s.pct.toFixed(1)}%`])); });
+    const wsSub = XLSX.utils.aoa_to_sheet([subHeader, ...subRows]);
+    wsSub["!cols"] = [{ wch: 26 }, { wch: 22 }, { wch: 16 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsSub, "Par sous-catégorie");
+
+    XLSX.writeFile(wb, `grand-livre_principales-categories_${periodLabel.replace(/\s/g, "-")}.xlsx`);
+  };
+
+  const exportPDF = async () => {
+    setPdfState("loading");
+    try {
+      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+        import(/* @vite-ignore */ "jspdf"),
+        import(/* @vite-ignore */ "jspdf-autotable"),
+      ]);
+      const autoTable = (autoTableModule as any).default || autoTableModule;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFillColor(26, 43, 76);
+      doc.rect(0, 0, pageWidth, 34, "F");
+      doc.setFontSize(17); doc.setTextColor(255, 255, 255);
+      doc.text("Grand Livre — Principales catégories", 14, 16);
+      doc.setFontSize(9.5); doc.setTextColor(200, 210, 225);
+      doc.text(`${typeView} · ${periodLabel} · Généré le ${dateLabelFull(todayISO())}`, 14, 24);
+      doc.text(`${catList.length} catégorie(s)`, 14, 29);
+
+      const kpiY = 40, kpiH = 20, kpiW = (pageWidth - 28 - 16) / 3;
+      const drawKpiBox = (x: number, label: string, value: string, r: number, g: number, b: number) => {
+        doc.setFillColor(r, g, b);
+        doc.roundedRect(x, kpiY, kpiW, kpiH, 2, 2, "F");
+        doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+        doc.text(label, x + 5, kpiY + 7);
+        doc.setFontSize(11); doc.setFont("helvetica", "bold");
+        doc.text(value, x + 5, kpiY + 15);
+        doc.setFont("helvetica", "normal");
+      };
+      drawKpiBox(14, `TOTAL ${typeView.toUpperCase()}`, `${fmt(total)} FCFA`, typeView === "Revenu" ? 63 : 193, typeView === "Revenu" ? 156 : 84, typeView === "Revenu" ? 122 : 63);
+      drawKpiBox(14 + kpiW + 8, "VS PÉRIODE PRÉC.", `${delta >= 0 ? "+" : "−"}${fmt(Math.abs(delta))}`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
+      drawKpiBox(14 + (kpiW + 8) * 2, "VARIATION", `${delta >= 0 ? "+" : "−"}${Math.abs(deltaPct).toFixed(0)}%`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
+
+      autoTable(doc, {
+        startY: 68,
+        head: [["Catégorie", "Montant (FCFA)", "% du total"]],
+        body: catList.map((c) => [c.name, fmt(c.value), `${c.pct.toFixed(0)}%`]),
+        headStyles: { fillColor: [26, 43, 76] },
+        styles: { fontSize: 8.5 },
+        columnStyles: { 1: { halign: "right" }, 2: { halign: "right" } },
+      });
+
+      let y = (doc as any).lastAutoTable.finalY + 10;
+      catList.forEach((c) => {
+        const subs = subcatFor(c.name);
+        if (!subs.length) return;
+        if (y > 260) { doc.addPage(); y = 20; }
+        doc.setFontSize(10); doc.setTextColor(26, 43, 76); doc.setFont("helvetica", "bold");
+        doc.text(c.name, 14, y);
+        doc.setFont("helvetica", "normal");
+        autoTable(doc, {
+          startY: y + 3,
+          head: [["Sous-catégorie", "Montant (FCFA)", "% de la catégorie"]],
+          body: subs.map((s) => [s.name, fmt(s.value), `${s.pct.toFixed(0)}%`]),
+          headStyles: { fillColor: [201, 162, 39], textColor: [26, 26, 26] },
+          styles: { fontSize: 8 },
+          columnStyles: { 1: { halign: "right" }, 2: { halign: "right" } },
+          margin: { left: 14, right: 14 },
+        });
+        y = (doc as any).lastAutoTable.finalY + 10;
+      });
+
+      doc.save(`grand-livre_principales-categories_${periodLabel.replace(/\s/g, "-")}.pdf`);
+      setPdfState("idle");
+    } catch {
+      setPdfState("error");
+    }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -1966,7 +2279,27 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         </div>
       </Panel>
 
-      <Panel title="Détail par catégorie">
+      <InsightsPanel
+        filtered={periodAllTypesTx}
+        catFocus={{ typeView, periodLabel, catList, prevByCat, total, prevTotal, delta, deltaPct }}
+        title="Analyse d'expert financier"
+        subtitle={`Critique et recommandations sur ${typeView === "Dépense" ? "les dépenses" : "les revenus"} · ${periodLabel}`}
+      />
+
+      <Panel
+        title="Détail par catégorie"
+        right={
+          <div className="gl-noprint" style={{ display: "flex", gap: 8 }}>
+            <button onClick={exportExcel} title="Exporter en Excel" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+              <FileSpreadsheet size={13} /> Excel
+            </button>
+            <button onClick={exportPDF} disabled={pdfState === "loading"} title="Exporter en PDF" style={{ display: "flex", alignItems: "center", gap: 6, background: pdfState === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${pdfState === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8, color: pdfState === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "6px 12px", fontSize: 12, cursor: pdfState === "loading" ? "default" : "pointer" }}>
+              {pdfState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileText size={13} />}
+              {pdfState === "loading" ? "Génération…" : pdfState === "error" ? "Réessayer" : "PDF"}
+            </button>
+          </div>
+        }
+      >
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {donutData.map((c) => {
             const isOpen = expandedCat === c.name;
@@ -2013,35 +2346,18 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
                             <div style={{ padding: "2px 0 10px 16px", display: "flex", flexDirection: "column", gap: 6 }}>
                               {subTx.map((t) => (
                                 <div key={t.id} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "8px 10px" }}>
-                                  {editingId === t.id && editForm ? (
-                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                                      <input type="date" style={{ ...inputStyle, width: 130 }} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} />
-                                      <select style={{ ...inputStyle, width: 150 }} value={editForm.subcategory || ""} onChange={(e) => setEditForm({ ...editForm, subcategory: e.target.value })}>
-                                        <option value="">— sous-catégorie —</option>
-                                        {getSubcategories(editForm.type, editForm.category).map((sc) => <option key={sc} value={sc}>{sc}</option>)}
-                                      </select>
-                                      <select style={{ ...inputStyle, width: 130 }} value={editForm.account || ""} onChange={(e) => setEditForm({ ...editForm, account: e.target.value })}>
-                                        {!accounts.length && <option value="">Aucun compte</option>}
-                                        {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
-                                      </select>
-                                      <input style={{ ...inputStyle, width: 110, textAlign: "right" }} type="number" inputMode="numeric" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} />
-                                      <button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button>
-                                      <button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                                    <div style={{ fontSize: 12.5, color: COLOR.ink, fontFamily: "'IBM Plex Mono', monospace" }}>
+                                      {dateLabelFull(t.date)}
+                                      {t.account && <span style={{ color: COLOR.inkMuted }}> · {t.account}</span>}
+                                      {t.payee && <span style={{ color: COLOR.inkMuted }}> · {t.payee}</span>}
                                     </div>
-                                  ) : (
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                                      <div style={{ fontSize: 12.5, color: COLOR.ink, fontFamily: "'IBM Plex Mono', monospace" }}>
-                                        {dateLabelFull(t.date)}
-                                        {t.account && <span style={{ color: COLOR.inkMuted }}> · {t.account}</span>}
-                                        {t.payee && <span style={{ color: COLOR.inkMuted }}> · {t.payee}</span>}
-                                      </div>
-                                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)} FCFA</span>
-                                        <button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={12} /></button>
-                                        <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={12} /></button>
-                                      </div>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)} FCFA</span>
+                                      <button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={12} /></button>
+                                      <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={12} /></button>
                                     </div>
-                                  )}
+                                  </div>
                                 </div>
                               ))}
                               {!subTx.length && <div style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Aucune transaction.</div>}
@@ -2060,6 +2376,15 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         </div>
       </Panel>
 
+      <TransactionEditSheet
+        open={!!editingTx}
+        transaction={editingTx}
+        transactions={transactions}
+        accounts={accounts}
+        onClose={() => setEditingTx(null)}
+        onSave={saveEdit}
+        onDelete={removeTx}
+      />
       <ConfirmDialog
         open={!!confirmDeleteId}
         title="Supprimer cette transaction ?"
@@ -3068,8 +3393,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions, accounts));
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<Omit<Transaction, "id"> | null>(null);
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [page, setPage] = useState(0);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
@@ -3105,8 +3429,8 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
     setTransactions([...transactions, { ...form, id: uid() }]);
     setForm(emptyForm(transactions, accounts)); setAdding(false);
   };
-  const startEdit = (t: Transaction) => { setEditingId(t.id); setEditForm({ date: t.date, time: t.time, category: t.category, subcategory: t.subcategory, type: t.type, amount: t.amount, payee: t.payee, note: t.note, account: t.account }); };
-  const saveEdit = () => { if (!editingId || !editForm) return; setTransactions(transactions.map((t) => (t.id === editingId ? { ...editForm, id: editingId } : t))); setEditingId(null); setEditForm(null); };
+  const startEdit = (t: Transaction) => setEditingTx(t);
+  const saveEdit = (t: Transaction) => setTransactions(transactions.map((x) => (x.id === t.id ? t : x)));
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
   // parsing du texte collé (format MoneyCoach : "2026_1 Logement Dépense 480500 €")
@@ -3253,7 +3577,6 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
             ))}</tr></thead>
             <tbody>
               {pageRows.map((t) => {
-                const isEditing = editingId === t.id;
                 return (
                   <tr key={t.id}>
                     <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -3261,55 +3584,24 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                         {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
                       </button>
                     </td>
-                    {isEditing && editForm ? (
-                      <>
-                        <td style={{ padding: 6 }}>
-                          <input type="date" style={inputStyle} value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} />
-                          <input type="time" style={{ ...inputStyle, marginTop: 4 }} value={editForm.time || ""} onChange={(e) => setEditForm({ ...editForm, time: e.target.value })} />
-                        </td>
-                        <td style={{ padding: 6 }}>
-                          <select style={inputStyle} value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value, subcategory: "" })}>
-                            {categoriesForType(transactions, editForm.type).map((c) => <option key={c} value={c}>{c}</option>)}
-                          </select>
-                          {getSubcategories(editForm.type, editForm.category).length > 0 && (
-                            <select style={{ ...inputStyle, marginTop: 4 }} value={editForm.subcategory || ""} onChange={(e) => setEditForm({ ...editForm, subcategory: e.target.value })}>
-                              <option value="">— sous-catégorie —</option>
-                              {getSubcategories(editForm.type, editForm.category).map((s) => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          )}
-                        </td>
-                        <td style={{ padding: 6 }}><select style={inputStyle} value={editForm.type} onChange={(e) => { const ty = e.target.value as TxType; setEditForm({ ...editForm, type: ty, subcategory: "", category: categoriesForType(transactions, ty)[0] || editForm.category }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></td>
-                        <td style={{ padding: 6 }}>
-                          <select style={inputStyle} value={editForm.account || ""} onChange={(e) => setEditForm({ ...editForm, account: e.target.value })}>
-                            {!accounts.length && <option value="">Aucun compte</option>}
-                            {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
-                          </select>
-                        </td>
-                        <td style={{ padding: 6 }}><input style={{ ...inputStyle, textAlign: "right" }} type="number" inputMode="numeric" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: Number(e.target.value) })} /></td>
-                        <td style={{ padding: 6, whiteSpace: "nowrap" }}><button onClick={saveEdit} style={iconBtnStyle(COLOR.emerald)}><Save size={13} /></button><button onClick={() => { setEditingId(null); setEditForm(null); }} style={iconBtnStyle(COLOR.inkMuted)}><X size={13} /></button></td>
-                      </>
-                    ) : (
-                      <>
-                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>
-                          {dateLabelFull(t.date)}{t.time && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.time}</div>}
-                        </td>
-                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}` }}>
-                          {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
-                          {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
-                        </td>
-                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
-                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
-                          {t.group}
-                          {t.account ? (
-                            <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
-                          ) : (
-                            <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
-                          )}
-                        </td>
-                        <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
-                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
-                      </>
-                    )}
+                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {dateLabelFull(t.date)}{t.time && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.time}</div>}
+                    </td>
+                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}` }}>
+                      {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
+                      {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
+                    </td>
+                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
+                    <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
+                      {t.group}
+                      {t.account ? (
+                        <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
+                      ) : (
+                        <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                      )}
+                    </td>
+                    <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
+                    <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
                   </tr>
                 );
               })}
@@ -3325,6 +3617,15 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           </div>
         )}
       </Panel>
+      <TransactionEditSheet
+        open={!!editingTx}
+        transaction={editingTx}
+        transactions={transactions}
+        accounts={accounts}
+        onClose={() => setEditingTx(null)}
+        onSave={saveEdit}
+        onDelete={remove}
+      />
       <ConfirmDialog
         open={!!confirmDeleteId}
         title="Supprimer cette transaction ?"
