@@ -1080,6 +1080,77 @@ function InsightsPanel({ filtered, catFocus, title, subtitle }: { filtered: any[
   );
 }
 
+function ExpertAnalysisButton({ filtered, catFocus, title, subtitle }: { filtered: any[]; catFocus?: CatFocus; title?: string; subtitle?: string }) {
+  const [open, setOpen] = useState(false);
+  const insights = useMemo(() => generateInsights(filtered, catFocus), [filtered, catFocus]);
+  const styleFor: Record<InsightKind, { bg: string; border: string; color: string; icon: any }> = {
+    alerte: { bg: "rgba(193,84,63,0.08)", border: COLOR.clay, color: COLOR.claySoft, icon: AlertTriangle },
+    conseil: { bg: "rgba(201,162,39,0.08)", border: COLOR.gold, color: COLOR.goldSoft, icon: Info },
+    positif: { bg: "rgba(63,156,122,0.08)", border: COLOR.emerald, color: COLOR.emeraldSoft, icon: Check },
+  };
+  const alertCount = insights.filter((i) => i.kind === "alerte").length;
+  const finalTitle = title || "Analyse d'expert financier";
+  const finalSubtitle = subtitle || "Critique et recommandations générées à partir de la période et des filtres actifs";
+
+  return (
+    <>
+      <button onClick={() => setOpen(true)} style={{
+        display: "flex", alignItems: "center", gap: 14, width: "100%", textAlign: "left", cursor: "pointer",
+        background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.surface} 100%)`, border: `1px solid ${COLOR.hairline}`,
+        borderRadius: 14, padding: "16px 18px",
+      }}>
+        <div style={{ width: 38, height: 38, borderRadius: 10, background: "rgba(201,162,39,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Gauge size={18} color={COLOR.goldSoft} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: COLOR.ink, fontFamily: "'Fraunces', serif" }}>{finalTitle}</div>
+          <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{finalSubtitle}</div>
+        </div>
+        {alertCount > 0 && (
+          <span style={{ background: "rgba(193,84,63,0.15)", color: COLOR.claySoft, fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{alertCount} alerte{alertCount > 1 ? "s" : ""}</span>
+        )}
+        <ChevronRight size={16} color={COLOR.inkMuted} style={{ flexShrink: 0 }} />
+      </button>
+
+      {open && (
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 460, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: "100%", maxWidth: 560, maxHeight: "86vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+            display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 20px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <div>
+                <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, color: COLOR.ink, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Gauge size={17} color={COLOR.goldSoft} /> {finalTitle}
+                </div>
+                <div style={{ fontSize: 12, color: COLOR.inkMuted, marginTop: 4 }}>{finalSubtitle}</div>
+              </div>
+              <button onClick={() => setOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+            </div>
+            <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: 18, WebkitOverflowScrolling: "touch" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {insights.map((ins, i) => {
+                  const s = styleFor[ins.kind];
+                  const Icon = s.icon;
+                  return (
+                    <div key={i} style={{ display: "flex", gap: 10, padding: "12px 14px", background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8 }}>
+                      <Icon size={15} color={s.color} style={{ flexShrink: 0, marginTop: 1 }} />
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: 600, color: s.color, marginBottom: 3 }}>{ins.title}</div>
+                        <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{ins.text}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ============================================================
 // SANKEY-LIKE FLOW (custom SVG — Revenus → Groupes de dépenses)
 // ============================================================
@@ -1784,7 +1855,7 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
         ) : <EmptyState />}
       </PanelWithHelp>
 
-      <InsightsPanel filtered={filtered} />
+      <ExpertAnalysisButton filtered={filtered} />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
         {cards.map((c) => (
@@ -2279,7 +2350,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         </div>
       </Panel>
 
-      <InsightsPanel
+      <ExpertAnalysisButton
         filtered={periodAllTypesTx}
         catFocus={{ typeView, periodLabel, catList, prevByCat, total, prevTotal, delta, deltaPct }}
         title="Analyse d'expert financier"
