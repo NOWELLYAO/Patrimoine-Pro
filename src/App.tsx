@@ -1971,14 +1971,27 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   const idxLast = allMonths.indexOf(lastMonth);
   const prevMonth = idxLast > 0 ? allMonths[idxLast - 1] : lastMonth;
 
+  const [granularity, setGranularity] = useState<"mois" | "jour">("mois");
+
   const [aFrom, setAFrom] = useState(prevMonth);
   const [aTo, setATo] = useState(prevMonth);
   const [bFrom, setBFrom] = useState(lastMonth);
   const [bTo, setBTo] = useState(lastMonth);
 
+  const allDates = useMemo(() => Array.from(new Set(transactions.map((t) => t.date))).sort(), [transactions]);
+  const lastDate = allDates[allDates.length - 1] || todayISO();
+  const idxLastDate = allDates.indexOf(lastDate);
+  const prevDate = idxLastDate > 0 ? allDates[idxLastDate - 1] : lastDate;
+
+  const [aFromDay, setAFromDay] = useState(prevDate);
+  const [aToDay, setAToDay] = useState(prevDate);
+  const [bFromDay, setBFromDay] = useState(lastDate);
+  const [bToDay, setBToDay] = useState(lastDate);
+
   const statsFor = (from: string, to: string) => {
-    const fk = monthSortKey(from), tk = monthSortKey(to);
-    const tx = withGroup.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
+    const tx = granularity === "jour"
+      ? withGroup.filter((t) => t.date >= from && t.date <= to)
+      : withGroup.filter((t) => { const fk = monthSortKey(from), tk = monthSortKey(to); const k = monthSortKey(t.month); return k >= fk && k <= tk; });
     const revenus = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
     const depenses = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
     const nonProd = tx.filter((t) => t.type === "Dépense" && t.group === "Non-productif").reduce((a, t) => a + t.amount, 0);
@@ -1989,8 +2002,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length };
   };
 
-  const A = useMemo(() => statsFor(aFrom, aTo), [withGroup, aFrom, aTo]);
-  const B = useMemo(() => statsFor(bFrom, bTo), [withGroup, bFrom, bTo]);
+  const A = useMemo(() => statsFor(granularity === "jour" ? aFromDay : aFrom, granularity === "jour" ? aToDay : aTo), [withGroup, aFrom, aTo, aFromDay, aToDay, granularity]);
+  const B = useMemo(() => statsFor(granularity === "jour" ? bFromDay : bFrom, granularity === "jour" ? bToDay : bTo), [withGroup, bFrom, bTo, bFromDay, bToDay, granularity]);
 
   const pctDelta = (a: number, b: number) => (a !== 0 ? ((b - a) / Math.abs(a)) * 100 : (b !== 0 ? 100 : 0));
 
@@ -2024,34 +2037,76 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     );
   };
 
+  const labelA = granularity === "jour"
+    ? `${dateLabelShort(aFromDay)}${aFromDay !== aToDay ? " — " + dateLabelShort(aToDay) : ""}`
+    : `${monthLabel(aFrom)}${aFrom !== aTo ? " — " + monthLabel(aTo) : ""}`;
+  const labelB = granularity === "jour"
+    ? `${dateLabelShort(bFromDay)}${bFromDay !== bToDay ? " — " + dateLabelShort(bToDay) : ""}`
+    : `${monthLabel(bFrom)}${bFrom !== bTo ? " — " + monthLabel(bTo) : ""}`;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Choisir les deux périodes à comparer">
+        <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}`, marginBottom: 20, width: "fit-content" }}>
+          {(["mois", "jour"] as const).map((g) => (
+            <button key={g} onClick={() => setGranularity(g)} style={{
+              padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+              background: granularity === g ? COLOR.gold : "transparent",
+              color: granularity === g ? COLOR.bg : COLOR.inkMuted,
+            }}>{g === "mois" ? "Par mois" : "Par jour"}</button>
+          ))}
+        </div>
         <div style={{ display: "flex", gap: 30, flexWrap: "wrap" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: COLOR.slateBlue }} />
               <span style={{ fontSize: 12.5, color: COLOR.slateBlueSoft, fontWeight: 600 }}>Période A</span>
             </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <Select label="Du mois" value={aFrom} onChange={setAFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-              <Select label="Au mois" value={aTo} onChange={setATo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-            </div>
+            {granularity === "mois" ? (
+              <div style={{ display: "flex", gap: 10 }}>
+                <Select label="Du mois" value={aFrom} onChange={setAFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Au mois" value={aTo} onChange={setATo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Du jour</label>
+                  <input type="date" style={inputStyle} value={aFromDay} onChange={(e) => setAFromDay(e.target.value)} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Au jour</label>
+                  <input type="date" style={inputStyle} value={aToDay} onChange={(e) => setAToDay(e.target.value)} />
+                </div>
+              </div>
+            )}
           </div>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: COLOR.gold }} />
               <span style={{ fontSize: 12.5, color: COLOR.goldSoft, fontWeight: 600 }}>Période B</span>
             </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <Select label="Du mois" value={bFrom} onChange={setBFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-              <Select label="Au mois" value={bTo} onChange={setBTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-            </div>
+            {granularity === "mois" ? (
+              <div style={{ display: "flex", gap: 10 }}>
+                <Select label="Du mois" value={bFrom} onChange={setBFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Au mois" value={bTo} onChange={setBTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Du jour</label>
+                  <input type="date" style={inputStyle} value={bFromDay} onChange={(e) => setBFromDay(e.target.value)} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Au jour</label>
+                  <input type="date" style={inputStyle} value={bToDay} onChange={(e) => setBToDay(e.target.value)} />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </Panel>
 
-      <Panel title="Comparaison des indicateurs clés" subtitle={`A : ${monthLabel(aFrom)} — ${monthLabel(aTo)} (${A.count} tx)  ·  B : ${monthLabel(bFrom)} — ${monthLabel(bTo)} (${B.count} tx)`}>
+      <Panel title="Comparaison des indicateurs clés" subtitle={`A : ${labelA} (${A.count} tx)  ·  B : ${labelB} (${B.count} tx)`}>
         <div style={{ display: "flex", padding: "4px 0", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
           <div style={{ width: 150 }}></div>
           <div style={{ flex: 1, textAlign: "right" }}>A</div>
@@ -2074,8 +2129,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
             <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ fontSize: 12, color: COLOR.inkMuted }} />
-            <Bar dataKey="A" name={`A (${monthLabel(aFrom)}${aFrom !== aTo ? "…" + monthLabel(aTo) : ""})`} fill={COLOR.slateBlue} radius={[3, 3, 0, 0]} />
-            <Bar dataKey="B" name={`B (${monthLabel(bFrom)}${bFrom !== bTo ? "…" + monthLabel(bTo) : ""})`} fill={COLOR.gold} radius={[3, 3, 0, 0]} />
+            <Bar dataKey="A" name={`A (${labelA})`} fill={COLOR.slateBlue} radius={[3, 3, 0, 0]} />
+            <Bar dataKey="B" name={`B (${labelB})`} fill={COLOR.gold} radius={[3, 3, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </PanelWithHelp>
