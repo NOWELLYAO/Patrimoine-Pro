@@ -10,7 +10,7 @@ import {
   ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight,
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu, ChevronDown,
-  Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail, Rocket,
+  Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail, Rocket, Compass,
   FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon, Activity,
 } from "lucide-react";
 
@@ -1213,8 +1213,208 @@ function ExpertAnalysisButton({ filtered, catFocus, title, subtitle }: { filtere
 }
 
 // ============================================================
-// SANKEY-LIKE FLOW (custom SVG — Revenus → Groupes de dépenses)
+// CONSEILLER QUOTIDIEN — analyse le comportement réel (jours passés, même
+// période le mois dernier) pour donner un seuil de dépense concret pour
+// aujourd'hui, au regard d'un objectif mensuel défini par l'utilisateur.
 // ============================================================
+function prevMonthKey(mk: string): string {
+  const [y, m] = mk.split("_").map(Number);
+  return m === 1 ? `${y - 1}_12` : `${y}_${m - 1}`;
+}
+function daysInMonthOf(mk: string): number {
+  const [y, m] = mk.split("_").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+function generateDailyAdvice(transactions: Transaction[], monthlyObjective: number) {
+  const today = todayISO();
+  const curMonth = dateToMonthKey(today);
+  const dayNum = new Date(today + "T00:00:00").getDate();
+  const daysInMonth = daysInMonthOf(curMonth);
+  const daysElapsed = dayNum;
+  const daysRemaining = daysInMonth - dayNum + 1;
+
+  const txThisMonthSoFar = transactions.filter((t) => dateToMonthKey(t.date) === curMonth && t.date <= today);
+  const spent = txThisMonthSoFar.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+  const revenu = txThisMonthSoFar.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+
+  const avgDailySpend = daysElapsed > 0 ? spent / daysElapsed : 0;
+  const projectedEndOfMonth = avgDailySpend * daysInMonth;
+
+  const yDate = new Date(today + "T00:00:00"); yDate.setDate(yDate.getDate() - 1);
+  const yesterday = `${yDate.getFullYear()}-${pad2(yDate.getMonth() + 1)}-${pad2(yDate.getDate())}`;
+  const spentYesterday = transactions.filter((t) => t.date === yesterday && t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+
+  const pMonth = prevMonthKey(curMonth);
+  const spentSamePeriodLastMonth = transactions.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === pMonth && new Date(t.date + "T00:00:00").getDate() <= dayNum).reduce((a, t) => a + t.amount, 0);
+
+  const hasObjective = monthlyObjective > 0;
+  const remainingBudget = hasObjective ? monthlyObjective - spent : null;
+  const dailyThreshold = hasObjective && daysRemaining > 0 ? Math.max(0, (monthlyObjective - spent) / daysRemaining) : null;
+  const onTrack = hasObjective ? projectedEndOfMonth <= monthlyObjective : null;
+
+  const insights: Insight[] = [];
+
+  // Le conseil principal : le seuil concret pour aujourd'hui.
+  let headline: Insight;
+  if (hasObjective) {
+    if ((remainingBudget as number) <= 0) {
+      headline = { kind: "alerte", title: "Objectif du mois déjà dépassé", text: `Tu as dépensé ${fmt(spent)} FCFA depuis le début du mois, au-delà de ton objectif de ${fmt(monthlyObjective)} FCFA. Il reste ${daysRemaining} jour(s) — vise le zéro dépense non essentielle jusqu'à la fin du mois.` };
+    } else {
+      headline = {
+        kind: onTrack ? "positif" : "conseil",
+        title: `Seuil du jour : ${fmt(dailyThreshold as number)} FCFA`,
+        text: `Il te reste ${fmt(remainingBudget as number)} FCFA sur ton objectif de ${fmt(monthlyObjective)} FCFA pour les ${daysRemaining} jour(s) restants — soit environ ${fmt(dailyThreshold as number)} FCFA/jour maximum si tu veux rester dans les clous jusqu'à la fin du mois.`,
+      };
+    }
+  } else {
+    headline = { kind: "conseil", title: "Définis un objectif mensuel pour des conseils plus précis", text: `Sans objectif, je peux seulement observer ta tendance : à ${fmt(avgDailySpend)} FCFA/jour en moyenne depuis le début du mois, tu termines vers ${fmt(projectedEndOfMonth)} FCFA de dépenses ce mois-ci si le rythme se maintient.` };
+  }
+  insights.push(headline);
+
+  // Comparaison avec la même période le mois dernier.
+  if (spentSamePeriodLastMonth > 0) {
+    const diffPct = ((spent - spentSamePeriodLastMonth) / spentSamePeriodLastMonth) * 100;
+    if (Math.abs(diffPct) >= 10) {
+      insights.push({
+        kind: diffPct <= 0 ? "positif" : "alerte",
+        title: `${diffPct <= 0 ? "Mieux" : "Moins bien"} que le mois dernier à la même date`,
+        text: `Sur les ${daysElapsed} premiers jours, tu as dépensé ${fmt(spent)} FCFA — contre ${fmt(spentSamePeriodLastMonth)} FCFA sur la même période le mois dernier (${diffPct >= 0 ? "+" : ""}${diffPct.toFixed(0)}%).`,
+      });
+    }
+  }
+
+  // Comparaison avec hier.
+  if (spentYesterday > 0 && avgDailySpend > 0) {
+    const vsAvgPct = ((spentYesterday - avgDailySpend) / avgDailySpend) * 100;
+    if (vsAvgPct >= 30) {
+      insights.push({ kind: "alerte", title: "Hier, dépense au-dessus de ta moyenne", text: `${fmt(spentYesterday)} FCFA dépensés hier, contre ${fmt(avgDailySpend)} FCFA/jour en moyenne ce mois-ci (+${vsAvgPct.toFixed(0)}%). Un jour plus calme aujourd'hui aiderait à rééquilibrer.` });
+    }
+  }
+
+  // Projection de fin de mois vs objectif.
+  if (hasObjective && daysElapsed >= 3) {
+    const projDiff = projectedEndOfMonth - monthlyObjective;
+    if (projDiff > 0) {
+      insights.push({ kind: "alerte", title: "Au rythme actuel, l'objectif sera dépassé", text: `En prolongeant ta moyenne quotidienne (${fmt(avgDailySpend)} FCFA/jour), tu finirais le mois à environ ${fmt(projectedEndOfMonth)} FCFA — soit ${fmt(projDiff)} FCFA au-dessus de ton objectif.` });
+    } else if (daysElapsed >= 5) {
+      insights.push({ kind: "positif", title: "Au rythme actuel, l'objectif est tenable", text: `En continuant sur ta lancée (${fmt(avgDailySpend)} FCFA/jour), tu terminerais le mois autour de ${fmt(projectedEndOfMonth)} FCFA — sous ton objectif de ${fmt(monthlyObjective)} FCFA. Continue ainsi.` });
+    }
+  }
+
+  // Épargne du mois en cours.
+  if (revenu > 0) {
+    const soldeMois = revenu - spent;
+    const tauxEpargne = (soldeMois / revenu) * 100;
+    if (tauxEpargne < 10 && daysElapsed >= 10) {
+      insights.push({ kind: "conseil", title: "Taux d'épargne encore faible ce mois-ci", text: `${tauxEpargne.toFixed(0)}% des revenus encaissés ce mois-ci sont conservés pour l'instant. Réduire les dépenses non essentielles dans les jours qui restent ferait grimper ce chiffre et ta valeur nette en fin de mois.` });
+    }
+  }
+
+  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, remainingBudget, hasObjective };
+}
+
+function DailyAdvisorButton({ transactions, monthlyObjective, setMonthlyObjective }: {
+  transactions: Transaction[]; monthlyObjective: number; setMonthlyObjective: (n: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [editingObjective, setEditingObjective] = useState(false);
+  const [draftObjective, setDraftObjective] = useState(monthlyObjective);
+  const data = useMemo(() => generateDailyAdvice(transactions, monthlyObjective), [transactions, monthlyObjective]);
+  const styleFor: Record<InsightKind, { bg: string; border: string; color: string; icon: any }> = {
+    alerte: { bg: "rgba(193,84,63,0.08)", border: COLOR.clay, color: COLOR.claySoft, icon: AlertTriangle },
+    conseil: { bg: "rgba(201,162,39,0.08)", border: COLOR.gold, color: COLOR.goldSoft, icon: Info },
+    positif: { bg: "rgba(63,156,122,0.08)", border: COLOR.emerald, color: COLOR.emeraldSoft, icon: Check },
+  };
+  const progressPct = data.hasObjective ? Math.min(100, (data.spent / monthlyObjective) * 100) : 0;
+
+  return (
+    <>
+      <button onClick={() => setOpen(true)} style={{
+        display: "flex", alignItems: "center", gap: 14, width: "100%", textAlign: "left", cursor: "pointer",
+        background: `linear-gradient(135deg, rgba(201,162,39,0.14) 0%, ${COLOR.surfaceRaised} 60%)`, border: `1px solid ${COLOR.gold}`,
+        borderRadius: 14, padding: "16px 18px", marginBottom: 20,
+      }}>
+        <div style={{ width: 40, height: 40, borderRadius: 10, background: "rgba(201,162,39,0.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Compass size={19} color={COLOR.goldSoft} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 600, color: COLOR.ink, fontFamily: "'Fraunces', serif" }}>Conseiller quotidien</div>
+          <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>
+            {data.hasObjective ? `Seuil du jour : ${fmt(data.dailyThreshold ?? 0)} FCFA` : "Définis un objectif mensuel pour un conseil personnalisé"}
+          </div>
+        </div>
+        <ChevronRight size={16} color={COLOR.inkMuted} style={{ flexShrink: 0 }} />
+      </button>
+
+      {open && (
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 460, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: "100%", maxWidth: 560, maxHeight: "88vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+            display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 20px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <div>
+                <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, color: COLOR.ink, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Compass size={17} color={COLOR.goldSoft} /> Conseiller quotidien
+                </div>
+                <div style={{ fontSize: 12, color: COLOR.inkMuted, marginTop: 4 }}>{dateLabelFull(todayISO())} · jour {data.daysElapsed} sur {data.daysInMonth}</div>
+              </div>
+              <button onClick={() => setOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+            </div>
+
+            <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: 18, WebkitOverflowScrolling: "touch" }}>
+
+              <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Objectif de dépenses ce mois</span>
+                  <button onClick={() => { setDraftObjective(monthlyObjective); setEditingObjective((v) => !v); }} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>
+                    <Pencil size={11} /> {editingObjective ? "Fermer" : "Modifier"}
+                  </button>
+                </div>
+                {editingObjective ? (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input type="number" inputMode="numeric" style={{ ...inputStyle, flex: 1 }} value={draftObjective} onChange={(e) => setDraftObjective(Number(e.target.value) || 0)} />
+                    <button onClick={() => { setMonthlyObjective(draftObjective); setEditingObjective(false); }} style={{ background: COLOR.gold, border: "none", borderRadius: 6, color: COLOR.bg, padding: "0 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Valider</button>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 700, color: COLOR.ink }}>
+                      {data.hasObjective ? `${fmt(data.spent)} / ${fmt(monthlyObjective)} FCFA` : "Aucun objectif défini"}
+                    </div>
+                    {data.hasObjective && (
+                      <div style={{ height: 7, background: COLOR.hairline, borderRadius: 4, overflow: "hidden", marginTop: 8 }}>
+                        <div style={{ height: "100%", width: `${progressPct}%`, background: progressPct > 100 ? COLOR.clay : COLOR.gold }} />
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {data.insights.map((ins, i) => {
+                  const s = styleFor[ins.kind];
+                  const Icon = s.icon;
+                  return (
+                    <div key={i} style={{ display: "flex", gap: 10, padding: "12px 14px", background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8 }}>
+                      <Icon size={15} color={s.color} style={{ flexShrink: 0, marginTop: 1 }} />
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: 600, color: s.color, marginBottom: 3 }}>{ins.title}</div>
+                        <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{ins.text}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+
 function FlowDiagram({ filtered }: { filtered: any[] }) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const depByGroup: Record<string, number> = {};
@@ -4532,8 +4732,9 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
 // ============================================================
 // SAISIE QUOTIDIENNE (entrée rapide, jour par jour)
 // ============================================================
-function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts }: {
+function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
+  monthlyObjective: number; setMonthlyObjective: (n: number) => void;
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
   const [quickTime, setQuickTime] = useState(nowTime());
@@ -4600,6 +4801,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} />
@@ -5034,6 +5236,7 @@ export default function GrandLivre() {
   const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities);
   const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity);
   const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {});
+  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0);
   const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules);
   const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans);
   const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000);
@@ -5167,6 +5370,7 @@ export default function GrandLivre() {
       if (remote.activities) setActivities(remote.activities);
       if (remote.categoryActivity) setCategoryActivity(remote.categoryActivity);
       if (remote.activityCapital) setActivityCapital(remote.activityCapital);
+      if (typeof remote.monthlyObjective === "number") setMonthlyObjective(remote.monthlyObjective);
       setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }
     setSyncStatus("synced");
@@ -5209,14 +5413,14 @@ export default function GrandLivre() {
       setSyncStatus("syncing");
       const ok = await pushRemoteState(syncCode, {
         transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-        activities, categoryActivity, activityCapital,
+        activities, categoryActivity, activityCapital, monthlyObjective,
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }, 1500);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, syncCode, allLoaded]);
 
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
@@ -5333,7 +5537,7 @@ export default function GrandLivre() {
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
@@ -5359,7 +5563,7 @@ export default function GrandLivre() {
             <SauvegardeTab
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                activities, categoryActivity, activityCapital,
+                activities, categoryActivity, activityCapital, monthlyObjective,
               })}
               restore={(data: any) => {
                 if (data.transactions) setTransactions(data.transactions);
@@ -5375,6 +5579,7 @@ export default function GrandLivre() {
                 if (data.activities) setActivities(data.activities);
                 if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
                 if (data.activityCapital) setActivityCapital(data.activityCapital);
+                if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
               }}
               syncCode={syncCode}
               setSyncCode={setSyncCode}
