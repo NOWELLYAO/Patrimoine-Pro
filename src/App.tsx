@@ -1226,6 +1226,95 @@ function daysInMonthOf(mk: string): number {
   return new Date(y, m, 0).getDate();
 }
 
+// ============================================================
+// CHARGES FIXES vs VARIABLES — classification par régularité (mois présents
+// sur 6) et coefficient de variation (CV = écart-type / moyenne). Un poste
+// est "Fixe" si régulier et peu variable, "Variable régulière" s'il revient
+// souvent mais avec un montant fluctuant, "Occasionnel" sinon. Certaines
+// catégories (ex: Enfants & Maman) sont éclatées par sous-catégorie, et
+// l'utilisateur peut surcharger le mode/montant pour chaque poste.
+// ============================================================
+type ChargeMode = "fixe" | "variable" | "occasionnelle" | "exclu";
+interface ChargeOverride { mode: ChargeMode | "auto"; amount?: number; }
+// Catégories éclatées par sous-catégorie plutôt qu'agrégées — nécessaire pour
+// distinguer par exemple GRUNDFOS·Carburant (fixe) de GRUNDFOS·Électricité (variable).
+const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true };
+// Les deux catégories que l'utilisateur veut pouvoir inclure/exclure en un clic
+// (mélange dépenses professionnelles GRUNDFOS et frais de véhicule).
+const GRUNDFOS_VOITURE_CATEGORIES = ["GRUNDFOS", "Voiture"];
+
+const defaultChargeOverrides: Record<string, ChargeOverride> = {
+  "Logement": { mode: "fixe", amount: 650000 },
+  "Enfants & Maman::Maman": { mode: "fixe", amount: 70700 },
+  "Enfants & Maman::Nesher": { mode: "variable" },
+  "Enfants & Maman::Hemra": { mode: "variable" },
+  "Utilitaires": { mode: "exclu" },
+  // --- GRUNDFOS, analysé sous-catégorie par sous-catégorie ---
+  "GRUNDFOS::Carburant": { mode: "fixe", amount: 154250 }, // CV 14%, 6/6 mois — vraiment régulier
+  "GRUNDFOS::Internet": { mode: "fixe", amount: 35000 }, // médiane réelle ; le chiffre de 25 000 (fibre) donné ne correspond pas exactement aux données — à ajuster si tu factures la fibre séparément
+  "GRUNDFOS::Électricité": { mode: "variable" }, // CV 72% — vraiment variable, pas une charge fixe malgré la régularité
+  "GRUNDFOS::Eau": { mode: "occasionnelle" }, // seulement 3/6 mois et montants faibles (<8 000) — ne ressemble pas à une vraie facture mensuelle dans ces données
+  // --- Voiture ---
+  "Voiture::Assurance": { mode: "fixe", amount: 23463 }, // 281 555 FCFA payés en une fois (prime annuelle) ÷ 12 — provision mensuelle équivalente
+  // --- Abonnements ---
+  "Abonnements::Money Coach": { mode: "fixe", amount: 5450 }, // stable à ~5 300-5 600 sur 5 des 6 mois, un seul mois manqué
+  "Abonnements::Claude": { mode: "variable" }, // abonnement récent (3/6 mois), montant encore instable — à reclasser en Fixe une fois stabilisé
+};
+
+function classifyCharges(transactions: Transaction[], overrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
+  const today = todayISO();
+  const curMonth = dateToMonthKey(today);
+  const lookback: string[] = [];
+  let mk = prevMonthKey(curMonth);
+  for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+
+  const byPosteMonth: Record<string, Record<string, number>> = {};
+  transactions.forEach((t) => {
+    if (t.type !== "Dépense") return;
+    if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
+    const tmk = dateToMonthKey(t.date);
+    if (!lookback.includes(tmk)) return;
+    const poste = EXPAND_SUBCATS_FOR_CHARGES[t.category] ? `${t.category}::${t.subcategory || "(non précisé)"}` : t.category;
+    byPosteMonth[poste] = byPosteMonth[poste] || {};
+    byPosteMonth[poste][tmk] = (byPosteMonth[poste][tmk] || 0) + t.amount;
+  });
+
+  const rows = Object.entries(byPosteMonth).map(([poste, months]) => {
+    const vals = lookback.map((m) => months[m] || 0);
+    const present = vals.filter((v) => v > 0).length;
+    const meanV = mean(vals);
+    const medianV = median(vals);
+    const sd = stdev(vals);
+    const cv = meanV > 0 ? (sd / meanV) * 100 : null;
+
+    const override = overrides[poste];
+    let mode: ChargeMode;
+    let amount: number;
+    if (override && override.mode !== "auto") {
+      mode = override.mode;
+      amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : medianV;
+    } else if (present >= 5 && cv !== null && cv < 20) {
+      mode = "fixe"; amount = medianV;
+    } else if (present >= 4) {
+      mode = "variable"; amount = medianV;
+    } else {
+      mode = "occasionnelle"; amount = medianV;
+    }
+    return { poste, present, mean: meanV, median: medianV, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
+  }).sort((a, b) => b.amount - a.amount);
+
+  const totalFixe = rows.filter((r) => r.mode === "fixe").reduce((a, r) => a + r.amount, 0);
+  const totalVariable = rows.filter((r) => r.mode === "variable").reduce((a, r) => a + r.amount, 0);
+  const totalOccasionnelle = rows.filter((r) => r.mode === "occasionnelle").reduce((a, r) => a + r.amount, 0);
+
+  const revByMonth: Record<string, number> = {};
+  transactions.forEach((t) => { if (t.type === "Revenu") { const tmk = dateToMonthKey(t.date); if (lookback.includes(tmk)) revByMonth[tmk] = (revByMonth[tmk] || 0) + t.amount; } });
+  const avgRevenu = mean(lookback.map((m) => revByMonth[m] || 0));
+  const resteAVivre = avgRevenu - totalFixe - totalVariable;
+
+  return { rows, totalFixe, totalVariable, totalOccasionnelle, avgRevenu, resteAVivre, lookback };
+}
+
 // Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
 // plupart des mois, souvent en fin de mois, et qui ne sont pas encore passées ce
 // mois-ci — pour que le conseiller les anticipe plutôt que de les ignorer.
@@ -1293,7 +1382,7 @@ function analyzeSubcategoryDrift(transactions: Transaction[], curMonth: string, 
   return results.sort((a, b) => Math.abs(b.diffPct) - Math.abs(a.diffPct)).slice(0, 3);
 }
 
-function generateDailyAdvice(transactions: Transaction[], monthlyObjective: number) {
+function generateDailyAdvice(transactions: Transaction[], monthlyObjective: number, chargeOverrides?: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean = true) {
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const dayNum = new Date(today + "T00:00:00").getDate();
@@ -1405,6 +1494,19 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     const tauxEpargne = (soldeMois / revenu) * 100;
     if (tauxEpargne < 10 && daysElapsed >= 10) {
       insights.push({ kind: "conseil", title: "Taux d'épargne encore faible ce mois-ci", text: `${tauxEpargne.toFixed(0)}% des revenus encaissés ce mois-ci sont conservés pour l'instant. Réduire les dépenses non essentielles dans les jours qui restent ferait grimper ce chiffre et ta valeur nette en fin de mois.` });
+    }
+  }
+
+  // Reste à vivre, en s'appuyant sur la classification charges fixes / variables régulières
+  // (page "Charges Fixes & Variables") plutôt que sur une simple moyenne de dépenses.
+  if (chargeOverrides) {
+    const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture);
+    if (charges.avgRevenu > 0) {
+      insights.push({
+        kind: charges.resteAVivre >= 0 ? "positif" : "alerte",
+        title: charges.resteAVivre >= 0 ? "Reste à vivre positif une fois les charges couvertes" : "Reste à vivre négatif une fois les charges couvertes",
+        text: `Sur un revenu moyen de ${fmt(charges.avgRevenu)} FCFA/mois, une fois les charges fixes (${fmt(charges.totalFixe)} FCFA) et les variables régulières estimées (${fmt(charges.totalVariable)} FCFA) déduites, il reste environ ${fmt(charges.resteAVivre)} FCFA/mois de marge réellement discrétionnaire. ${charges.resteAVivre < 0 ? "Les charges dépassent le revenu moyen — à regarder de près sur la page Charges Fixes & Variables." : "C'est cette marge, pas le revenu brut, qui détermine ce que tu peux vraiment te permettre au jour le jour."}`,
+      });
     }
   }
 
@@ -1566,13 +1668,13 @@ function DayScoreBadge({ transactions, monthlyObjective, compact, scope = "jour"
   );
 }
 
-function DailyAdvisorButton({ transactions, monthlyObjective, setMonthlyObjective }: {
-  transactions: Transaction[]; monthlyObjective: number; setMonthlyObjective: (n: number) => void;
+function DailyAdvisorButton({ transactions, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture }: {
+  transactions: Transaction[]; monthlyObjective: number; setMonthlyObjective: (n: number) => void; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [editingObjective, setEditingObjective] = useState(false);
   const [draftObjective, setDraftObjective] = useState(monthlyObjective);
-  const data = useMemo(() => generateDailyAdvice(transactions, monthlyObjective), [transactions, monthlyObjective]);
+  const data = useMemo(() => generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture), [transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture]);
   const styleFor: Record<InsightKind, { bg: string; border: string; color: string; icon: any }> = {
     alerte: { bg: "rgba(193,84,63,0.08)", border: COLOR.clay, color: COLOR.claySoft, icon: AlertTriangle },
     conseil: { bg: "rgba(201,162,39,0.08)", border: COLOR.gold, color: COLOR.goldSoft, icon: Info },
@@ -4100,6 +4202,168 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 }
 
 
+// ============================================================
+// CHARGES FIXES vs VARIABLES — pilote classifyCharges, laisse l'utilisateur
+// ajuster chaque poste, exporte un rapport, et donne un "reste à vivre" estimé.
+// ============================================================
+function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture }: {
+  transactions: Transaction[]; chargeOverrides: Record<string, ChargeOverride>; setChargeOverrides: (o: Record<string, ChargeOverride>) => void;
+  includeGrundfosVoiture: boolean; setIncludeGrundfosVoiture: (b: boolean) => void;
+}) {
+  const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
+  const result = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+
+  const modeLabel: Record<ChargeMode, string> = { fixe: "Fixe", variable: "Variable régulière", occasionnelle: "Occasionnelle", exclu: "Exclu" };
+  const modeColor: Record<ChargeMode, string> = { fixe: COLOR.emeraldSoft, variable: COLOR.goldSoft, occasionnelle: COLOR.inkMuted, exclu: COLOR.claySoft };
+
+  const setOverride = (poste: string, patch: Partial<ChargeOverride>) => {
+    const current = chargeOverrides[poste] || { mode: "auto" as const };
+    setChargeOverrides({ ...chargeOverrides, [poste]: { ...current, ...patch } });
+  };
+
+  const exportChargesExcel = async () => {
+    setXlsState("loading");
+    try {
+      const ExcelJS: any = await import(/* @vite-ignore */ "exceljs");
+      const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", MUTED = "FF8A9A8E", WHITE = "FFFFFFFF";
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Grand Livre"; wb.created = new Date();
+      const styleHeaderRow = (row: any) => {
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; c.alignment = { vertical: "middle" }; });
+        row.height = 22;
+      };
+      const ws1 = wb.addWorksheet("Synthèse");
+      ws1.columns = [{ width: 30 }, { width: 22 }];
+      ws1.mergeCells("A1:B1");
+      const title = ws1.getCell("A1");
+      title.value = "Grand Livre — Charges fixes vs variables";
+      title.font = { bold: true, size: 15, color: { argb: WHITE } };
+      title.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+      title.alignment = { vertical: "middle", indent: 1 };
+      ws1.getRow(1).height = 30;
+      const addSum = (label: string, value: any, color?: string, isAmount?: boolean) => {
+        const r = ws1.addRow([label, value]);
+        r.getCell(1).font = { color: { argb: MUTED } };
+        r.getCell(2).font = { bold: true, size: 12, color: { argb: color || NAVY } };
+        if (isAmount) r.getCell(2).numFmt = "#,##0 \"FCFA\"";
+        r.getCell(2).alignment = { horizontal: "right" };
+      };
+      ws1.addRow([]);
+      addSum("Généré le", dateLabelFull(todayISO()));
+      addSum("Fenêtre d'analyse", `${monthLabel(result.lookback[result.lookback.length - 1])} — ${monthLabel(result.lookback[0])}`);
+      addSum("GRUNDFOS & Voiture", includeGrundfosVoiture ? "Inclus" : "Exclus");
+      ws1.addRow([]);
+      addSum("Revenu moyen mensuel", result.avgRevenu, undefined, true);
+      addSum("Total charges fixes / mois", result.totalFixe, EMERALD, true);
+      addSum("Total variables régulières / mois", result.totalVariable, GOLD, true);
+      addSum("Reste à vivre estimé / mois", result.resteAVivre, result.resteAVivre >= 0 ? EMERALD : CLAY, true);
+
+      const ws2 = wb.addWorksheet("Détail par poste");
+      ws2.columns = [
+        { header: "Poste", key: "poste", width: 30 }, { header: "Mode", key: "mode", width: 18 },
+        { header: "Montant retenu (FCFA)", key: "amount", width: 20 }, { header: "Moyenne 6 mois", key: "mean", width: 18 },
+        { header: "Médiane 6 mois", key: "median", width: 18 }, { header: "Mois présents /6", key: "present", width: 16 },
+        { header: "CV", key: "cv", width: 10 }, { header: "Ajusté manuellement", key: "overridden", width: 18 },
+      ];
+      styleHeaderRow(ws2.getRow(1));
+      result.rows.forEach((r) => {
+        const row = ws2.addRow({
+          poste: r.poste.replace("::", " · "), mode: modeLabel[r.mode], amount: r.amount, mean: Math.round(r.mean), median: Math.round(r.median),
+          present: `${r.present}/6`, cv: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—", overridden: r.overridden ? "Oui" : "",
+        });
+        row.getCell("mode").font = { bold: true, color: { argb: r.mode === "fixe" ? EMERALD : r.mode === "variable" ? GOLD : r.mode === "exclu" ? CLAY : MUTED } };
+        ["amount", "mean", "median"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
+        ["present", "cv", "overridden"].forEach((k) => { row.getCell(k).alignment = { horizontal: "center" }; });
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `grand-livre_charges-fixes-variables_${todayISO()}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      setXlsState("idle");
+    } catch {
+      setXlsState("error");
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px" }}>
+        <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
+          <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
+            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+            background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
+          }}>Exclure GRUNDFOS & Voiture</button>
+          <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
+            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+            background: includeGrundfosVoiture ? COLOR.gold : "transparent", color: includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
+          }}>Inclure GRUNDFOS & Voiture</button>
+        </div>
+        <span style={{ fontSize: 11.5, color: COLOR.inkMuted, flex: 1, minWidth: 200 }}>
+          {includeGrundfosVoiture
+            ? "Les charges GRUNDFOS (carburant, internet, électricité…) et Voiture sont comptées dans le budget personnel."
+            : "GRUNDFOS et Voiture sont exclues — utile si tu veux voir ton budget personnel pur, séparé de l'activité professionnelle."}
+        </span>
+      </div>
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Kpi label="Revenu moyen / mois (6M)" value={fmt(result.avgRevenu)} tone={COLOR.goldSoft} icon={TrendingUp} />
+        <Kpi label="Charges fixes / mois" value={fmt(result.totalFixe)} tone={COLOR.emeraldSoft} icon={CalendarRange} />
+        <Kpi label="Variables régulières / mois" value={fmt(result.totalVariable)} tone={COLOR.goldSoft} icon={Repeat} />
+        <Kpi label="Reste à vivre estimé / mois" value={fmt(result.resteAVivre)} tone={result.resteAVivre >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
+      </div>
+
+      <PanelWithHelp title="Classification des charges" subtitle="Basée sur la régularité (mois présents sur 6) et la variabilité du montant — ajustable poste par poste"
+        explain="Un poste est classé 'Fixe' automatiquement s'il apparaît sur au moins 5 des 6 derniers mois avec un montant peu variable (coefficient de variation < 20%). 'Variable régulière' s'il revient souvent mais avec un montant qui fluctue. 'Occasionnel' sinon. Tu peux forcer le mode et le montant de n'importe quel poste — utile par exemple pour un loyer qui vient de changer, ou une sous-catégorie que tu sais fixe malgré des données historiques bruitées."
+        right={
+          <button onClick={exportChargesExcel} disabled={xlsState === "loading"} style={{
+            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+          }}>
+            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+          </button>
+        }>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 0.8fr 0.6fr", gap: 8, padding: "6px 0", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: `1px solid ${COLOR.hairline}` }}>
+            <span>Poste</span><span>Mode</span><span style={{ textAlign: "right" }}>Montant retenu</span><span style={{ textAlign: "center" }}>Régularité</span><span style={{ textAlign: "center" }}>CV</span>
+          </div>
+          {result.rows.map((r) => {
+            const override = chargeOverrides[r.poste];
+            const isFixedOverride = override?.mode === "fixe";
+            return (
+              <div key={r.poste} style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 0.8fr 0.6fr", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                <span style={{ fontSize: 12.5, color: COLOR.ink }}>{r.poste.replace("::", " · ")}</span>
+                <select value={override?.mode || "auto"} onChange={(e) => setOverride(r.poste, { mode: e.target.value as ChargeMode | "auto" })}
+                  style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: modeColor[r.mode], padding: "4px 6px", fontSize: 11 }}>
+                  <option value="auto">Auto ({modeLabel[r.mode]})</option>
+                  <option value="fixe">Fixe</option>
+                  <option value="variable">Variable régulière</option>
+                  <option value="occasionnelle">Occasionnelle</option>
+                  <option value="exclu">Exclu</option>
+                </select>
+                {isFixedOverride ? (
+                  <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right" }} value={override?.amount ?? Math.round(r.median)}
+                    onChange={(e) => setOverride(r.poste, { amount: Number(e.target.value) })} />
+                ) : (
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, textAlign: "right", color: r.mode === "exclu" ? COLOR.inkMuted : COLOR.ink }}>
+                    {r.mode === "exclu" ? "—" : `${fmt(r.amount)} FCFA`}
+                  </span>
+                )}
+                <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.present}/6</span>
+                <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.cv !== null ? `${r.cv.toFixed(0)}%` : "—"}</span>
+              </div>
+            );
+          })}
+        </div>
+      </PanelWithHelp>
+    </div>
+  );
+}
+
 function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Loan, "id">>({ person: "", amount: 0, dateGiven: "2026_8", status: "En attente", notes: "" });
@@ -5350,9 +5614,9 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
 // ============================================================
 // SAISIE QUOTIDIENNE (entrée rapide, jour par jour)
 // ============================================================
-function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective }: {
+function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
-  monthlyObjective: number; setMonthlyObjective: (n: number) => void;
+  monthlyObjective: number; setMonthlyObjective: (n: number) => void; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
   const [quickTime, setQuickTime] = useState(nowTime());
@@ -5423,7 +5687,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} scope="jour" />
         <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} scope="mois" />
       </div>
-      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} />
+      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} />
@@ -5814,7 +6078,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -5841,6 +6105,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "objectif", label: "Objectifs & Projection", icon: Gauge },
     { id: "business", label: "Business / Personnel", icon: Briefcase },
     { id: "activites", label: "Activités & Rentabilité", icon: Rocket },
+    { id: "charges", label: "Charges Fixes & Variables", icon: CalendarRange },
     { id: "creances", label: "Créances", icon: HandCoins },
     { id: "comptes", label: "Comptes", icon: Wallet },
     { id: "payees", label: "Bénéficiaires", icon: Users },
@@ -5861,6 +6126,8 @@ export default function GrandLivre() {
   const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity);
   const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {});
   const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0);
+  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides);
+  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true);
   const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules);
   const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans);
   const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000);
@@ -5995,6 +6262,8 @@ export default function GrandLivre() {
       if (remote.categoryActivity) setCategoryActivity(remote.categoryActivity);
       if (remote.activityCapital) setActivityCapital(remote.activityCapital);
       if (typeof remote.monthlyObjective === "number") setMonthlyObjective(remote.monthlyObjective);
+      if (remote.chargeOverrides) setChargeOverrides(remote.chargeOverrides);
+      if (typeof remote.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(remote.includeGrundfosVoiture);
       setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }
     setSyncStatus("synced");
@@ -6037,14 +6306,14 @@ export default function GrandLivre() {
       setSyncStatus("syncing");
       const ok = await pushRemoteState(syncCode, {
         transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-        activities, categoryActivity, activityCapital, monthlyObjective,
+        activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }, 1500);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, syncCode, allLoaded]);
 
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
@@ -6161,7 +6430,7 @@ export default function GrandLivre() {
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
@@ -6177,6 +6446,7 @@ export default function GrandLivre() {
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
+          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoiture} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
@@ -6187,7 +6457,7 @@ export default function GrandLivre() {
             <SauvegardeTab
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                activities, categoryActivity, activityCapital, monthlyObjective,
+                activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
               })}
               restore={(data: any) => {
                 if (data.transactions) setTransactions(data.transactions);
@@ -6204,6 +6474,8 @@ export default function GrandLivre() {
                 if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
                 if (data.activityCapital) setActivityCapital(data.activityCapital);
                 if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
+                if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
+                if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
               }}
               syncCode={syncCode}
               setSyncCode={setSyncCode}
