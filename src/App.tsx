@@ -1226,6 +1226,73 @@ function daysInMonthOf(mk: string): number {
   return new Date(y, m, 0).getDate();
 }
 
+// Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
+// plupart des mois, souvent en fin de mois, et qui ne sont pas encore passées ce
+// mois-ci — pour que le conseiller les anticipe plutôt que de les ignorer.
+function detectRecurringExpenses(transactions: Transaction[], curMonth: string, dayNum: number) {
+  const lookback: string[] = [];
+  let mk = prevMonthKey(curMonth);
+  for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+
+  const byCatMonth: Record<string, Record<string, { amount: number; day: number }>> = {};
+  transactions.forEach((t) => {
+    if (t.type !== "Dépense") return;
+    const tmk = dateToMonthKey(t.date);
+    if (!lookback.includes(tmk)) return;
+    const day = new Date(t.date + "T00:00:00").getDate();
+    byCatMonth[t.category] = byCatMonth[t.category] || {};
+    if (!byCatMonth[t.category][tmk]) byCatMonth[t.category][tmk] = { amount: 0, day };
+    byCatMonth[t.category][tmk].amount += t.amount;
+    byCatMonth[t.category][tmk].day = Math.min(byCatMonth[t.category][tmk].day, day);
+  });
+
+  const results: { category: string; monthsPresent: number; typicalDay: number; typicalAmount: number }[] = [];
+  Object.entries(byCatMonth).forEach(([cat, monthsData]) => {
+    const presentMonths = Object.keys(monthsData);
+    if (presentMonths.length < 4) return; // pas assez régulier pour être qualifié de "périodique"
+    const amounts = presentMonths.map((m) => monthsData[m].amount);
+    const days = presentMonths.map((m) => monthsData[m].day);
+    const typicalDay = Math.round(median(days));
+    const typicalAmount = median(amounts);
+    const alreadyThisMonth = transactions.some((t) => t.type === "Dépense" && t.category === cat && dateToMonthKey(t.date) === curMonth);
+    if (!alreadyThisMonth && dayNum >= typicalDay - 4) {
+      results.push({ category: cat, monthsPresent: presentMonths.length, typicalDay, typicalAmount });
+    }
+  });
+  return results.sort((a, b) => b.typicalAmount - a.typicalAmount).slice(0, 4);
+}
+
+// Repère, sous-catégorie par sous-catégorie, où le comportement du mois en cours
+// dévie nettement de la moyenne des 3 derniers mois — pour nommer concrètement
+// ce qui dérape (ex: "Divertissement · Alcool") plutôt que de rester générique.
+function analyzeSubcategoryDrift(transactions: Transaction[], curMonth: string, dayNum: number, daysInMonth: number) {
+  const watched = ["Divertissement", "Cadeaux", "Shopping", "Invitation", "Vêtements", "Abonnements", "Voyage", "Personnel"];
+  const lookback: string[] = [];
+  let mk = prevMonthKey(curMonth);
+  for (let i = 0; i < 3; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+
+  const results: { category: string; subcategory: string; thisMonth: number; projected: number; avgPast: number; diffPct: number }[] = [];
+  watched.forEach((cat) => {
+    const thisMonthTx = transactions.filter((t) => t.type === "Dépense" && t.category === cat && dateToMonthKey(t.date) === curMonth);
+    const subs = Array.from(new Set(thisMonthTx.map((t) => t.subcategory || "(non précisé)")));
+    subs.forEach((sub) => {
+      const thisAmt = thisMonthTx.filter((t) => (t.subcategory || "(non précisé)") === sub).reduce((a, t) => a + t.amount, 0);
+      const pastAmts = lookback.map((m) =>
+        transactions.filter((t) => t.type === "Dépense" && t.category === cat && (t.subcategory || "(non précisé)") === sub && dateToMonthKey(t.date) === m).reduce((a, t) => a + t.amount, 0)
+      ).filter((a) => a > 0);
+      if (!pastAmts.length) return; // pas d'historique comparable
+      const avgPast = mean(pastAmts);
+      const projected = dayNum > 0 ? (thisAmt / dayNum) * daysInMonth : thisAmt;
+      if (avgPast <= 0) return;
+      const diffPct = ((projected - avgPast) / avgPast) * 100;
+      if (Math.abs(diffPct) >= 40 && Math.abs(projected - avgPast) >= 3000) {
+        results.push({ category: cat, subcategory: sub, thisMonth: thisAmt, projected, avgPast, diffPct });
+      }
+    });
+  });
+  return results.sort((a, b) => Math.abs(b.diffPct) - Math.abs(a.diffPct)).slice(0, 3);
+}
+
 function generateDailyAdvice(transactions: Transaction[], monthlyObjective: number) {
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
@@ -1248,29 +1315,59 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
   const pMonth = prevMonthKey(curMonth);
   const spentSamePeriodLastMonth = transactions.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === pMonth && new Date(t.date + "T00:00:00").getDate() <= dayNum).reduce((a, t) => a + t.amount, 0);
 
+  // Dépenses périodiques probablement encore à venir (loyer, retraite, PEL...) — anticipées
+  // avant de calculer un vrai budget quotidien, sans quoi le seuil serait trompeur.
+  const upcoming = detectRecurringExpenses(transactions, curMonth, dayNum);
+  const upcomingTotal = upcoming.reduce((a, u) => a + u.typicalAmount, 0);
+
   const hasObjective = monthlyObjective > 0;
   const remainingBudget = hasObjective ? monthlyObjective - spent : null;
-  const dailyThreshold = hasObjective && daysRemaining > 0 ? Math.max(0, (monthlyObjective - spent) / daysRemaining) : null;
+  const remainingAfterUpcoming = hasObjective ? (remainingBudget as number) - upcomingTotal : null;
+  const dailyThreshold = hasObjective && daysRemaining > 0 ? Math.max(0, ((remainingAfterUpcoming ?? remainingBudget) as number) / daysRemaining) : null;
   const onTrack = hasObjective ? projectedEndOfMonth <= monthlyObjective : null;
 
   const insights: Insight[] = [];
 
-  // Le conseil principal : le seuil concret pour aujourd'hui.
+  // Le conseil principal : le seuil concret pour aujourd'hui, déjà net des charges périodiques attendues.
   let headline: Insight;
   if (hasObjective) {
     if ((remainingBudget as number) <= 0) {
       headline = { kind: "alerte", title: "Objectif du mois déjà dépassé", text: `Tu as dépensé ${fmt(spent)} FCFA depuis le début du mois, au-delà de ton objectif de ${fmt(monthlyObjective)} FCFA. Il reste ${daysRemaining} jour(s) — vise le zéro dépense non essentielle jusqu'à la fin du mois.` };
     } else {
       headline = {
-        kind: onTrack ? "positif" : "conseil",
-        title: `Seuil du jour : ${fmt(dailyThreshold as number)} FCFA`,
-        text: `Il te reste ${fmt(remainingBudget as number)} FCFA sur ton objectif de ${fmt(monthlyObjective)} FCFA pour les ${daysRemaining} jour(s) restants — soit environ ${fmt(dailyThreshold as number)} FCFA/jour maximum si tu veux rester dans les clous jusqu'à la fin du mois.`,
+        kind: onTrack && (remainingAfterUpcoming as number) > 0 ? "positif" : "conseil",
+        title: `Seuil du jour : ${fmt(Math.max(0, dailyThreshold as number))} FCFA`,
+        text: upcomingTotal > 0
+          ? `Il te reste ${fmt(remainingBudget as number)} FCFA sur ton objectif, mais ${fmt(upcomingTotal)} FCFA sont probablement encore à sortir ce mois-ci en charges périodiques (détail ci-dessous). Une fois cette réserve mise de côté, il reste environ ${fmt(Math.max(0, remainingAfterUpcoming as number))} FCFA de marge réelle sur ${daysRemaining} jour(s), soit ${fmt(Math.max(0, dailyThreshold as number))} FCFA/jour.`
+          : `Il te reste ${fmt(remainingBudget as number)} FCFA sur ton objectif de ${fmt(monthlyObjective)} FCFA pour les ${daysRemaining} jour(s) restants — soit environ ${fmt(dailyThreshold as number)} FCFA/jour maximum si tu veux rester dans les clous jusqu'à la fin du mois.`,
       };
     }
   } else {
     headline = { kind: "conseil", title: "Définis un objectif mensuel pour des conseils plus précis", text: `Sans objectif, je peux seulement observer ta tendance : à ${fmt(avgDailySpend)} FCFA/jour en moyenne depuis le début du mois, tu termines vers ${fmt(projectedEndOfMonth)} FCFA de dépenses ce mois-ci si le rythme se maintient.` };
   }
   insights.push(headline);
+
+  // Charges périodiques attendues, nommées une par une (loyer, retraite, PEL...).
+  if (upcoming.length) {
+    const detail = upcoming.map((u) => `${u.category} (~${fmt(u.typicalAmount)} FCFA, généralement autour du ${u.typicalDay})`).join(", ");
+    insights.push({
+      kind: "conseil",
+      title: `${upcoming.length} charge(s) périodique(s) probablement encore à venir`,
+      text: `Sur tes 6 derniers mois, ces postes reviennent presque systématiquement et n'ont rien enregistré ce mois-ci : ${detail}. Historiquement, ce type de dépense arrive plutôt en fin de mois — mieux vaut réserver ces ${fmt(upcomingTotal)} FCFA maintenant que les découvrir le 30.`,
+    });
+  }
+
+  // Analyse comportementale par sous-catégorie : ce qui dérape vraiment, nommément.
+  const drift = analyzeSubcategoryDrift(transactions, curMonth, dayNum, daysInMonth);
+  drift.forEach((d) => {
+    insights.push({
+      kind: d.diffPct > 0 ? "alerte" : "positif",
+      title: `"${d.category} · ${d.subcategory}" ${d.diffPct > 0 ? "en dérapage" : "nettement maîtrisé"} ce mois-ci`,
+      text: d.diffPct > 0
+        ? `${fmt(d.thisMonth)} FCFA déjà dépensés sur "${d.subcategory}" en ${daysElapsed} jour(s) — au rythme actuel, ça projette à ${fmt(d.projected)} FCFA sur le mois complet, contre ${fmt(d.avgPast)} FCFA en moyenne les 3 derniers mois (+${d.diffPct.toFixed(0)}%). C'est ce type de ligne, précisément, qui grignote ta capacité d'épargne en fin de mois.`
+        : `${fmt(d.thisMonth)} FCFA sur "${d.subcategory}" jusqu'ici, en rythme sur le mois ça donnerait ${fmt(d.projected)} FCFA — nettement sous ta moyenne de ${fmt(d.avgPast)} FCFA (${d.diffPct.toFixed(0)}%). Un vrai progrès sur cette ligne précise.`,
+    });
+  });
 
   // Comparaison avec la même période le mois dernier.
   if (spentSamePeriodLastMonth > 0) {
@@ -1311,7 +1408,7 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     }
   }
 
-  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, remainingBudget, hasObjective };
+  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, remainingBudget, hasObjective, upcomingTotal };
 }
 
 function DailyAdvisorButton({ transactions, monthlyObjective, setMonthlyObjective }: {
