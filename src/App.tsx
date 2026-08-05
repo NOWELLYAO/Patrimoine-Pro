@@ -1404,7 +1404,10 @@ function computeFinancialRatios(
 // occidentaux (banques US/CFPB) déjà présents dans le Diagnostic Financier.
 // ============================================================
 const CN_4321_CATEGORIES = {
-  investissement: ["Bourse", "INVEST SGO", "Épargne", "Achat Terrain Port", "ECO PUMP", "Création Entreprise"],
+  // Achat d'actifs (immobilier, véhicule générant des revenus, terrain, placements) +
+  // investissement en capital humain (formation, éducation) — tout ce qui construit un
+  // patrimoine ou une capacité future, par opposition à une dépense consommée.
+  investissement: ["Bourse", "INVEST SGO", "Épargne", "Achat Terrain Port", "ECO PUMP", "Création Entreprise", "PAYEMENT MAISON", "Achat MAZDA", "FORMATION", "Éducation"],
   protection: ["Âge D’or Retraite", "Plan Éducation", "Securicompte"],
 };
 const KAKEIBO_CATEGORIES = {
@@ -1429,10 +1432,17 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
   // --- Règle chinoise du 4-3-2-1 (家庭资产配置法则), enseignée dans les
   // certifications chinoises de planification financière (AFP) : 40% investissement,
   // 30% vie courante, 20% protection/assurance, 10% épargne de précaution liquide.
+  // Base commune : la dépense totale réelle sur la fenêtre (pas seulement la part
+  // classée "fixe/variable" par ailleurs, sans quoi les achats ponctuels comme un
+  // terrain, une maison ou une voiture — souvent "occasionnels" au sens de la
+  // classification charges fixes/variables — seraient perdus du calcul).
+  const totalDepensesMonthly = transactions
+    .filter((t) => t.type === "Dépense" && lookback.includes(dateToMonthKey(t.date)) && (includeGrundfosVoiture || !GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)))
+    .reduce((a, t) => a + t.amount, 0) / lookback.length;
   const investMonthly = sumFor(CN_4321_CATEGORIES.investissement);
-  const vieCouranteMonthly = charges.totalFixe + charges.totalVariable - investMonthly; // nécessités hors investissement
   const protectionMonthly = sumFor(CN_4321_CATEGORIES.protection);
-  const liquideMonthly = Math.max(0, avgRevenu - charges.totalFixe - charges.totalVariable); // reste à vivre non dépensé = épargne implicite
+  const vieCouranteMonthly = Math.max(0, totalDepensesMonthly - investMonthly - protectionMonthly);
+  const liquideMonthly = Math.max(0, avgRevenu - totalDepensesMonthly); // reste à vivre non dépensé = épargne implicite
 
   const pct = (v: number) => (avgRevenu > 0 ? (v / avgRevenu) * 100 : 0);
   const rule4321 = [
