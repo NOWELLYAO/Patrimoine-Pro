@@ -3381,10 +3381,119 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
   transactions: Transaction[]; categoryGroups: Record<string, Group>; categoryScope: Record<string, Scope>;
   setCategoryScope: (s: Record<string, Scope>) => void; allCategories: string[];
 }) {
+  const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
   const withScope = transactions.map((t) => ({ ...t, scope: categoryScope[t.category] || "Personnel" }));
   const bizRev = withScope.filter((t) => t.scope === "Business" && t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const bizDep = withScope.filter((t) => t.scope === "Business" && t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const bizMargin = bizRev - bizDep;
+
+  const exportBusinessExcel = async () => {
+    setXlsState("loading");
+    try {
+      const ExcelJS: any = await import(/* @vite-ignore */ "exceljs");
+      const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", SUBTLE = "FF232F27", WHITE = "FFFFFFFF", MUTED = "FF8A9A8E", VIOLET = "FF7A6FB0";
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Grand Livre"; wb.created = new Date();
+
+      const styleHeaderRow = (row: any) => {
+        row.eachCell((c: any) => {
+          c.font = { bold: true, color: { argb: WHITE } };
+          c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+          c.alignment = { vertical: "middle" };
+        });
+        row.height = 22;
+      };
+
+      // ===== Feuille 1 : Résumé (les 3 montants demandés, en vert/rouge) =====
+      const ws1 = wb.addWorksheet("Résumé");
+      ws1.columns = [{ width: 30 }, { width: 24 }];
+      ws1.mergeCells("A1:B1");
+      const title = ws1.getCell("A1");
+      title.value = "Grand Livre — Rapport Business / Personnel";
+      title.font = { bold: true, size: 15, color: { argb: WHITE } };
+      title.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+      title.alignment = { vertical: "middle", indent: 1 };
+      ws1.getRow(1).height = 30;
+
+      const addSum = (label: string, value: any, color?: string, isAmount?: boolean) => {
+        const r = ws1.addRow([label, value]);
+        r.getCell(1).font = { color: { argb: MUTED } };
+        r.getCell(2).font = { bold: true, size: 12, color: { argb: color || NAVY } };
+        if (isAmount) r.getCell(2).numFmt = "#,##0 \"FCFA\"";
+        r.getCell(2).alignment = { horizontal: "right" };
+        return r;
+      };
+      ws1.addRow([]);
+      const monthsInData = Array.from(new Set(transactions.map((t) => dateToMonthKey(t.date)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+      addSum("Période couverte", monthsInData.length ? `${monthLabel(monthsInData[0])} — ${monthLabel(monthsInData[monthsInData.length - 1])}` : "—");
+      addSum("Généré le", dateLabelFull(todayISO()));
+      ws1.addRow([]);
+      addSum("Revenus Business (total)", bizRev, EMERALD, true);
+      addSum("Dépenses Business (total)", bizDep, CLAY, true);
+      addSum("Marge Business", bizMargin, bizMargin >= 0 ? EMERALD : CLAY, true);
+      ws1.addRow([]);
+      const noteRow = ws1.addRow(["Note", "La marge business ci-dessus est isolée du budget personnel — voir feuilles suivantes pour le détail justificatif."]);
+      noteRow.getCell(1).font = { color: { argb: MUTED }, italic: true };
+      noteRow.getCell(2).font = { color: { argb: MUTED }, italic: true };
+      noteRow.getCell(2).alignment = { wrapText: true };
+      ws1.mergeCells(`B${noteRow.number}:B${noteRow.number}`);
+
+      // ===== Feuille 2 : Justificatif par catégorie (portée + revenus/dépenses de chaque catégorie) =====
+      const ws2 = wb.addWorksheet("Justificatif — Catégories");
+      ws2.columns = [
+        { header: "Catégorie", key: "cat", width: 26 }, { header: "Portée", key: "scope", width: 14 },
+        { header: "Revenus (FCFA)", key: "rev", width: 18 }, { header: "Dépenses (FCFA)", key: "dep", width: 18 },
+        { header: "Solde (FCFA)", key: "solde", width: 18 }, { header: "Nb transactions", key: "count", width: 16 },
+      ];
+      styleHeaderRow(ws2.getRow(1));
+      const byCat = allCategories.map((c) => {
+        const tx = withScope.filter((t) => t.category === c);
+        const rev = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+        const dep = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+        return { cat: c, scope: categoryScope[c] || "Personnel", rev, dep, solde: rev - dep, count: tx.length };
+      }).filter((r) => r.count > 0).sort((a, b) => (a.scope === b.scope ? b.rev + b.dep - (a.rev + a.dep) : a.scope === "Business" ? -1 : 1));
+      byCat.forEach((r) => {
+        const row = ws2.addRow(r);
+        row.getCell("scope").font = { bold: true, color: { argb: r.scope === "Business" ? VIOLET : MUTED } };
+        row.getCell("rev").font = { color: { argb: EMERALD } };
+        row.getCell("dep").font = { color: { argb: CLAY } };
+        row.getCell("solde").font = { bold: true, color: { argb: r.solde >= 0 ? EMERALD : CLAY } };
+        ["rev", "dep", "solde"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
+        row.getCell("count").alignment = { horizontal: "center" };
+      });
+
+      // ===== Feuille 3 : Justificatif ligne par ligne — uniquement les transactions Business =====
+      const ws3 = wb.addWorksheet("Justificatif — Transactions Business");
+      ws3.columns = [
+        { header: "Date", key: "date", width: 12 }, { header: "Catégorie", key: "cat", width: 22 },
+        { header: "Sous-catégorie", key: "sub", width: 20 }, { header: "Type", key: "type", width: 10 },
+        { header: "Compte", key: "account", width: 16 }, { header: "Montant (FCFA)", key: "amount", width: 16 },
+      ];
+      styleHeaderRow(ws3.getRow(1));
+      const bizTx = withScope.filter((t) => t.scope === "Business").sort((a, b) => a.date.localeCompare(b.date));
+      bizTx.forEach((t) => {
+        const row = ws3.addRow({ date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", type: t.type, account: t.account || "", amount: t.amount });
+        row.getCell("type").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell("amount").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY }, bold: true };
+        row.getCell("amount").numFmt = "#,##0";
+        row.getCell("amount").alignment = { horizontal: "right" };
+      });
+      const totalRow = ws3.addRow({ date: "", cat: "", sub: "", type: "TOTAL", account: "", amount: bizMargin });
+      totalRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
+      totalRow.getCell("amount").numFmt = "#,##0";
+      totalRow.getCell("amount").alignment = { horizontal: "right" };
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `grand-livre_rapport-business_${todayISO()}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      setXlsState("idle");
+    } catch {
+      setXlsState("error");
+    }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -3393,7 +3502,17 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
         <Kpi label="Dépenses Business (total)" value={fmt(bizDep)} tone={COLOR.claySoft} icon={Briefcase} />
         <Kpi label="Marge Business" value={fmt(bizMargin)} tone={bizMargin >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
       </div>
-      <Panel title="Compte de résultat — activité (GRUNDFOS / ECO PUMP AFRIK / INVEST SGO)" subtitle="Isole l'activité commerciale du budget personnel">
+      <Panel title="Compte de résultat — activité (GRUNDFOS / ECO PUMP AFRIK / INVEST SGO)" subtitle="Isole l'activité commerciale du budget personnel"
+        right={
+          <button onClick={exportBusinessExcel} disabled={xlsState === "loading"} style={{
+            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+          }}>
+            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+          </button>
+        }>
         <div style={{ fontSize: 13, color: COLOR.inkMuted, marginBottom: 14, lineHeight: 1.6 }}>
           Mélanger trésorerie personnelle et activité commerciale déforme les deux analyses. Cette vue les sépare :
           la marge business ci-dessus ne doit pas être confondue avec le solde personnel des autres onglets.
@@ -3429,6 +3548,7 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
 }) {
   const [newActivity, setNewActivity] = useState("");
   const [confirmDeleteActivity, setConfirmDeleteActivity] = useState<string | null>(null);
+  const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
 
   const activityFor = (cat: string) => categoryActivity[cat] || "Personnel";
   const allActivities = Array.from(new Set(["Personnel", ...activities]));
@@ -3472,10 +3592,125 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
     }).filter((s) => s.count > 0 || s.capital > 0);
   }, [transactions, categoryActivity, activityCapital, allActivities]);
 
+  const exportActivitiesExcel = async () => {
+    setXlsState("loading");
+    try {
+      const ExcelJS: any = await import(/* @vite-ignore */ "exceljs");
+      const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", SUBTLE = "FF232F27", WHITE = "FFFFFFFF", MUTED = "FF8A9A8E";
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Grand Livre"; wb.created = new Date();
+
+      const styleHeaderRow = (row: any) => {
+        row.eachCell((c: any) => {
+          c.font = { bold: true, color: { argb: WHITE } };
+          c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+          c.alignment = { vertical: "middle" };
+        });
+        row.height = 22;
+      };
+
+      // ===== Feuille 1 : Résumé par activité (le calcul affiché à l'écran) =====
+      const ws1 = wb.addWorksheet("Résumé par activité");
+      ws1.columns = [
+        { header: "Activité", key: "act", width: 22 }, { header: "Transactions", key: "count", width: 14 },
+        { header: "Revenus (FCFA)", key: "revenus", width: 18 }, { header: "Dépenses (FCFA)", key: "depenses", width: 18 },
+        { header: "Marge (FCFA)", key: "marge", width: 18 }, { header: "Marge/mois moy. (FCFA)", key: "avgMonthly", width: 22 },
+        { header: "Capital investi (FCFA)", key: "capital", width: 20 }, { header: "ROI (%)", key: "roi", width: 12 },
+        { header: "Reste à rembourser (FCFA)", key: "remaining", width: 24 }, { header: "Mois estimés restants", key: "monthsLeft", width: 20 },
+      ];
+      styleHeaderRow(ws1.getRow(1));
+      stats.forEach((s) => {
+        const row = ws1.addRow({
+          act: s.act, count: s.count, revenus: s.revenus, depenses: s.depenses, marge: s.marge, avgMonthly: s.avgMonthly,
+          capital: s.capital || "", roi: s.roiPct !== null ? Math.round(s.roiPct) : "", remaining: s.capital > 0 ? s.remaining : "",
+          monthsLeft: s.monthsLeft ?? (s.paidOff ? "Remboursé" : ""),
+        });
+        row.getCell("revenus").font = { color: { argb: EMERALD } };
+        row.getCell("depenses").font = { color: { argb: CLAY } };
+        row.getCell("marge").font = { bold: true, color: { argb: s.marge >= 0 ? EMERALD : CLAY } };
+        row.getCell("avgMonthly").font = { color: { argb: s.avgMonthly >= 0 ? EMERALD : CLAY } };
+        ["revenus", "depenses", "marge", "avgMonthly", "capital", "remaining"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
+        row.getCell("count").alignment = { horizontal: "center" };
+        row.getCell("roi").alignment = { horizontal: "center" };
+        row.getCell("monthsLeft").alignment = { horizontal: "center" };
+      });
+
+      // ===== Feuille 2 : Justificatif — quelle catégorie va dans quelle activité =====
+      const ws2 = wb.addWorksheet("Justificatif — Catégories");
+      ws2.columns = [
+        { header: "Catégorie", key: "cat", width: 26 }, { header: "Activité assignée", key: "act", width: 20 },
+        { header: "Revenus (FCFA)", key: "rev", width: 18 }, { header: "Dépenses (FCFA)", key: "dep", width: 18 }, { header: "Nb transactions", key: "count", width: 16 },
+      ];
+      styleHeaderRow(ws2.getRow(1));
+      const byCatRows = allCategories.map((c) => {
+        const tx = transactions.filter((t) => t.category === c);
+        const rev = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+        const dep = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+        return { cat: c, act: activityFor(c), rev, dep, count: tx.length };
+      }).filter((r) => r.count > 0).sort((a, b) => a.act.localeCompare(b.act) || (b.rev + b.dep) - (a.rev + a.dep));
+      byCatRows.forEach((r) => {
+        const row = ws2.addRow(r);
+        row.getCell("act").font = { bold: true, color: { argb: r.act === "Personnel" ? MUTED : GOLD } };
+        row.getCell("rev").font = { color: { argb: EMERALD } };
+        row.getCell("dep").font = { color: { argb: CLAY } };
+        ["rev", "dep"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
+        row.getCell("count").alignment = { horizontal: "center" };
+      });
+
+      // ===== Feuille 3 : Justificatif ligne par ligne — chaque transaction, regroupée par activité =====
+      const ws3 = wb.addWorksheet("Justificatif — Transactions");
+      ws3.columns = [
+        { header: "Activité", key: "act", width: 18 }, { header: "Date", key: "date", width: 12 },
+        { header: "Catégorie", key: "cat", width: 22 }, { header: "Sous-catégorie", key: "sub", width: 20 },
+        { header: "Type", key: "type", width: 10 }, { header: "Compte", key: "account", width: 16 }, { header: "Montant (FCFA)", key: "amount", width: 16 },
+      ];
+      styleHeaderRow(ws3.getRow(1));
+      const sortedTx = transactions.slice().sort((a, b) => activityFor(a.category).localeCompare(activityFor(b.category)) || a.date.localeCompare(b.date));
+      let curAct: string | null = null, actRev = 0, actDep = 0;
+      const flushActSubtotal = () => {
+        if (curAct === null) return;
+        const row = ws3.addRow({ act: `Sous-total ${curAct}`, date: "", cat: "", sub: "", type: "", account: "", amount: actRev - actDep });
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
+        row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
+        ws3.addRow([]);
+      };
+      sortedTx.forEach((t) => {
+        const act = activityFor(t.category);
+        if (act !== curAct) { flushActSubtotal(); curAct = act; actRev = 0; actDep = 0; }
+        if (t.type === "Revenu") actRev += t.amount; else actDep += t.amount;
+        const row = ws3.addRow({ act, date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", type: t.type, account: t.account || "", amount: t.amount });
+        row.getCell("type").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell("amount").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
+      });
+      flushActSubtotal();
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `grand-livre_rapport-activites_${todayISO()}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      setXlsState("idle");
+    } catch {
+      setXlsState("error");
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <PanelWithHelp title="Rentabilité par activité" subtitle="Basée sur la catégorie de chaque transaction, pas sur le compte — l'argent circule souvent entre comptes"
-        explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé.">
+        explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé."
+        right={
+          <button onClick={exportActivitiesExcel} disabled={xlsState === "loading"} style={{
+            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+          }}>
+            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+          </button>
+        }>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {stats.map((s) => (
             <div key={s.act} style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 18 }}>
