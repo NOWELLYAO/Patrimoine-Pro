@@ -3540,15 +3540,19 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // ACTIVITÉS & RENTABILITÉ — suivi par activité réelle (pas par compte, car
 // l'argent circule entre comptes) : marge, ROI et délai de remboursement estimé.
 // ============================================================
-function ActivitiesTab({ transactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups }: {
-  transactions: Transaction[]; activities: string[]; setActivities: (a: string[]) => void;
+function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups, accounts }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; activities: string[]; setActivities: (a: string[]) => void;
   categoryActivity: Record<string, string>; setCategoryActivity: (m: Record<string, string>) => void;
   activityCapital: Record<string, number>; setActivityCapital: (m: Record<string, number>) => void;
-  allCategories: string[]; categoryGroups: Record<string, Group>;
+  allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
 }) {
   const [newActivity, setNewActivity] = useState("");
   const [confirmDeleteActivity, setConfirmDeleteActivity] = useState<string | null>(null);
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null); // clé: "activité::groupe"
+  const [expandedGroupCat, setExpandedGroupCat] = useState<string | null>(null); // clé: "activité::groupe::catégorie"
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const activityFor = (cat: string) => categoryActivity[cat] || "Personnel";
   const allActivities = Array.from(new Set(["Personnel", ...activities]));
@@ -3600,6 +3604,22 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
       return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length, groups };
     }).filter((s) => s.count > 0 || s.capital > 0);
   }, [transactions, categoryActivity, activityCapital, allActivities]);
+
+  // Catégories qui composent un groupe (Nécessaire/Productif/Non-productif) au sein d'une activité donnée.
+  const catsForGroup = (act: string, group: Group) => {
+    const rows: Record<string, number> = {};
+    transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && (categoryGroups[t.category] || "Non classifié") === group)
+      .forEach((t) => { rows[t.category] = (rows[t.category] || 0) + t.amount; });
+    const total = Object.values(rows).reduce((a, v) => a + v, 0) || 1;
+    return Object.entries(rows).map(([name, value]) => ({ name, value, pct: (value / total) * 100 })).sort((a, b) => b.value - a.value);
+  };
+  const txForGroupCat = (act: string, group: Group, cat: string) =>
+    transactions.filter((t) => t.type === "Dépense" && t.category === cat && activityFor(t.category) === act && (categoryGroups[t.category] || "Non classifié") === group)
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+  const startEdit = (t: Transaction) => setEditingTx(t);
+  const saveEdit = (t: Transaction) => setTransactions(transactions.map((x) => (x.id === t.id ? t : x)));
+  const removeTx = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
 
   const exportActivitiesExcel = async () => {
     setXlsState("loading");
@@ -3784,15 +3804,66 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
                       <div key={g.group} style={{ width: `${g.pct}%`, background: groupColor[g.group] }} title={`${g.group} : ${g.pct.toFixed(0)}%`} />
                     ))}
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
-                    {s.groups.map((g) => (
-                      <div key={g.group} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[g.group], flexShrink: 0 }} />
-                        <span style={{ color: COLOR.inkMuted }}>{g.group}</span>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(g.value)} FCFA</span>
-                        <span style={{ color: COLOR.inkMuted }}>({g.pct.toFixed(0)}%)</span>
-                      </div>
-                    ))}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    {s.groups.map((g) => {
+                      const gKey = `${s.act}::${g.group}`;
+                      const gOpen = expandedGroup === gKey;
+                      const cats = gOpen ? catsForGroup(s.act, g.group) : [];
+                      return (
+                        <div key={g.group}>
+                          <div onClick={() => setExpandedGroup(gOpen ? null : gKey)} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "5px 0", cursor: "pointer" }}>
+                            <ChevronDown size={11} color={COLOR.inkMuted} style={{ transform: gOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[g.group], flexShrink: 0 }} />
+                            <span style={{ color: COLOR.inkMuted }}>{g.group}</span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(g.value)} FCFA</span>
+                            <span style={{ color: COLOR.inkMuted }}>({g.pct.toFixed(0)}%)</span>
+                          </div>
+                          {gOpen && (
+                            <div style={{ padding: "2px 0 8px 25px", display: "flex", flexDirection: "column", gap: 2 }}>
+                              {cats.map((c) => {
+                                const cKey = `${gKey}::${c.name}`;
+                                const cOpen = expandedGroupCat === cKey;
+                                const tx = cOpen ? txForGroupCat(s.act, g.group, c.name) : [];
+                                return (
+                                  <div key={c.name}>
+                                    <div onClick={() => setExpandedGroupCat(cOpen ? null : cKey)} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "5px 0", cursor: "pointer" }}>
+                                      <span style={{ color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 5 }}>
+                                        <ChevronDown size={10} color={COLOR.inkMuted} style={{ transform: cOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                                        {c.name}
+                                      </span>
+                                      <span style={{ display: "flex", gap: 10 }}>
+                                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(c.value)} FCFA</span>
+                                        <span style={{ color: COLOR.inkMuted, minWidth: 30, textAlign: "right" }}>{c.pct.toFixed(0)}%</span>
+                                      </span>
+                                    </div>
+                                    {cOpen && (
+                                      <div style={{ padding: "2px 0 8px 18px", display: "flex", flexDirection: "column", gap: 6 }}>
+                                        {tx.map((t) => (
+                                          <div key={t.id} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                                            <div style={{ fontSize: 12, color: COLOR.ink, fontFamily: "'IBM Plex Mono', monospace" }}>
+                                              {dateLabelFull(t.date)}
+                                              {t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
+                                              {t.account && <span style={{ color: COLOR.inkMuted }}> · {t.account}</span>}
+                                            </div>
+                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 600, color: COLOR.claySoft }}>{fmt(t.amount)} FCFA</span>
+                                              <button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={12} /></button>
+                                              <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={12} /></button>
+                                            </div>
+                                          </div>
+                                        ))}
+                                        {!tx.length && <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Aucune transaction.</div>}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {!cats.length && <div style={{ fontSize: 12, color: COLOR.inkMuted, padding: "5px 0" }}>Aucune catégorie.</div>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -3847,6 +3918,22 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
         message="Les catégories qui y étaient rattachées repasseront automatiquement en « Personnel ». Le capital investi renseigné sera perdu."
         onConfirm={() => { if (confirmDeleteActivity) deleteActivity(confirmDeleteActivity); setConfirmDeleteActivity(null); }}
         onCancel={() => setConfirmDeleteActivity(null)}
+      />
+      <TransactionEditSheet
+        open={!!editingTx}
+        transaction={editingTx}
+        transactions={transactions}
+        accounts={accounts}
+        onClose={() => setEditingTx(null)}
+        onSave={saveEdit}
+        onDelete={removeTx}
+      />
+      <ConfirmDialog
+        open={!!confirmDeleteId}
+        title="Supprimer cette transaction ?"
+        message="Cette action est définitive. Le montant ne sera plus comptabilisé nulle part dans l'app."
+        onConfirm={() => { if (confirmDeleteId) removeTx(confirmDeleteId); setConfirmDeleteId(null); }}
+        onCancel={() => setConfirmDeleteId(null)}
       />
     </div>
   );
@@ -5925,7 +6012,7 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} categoryGroups={resolvedGroups} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
