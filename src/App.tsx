@@ -172,6 +172,7 @@ interface Transaction {
   payee?: string;
   note?: string;
   tags?: string;
+  reconciled?: boolean; // pointée face au relevé bancaire réel (rapprochement bancaire)
 }
 interface Account {
   id: string;
@@ -1236,6 +1237,7 @@ function daysInMonthOf(mk: string): number {
 // ============================================================
 type ChargeMode = "fixe" | "variable" | "occasionnelle" | "exclu";
 interface ChargeOverride { mode: ChargeMode | "auto"; amount?: number; }
+interface SettingsLogEntry { at: string; text: string; }
 // Catégories éclatées par sous-catégorie plutôt qu'agrégées — nécessaire pour
 // distinguer par exemple GRUNDFOS·Carburant (fixe) de GRUNDFOS·Électricité (variable).
 const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true };
@@ -2044,7 +2046,10 @@ function HeatmapCalendar({ filtered }: { filtered: any[] }) {
 // ============================================================
 // APERÇU TAB (KPIs + valeur nette + revenu/dépense + groupes + santé + comparaison)
 // ============================================================
-function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[] }) {
+function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
+  filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[];
+  chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean; monthlyObjective: number;
+}) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const solde = totalRevenus - totalDepenses;
@@ -2085,6 +2090,7 @@ function ApercuTab({ filtered, filters, accounts, transactions }: { filtered: an
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <SignauxClesPanel transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Revenus (période)" value={fmt(totalRevenus)} tone={COLOR.emeraldSoft} icon={TrendingUp} />
         <Kpi label="Dépenses (période)" value={fmt(totalDepenses)} tone={COLOR.claySoft} icon={TrendingDown} />
@@ -4526,6 +4532,206 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
 // logement, fonds d'urgence CFPB, concentration des revenus) + simulateur de
 // résilience (stress test simplifié : baisse de revenu × durée).
 // ============================================================
+// ============================================================
+// SIGNAUX CLÉS — vue d'ensemble unifiée qui remonte les 5 informations les
+// plus importantes issues de tous les moteurs d'analyse de l'app (Conseiller
+// quotidien, notes du jour/mois, charges fixes/variables, ratios financiers),
+// pour éviter d'avoir à visiter 6 pages différentes pour voir l'essentiel.
+// ============================================================
+function SignauxClesPanel({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
+  transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean; monthlyObjective: number;
+}) {
+  const dayScore = useMemo(() => computeDayScore(transactions, monthlyObjective), [transactions, monthlyObjective]);
+  const monthScore = useMemo(() => computeMonthScore(transactions, monthlyObjective), [transactions, monthlyObjective]);
+  const advice = useMemo(() => generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture), [transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture]);
+  const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+  const { ratios } = useMemo(() => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture), [transactions, accounts, chargeOverrides, includeGrundfosVoiture]);
+  const today = todayISO();
+  const curMonth = dateToMonthKey(today);
+  const dayNum = new Date(today + "T00:00:00").getDate();
+  const upcoming = useMemo(() => detectRecurringExpenses(transactions, curMonth, dayNum), [transactions, curMonth, dayNum]);
+
+  const gradeColor: Record<string, string> = { Excellent: COLOR.emerald, Bon: COLOR.emeraldSoft, Moyen: COLOR.gold, Faible: COLOR.clay };
+  const topAlert = advice.insights.find((i) => i.kind === "alerte") || advice.insights[0];
+  const worstRatio = ratios.find((r) => r.verdict === "risque") || ratios.find((r) => r.verdict === "vigilance");
+
+  const signals = [
+    { icon: Clock, color: dayScore.gradeColor, title: `Journée : ${dayScore.grade} (${Math.round(dayScore.overall)}/100)`, text: `Note du mois : ${monthScore.grade} (${Math.round(monthScore.overall)}/100)` },
+    topAlert ? { icon: topAlert.kind === "alerte" ? AlertTriangle : topAlert.kind === "positif" ? Check : Info, color: topAlert.kind === "alerte" ? COLOR.claySoft : topAlert.kind === "positif" ? COLOR.emeraldSoft : COLOR.goldSoft, title: topAlert.title, text: topAlert.text } : null,
+    { icon: Wallet, color: charges.resteAVivre >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, title: `Reste à vivre estimé : ${fmt(charges.resteAVivre)} FCFA/mois`, text: `Charges fixes ${fmt(charges.totalFixe)} + variables ${fmt(charges.totalVariable)} déduites du revenu moyen.` },
+    worstRatio ? { icon: AlertTriangle, color: worstRatio.verdict === "risque" ? COLOR.claySoft : COLOR.goldSoft, title: `${worstRatio.label} : ${worstRatio.unit === "mois" ? worstRatio.value.toFixed(1) : Math.round(worstRatio.value)}${worstRatio.unit === "mois" ? " mois" : worstRatio.unit}`, text: worstRatio.benchmark } : { icon: Check, color: COLOR.emeraldSoft, title: "Tous les ratios financiers sont sains", text: "Aucun signal de risque sur les repères institutionnels (DTI, logement, fonds d'urgence, concentration des revenus)." },
+    upcoming.length ? { icon: CalendarRange, color: COLOR.goldSoft, title: `${upcoming.length} charge(s) périodique(s) probablement encore à venir`, text: upcoming.map((u) => `${u.category} (~${fmt(u.typicalAmount)} FCFA)`).join(", ") } : null,
+  ].filter(Boolean) as { icon: any; color: string; title: string; text: string }[];
+
+  return (
+    <Panel title="Signaux clés" subtitle="L'essentiel de tous les moteurs d'analyse de l'app, en un coup d'œil">
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {signals.map((s, i) => {
+          const Icon = s.icon;
+          return (
+            <div key={i} style={{ display: "flex", gap: 12, padding: "10px 12px", background: `${s.color}14`, border: `1px solid ${s.color}`, borderRadius: 8 }}>
+              <Icon size={15} color={s.color} style={{ flexShrink: 0, marginTop: 1 }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: s.color, marginBottom: 2 }}>{s.title}</div>
+                <div style={{ fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.5, overflow: "hidden", textOverflow: "ellipsis" }}>{s.text}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
+
+// ============================================================
+// BANNIÈRE DE RAPPEL PROACTIF — visible sur tous les onglets (pas seulement
+// dans le Conseiller quotidien qu'il faut aller consulter), pour les charges
+// périodiques qui approchent sans être encore enregistrées ce mois-ci.
+// Peut être masquée pour la journée ; réapparaît le lendemain si toujours
+// non résolue.
+// ============================================================
+function GlobalReminderBanner({ transactions, dismissedDate, setDismissedDate }: {
+  transactions: Transaction[]; dismissedDate: string | null; setDismissedDate: (d: string) => void;
+}) {
+  const today = todayISO();
+  const curMonth = dateToMonthKey(today);
+  const dayNum = new Date(today + "T00:00:00").getDate();
+  const upcoming = useMemo(() => detectRecurringExpenses(transactions, curMonth, dayNum), [transactions, curMonth, dayNum]);
+
+  if (!upcoming.length || dismissedDate === today) return null;
+  const total = upcoming.reduce((a, u) => a + u.typicalAmount, 0);
+
+  return (
+    <div className="gl-noprint" style={{
+      display: "flex", alignItems: "center", gap: 12, background: "rgba(201,162,39,0.1)", border: `1px solid ${COLOR.gold}`,
+      borderRadius: 10, padding: "12px 16px", marginBottom: 16,
+    }}>
+      <CalendarRange size={17} color={COLOR.goldSoft} style={{ flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: COLOR.ink }}>
+        <strong style={{ color: COLOR.goldSoft }}>{upcoming.length} charge(s) périodique(s)</strong> probablement encore à venir ce mois-ci (~{fmt(total)} FCFA) :{" "}
+        <span style={{ color: COLOR.inkMuted }}>{upcoming.map((u) => u.category).join(", ")}</span>
+      </div>
+      <button onClick={() => setDismissedDate(today)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }} title="Masquer pour aujourd'hui">
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+
+// ============================================================
+// RAPPROCHEMENT BANCAIRE — pointer les transactions face au relevé bancaire
+// réel, compte par compte, pour repérer tout écart résiduel après import.
+// ============================================================
+function RapprochementTab({ transactions, setTransactions, accounts }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[];
+}) {
+  const [selectedAccount, setSelectedAccount] = useState(accounts[0]?.name || "");
+  const curMonth = dateToMonthKey(todayISO());
+  const [periodFrom, setPeriodFrom] = useState(curMonth);
+  const [periodTo, setPeriodTo] = useState(curMonth);
+  const [soldeReel, setSoldeReel] = useState<number | "">("");
+
+  const allMonths = useMemo(() => Array.from(new Set(transactions.map((t) => dateToMonthKey(t.date)))).sort((a, b) => monthSortKey(a) - monthSortKey(b)), [transactions]);
+
+  const periodTx = useMemo(() => {
+    const fk = monthSortKey(periodFrom), tk = monthSortKey(periodTo);
+    return transactions
+      .filter((t) => t.account === selectedAccount && monthSortKey(dateToMonthKey(t.date)) >= fk && monthSortKey(dateToMonthKey(t.date)) <= tk)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [transactions, selectedAccount, periodFrom, periodTo]);
+
+  const account = accounts.find((a) => a.name === selectedAccount);
+  // Solde théorique de l'app, à la fin de la période sélectionnée (pas juste sur la période affichée).
+  const soldeAppFinPeriode = useMemo(() => {
+    if (!account) return 0;
+    const tk = monthSortKey(periodTo);
+    const net = transactions
+      .filter((t) => t.account === selectedAccount && monthSortKey(dateToMonthKey(t.date)) <= tk)
+      .reduce((a, t) => a + (t.type === "Revenu" ? t.amount : -t.amount), 0);
+    return account.openingBalance + net;
+  }, [transactions, selectedAccount, periodTo, account]);
+
+  const ecart = soldeReel !== "" ? (soldeReel as number) - soldeAppFinPeriode : null;
+
+  const toggleReconciled = (id: string) => setTransactions(transactions.map((t) => (t.id === id ? { ...t, reconciled: !t.reconciled } : t)));
+  const pointedCount = periodTx.filter((t) => t.reconciled).length;
+  const pointedTotal = periodTx.filter((t) => t.reconciled).reduce((a, t) => a + (t.type === "Revenu" ? t.amount : -t.amount), 0);
+  const nonPointedCount = periodTx.length - pointedCount;
+
+  const markAllReconciled = (value: boolean) => setTransactions(transactions.map((t) => (periodTx.some((p) => p.id === t.id) ? { ...t, reconciled: value } : t)));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <PanelWithHelp title="Rapprochement bancaire" subtitle="Pointe chaque transaction face à ton relevé bancaire réel pour détecter tout écart résiduel"
+        explain="Sélectionne un compte et une période, puis coche chaque transaction que tu retrouves sur ton relevé bancaire réel. Renseigne le solde réel indiqué sur ton relevé à la fin de la période : si un écart apparaît avec le solde théorique de l'app, c'est le signe d'une transaction manquante, en double, ou mal datée — repérable ligne par ligne plutôt qu'en devinant.">
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 20 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
+            <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)} style={{ ...inputStyle, width: 160 }}>
+              {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+            </select>
+          </div>
+          <Select label="Du mois" value={periodFrom} onChange={setPeriodFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+          <Select label="Au mois" value={periodTo} onChange={setPeriodTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Solde réel (relevé, fin de période)</label>
+            <input type="number" inputMode="numeric" style={{ ...inputStyle, width: 160, textAlign: "right" }} placeholder="Ex : 1 250 000" value={soldeReel}
+              onChange={(e) => setSoldeReel(e.target.value === "" ? "" : Number(e.target.value))} />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 20 }}>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Solde théorique (app)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: COLOR.ink }}>{fmt(soldeAppFinPeriode)} FCFA</div>
+          </div>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${ecart === null ? COLOR.hairline : Math.abs(ecart) < 1 ? COLOR.emerald : COLOR.clay}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Écart avec le relevé réel</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: ecart === null ? COLOR.inkMuted : Math.abs(ecart) < 1 ? COLOR.emeraldSoft : COLOR.claySoft }}>
+              {ecart === null ? "— saisis le solde réel" : `${ecart >= 0 ? "+" : ""}${fmt(ecart)} FCFA`}
+            </div>
+          </div>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Pointées / total</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: COLOR.ink }}>{pointedCount} / {periodTx.length}</div>
+          </div>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${nonPointedCount > 0 ? COLOR.gold : COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Non pointées</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: nonPointedCount > 0 ? COLOR.goldSoft : COLOR.emeraldSoft }}>{nonPointedCount}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button onClick={() => markAllReconciled(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}>
+            <CheckSquare size={12} /> Tout pointer
+          </button>
+          <button onClick={() => markAllReconciled(false)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}>
+            <Square size={12} /> Tout dépointer
+          </button>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {periodTx.map((t) => (
+            <div key={t.id} onClick={() => toggleReconciled(t.id)} style={{
+              display: "flex", alignItems: "center", gap: 12, padding: "9px 12px", borderRadius: 8, cursor: "pointer",
+              background: t.reconciled ? "rgba(63,156,122,0.08)" : COLOR.surfaceRaised, border: `1px solid ${t.reconciled ? COLOR.emerald : COLOR.hairline}`,
+            }}>
+              {t.reconciled ? <CheckSquare size={16} color={COLOR.emeraldSoft} style={{ flexShrink: 0 }} /> : <Square size={16} color={COLOR.inkMuted} style={{ flexShrink: 0 }} />}
+              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: COLOR.ink }}>
+                {dateLabelFull(t.date)} — {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
+              </div>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, flexShrink: 0 }}>
+                {t.type === "Revenu" ? "+" : "−"}{fmt(t.amount)} FCFA
+              </span>
+            </div>
+          ))}
+          {!periodTx.length && <EmptyState text="Aucune transaction pour ce compte sur cette période." />}
+        </div>
+      </PanelWithHelp>
+    </div>
+  );
+}
+
 function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
@@ -5114,10 +5320,12 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // ============================================================
 // SAUVEGARDE & RESTAURATION
 // ============================================================
-function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected }: {
+function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected, undoSnapshotAt, onUndoRestore, settingsLog }: {
   getSnapshot: () => any; restore: (data: any) => void; syncCode: string; setSyncCode: (c: string) => void;
   syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void; realtimeConnected: boolean;
+  undoSnapshotAt: string | null; onUndoRestore: () => void; settingsLog: SettingsLogEntry[];
 }) {
+  const [confirmUndo, setConfirmUndo] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [codeInput, setCodeInput] = useState(syncCode);
@@ -5260,6 +5468,36 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
           <input type="file" accept="application/json" onChange={onFile} style={{ display: "none" }} />
         </label>
         {status && <div style={{ marginTop: 12, fontSize: 12.5, color: COLOR.goldSoft }}>{status}</div>}
+      </Panel>
+      {undoSnapshotAt && (
+        <Panel title="Filet de sécurité" subtitle="Un instantané de tes données a été pris automatiquement juste avant ta dernière restauration">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+              Dernière restauration effectuée le <strong style={{ color: COLOR.ink }}>{undoSnapshotAt}</strong>. Si le résultat ne correspond pas à ce que tu attendais, tu peux revenir en un clic à l'état d'avant cette restauration.
+            </div>
+            <button onClick={() => setConfirmUndo(true)} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(193,84,63,0.14)", border: `1px solid ${COLOR.clay}`, borderRadius: 8, color: COLOR.claySoft, padding: "10px 18px", fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>
+              <RotateCcw size={15} /> Annuler la dernière restauration
+            </button>
+          </div>
+        </Panel>
+      )}
+      <ConfirmDialog
+        open={confirmUndo}
+        title="Annuler la dernière restauration ?"
+        message="Tes données reviendront exactement à l'état où elles étaient juste avant ta dernière restauration. Ce qui a été fait depuis (nouvelles transactions, réglages) sera perdu."
+        onConfirm={() => { onUndoRestore(); setConfirmUndo(false); setStatus("Retour à l'état précédent effectué."); }}
+        onCancel={() => setConfirmUndo(false)}
+      />
+      <Panel title="Historique des ajustements manuels" subtitle="Tous les réglages que tu as modifiés toi-même (charges, activités, portées, objectifs), avec la date">
+        <div className="gl-scroll" style={{ maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+          {settingsLog.map((entry, i) => (
+            <div key={i} style={{ display: "flex", gap: 12, padding: "8px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <span style={{ fontSize: 11, color: COLOR.inkMuted, fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0, width: 150 }}>{entry.at}</span>
+              <span style={{ fontSize: 12.5, color: COLOR.ink }}>{entry.text}</span>
+            </div>
+          ))}
+          {!settingsLog.length && <EmptyState text="Aucun ajustement manuel enregistré pour l'instant." />}
+        </div>
       </Panel>
     </div>
   );
@@ -6417,7 +6655,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -6446,6 +6684,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "activites", label: "Activités & Rentabilité", icon: Rocket },
     { id: "charges", label: "Charges Fixes & Variables", icon: CalendarRange },
     { id: "diagnostic", label: "Diagnostic Financier", icon: Gauge },
+    { id: "rapprochement", label: "Rapprochement bancaire", icon: CheckSquare },
     { id: "creances", label: "Créances", icon: HandCoins },
     { id: "comptes", label: "Comptes", icon: Wallet },
     { id: "payees", label: "Bénéficiaires", icon: Users },
@@ -6468,6 +6707,52 @@ export default function GrandLivre() {
   const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0);
   const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides);
   const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true);
+  const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
+  const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
+  const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
+  const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
+  const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
+
+  const chargeModeDesc = (o?: ChargeOverride) => !o || o.mode === "auto" ? "Auto" : o.mode === "fixe" ? `Fixe${o.amount !== undefined ? ` (${fmt(o.amount)} FCFA)` : ""}` : o.mode === "variable" ? "Variable régulière" : o.mode === "exclu" ? "Exclu" : "Occasionnelle";
+  const setChargeOverridesLogged = (next: Record<string, ChargeOverride>) => {
+    Object.keys(next).forEach((k) => {
+      if (JSON.stringify(next[k]) !== JSON.stringify(chargeOverrides[k])) {
+        logChange(`Charge "${k.replace("::", " · ")}" : ${chargeModeDesc(chargeOverrides[k])} → ${chargeModeDesc(next[k])}`);
+      }
+    });
+    setChargeOverrides(next);
+  };
+  const setCategoryActivityLogged = (next: Record<string, string>) => {
+    Object.keys(next).forEach((k) => {
+      if (next[k] !== categoryActivity[k]) logChange(`Catégorie "${k}" rattachée à l'activité "${next[k]}" (avant : "${categoryActivity[k] || "Personnel"}")`);
+    });
+    setCategoryActivity(next);
+  };
+  const setActivityCapitalLogged = (next: Record<string, number>) => {
+    Object.keys(next).forEach((k) => {
+      if (next[k] !== activityCapital[k]) logChange(`Capital investi de l'activité "${k}" : ${fmt(activityCapital[k] || 0)} → ${fmt(next[k])} FCFA`);
+    });
+    setActivityCapital(next);
+  };
+  const setActivitiesLogged = (next: string[]) => {
+    next.filter((a) => !activities.includes(a)).forEach((a) => logChange(`Activité "${a}" ajoutée`));
+    activities.filter((a) => !next.includes(a)).forEach((a) => logChange(`Activité "${a}" supprimée`));
+    setActivities(next);
+  };
+  const setMonthlyObjectiveLogged = (next: number) => {
+    if (next !== monthlyObjective) logChange(`Objectif de dépenses mensuel : ${fmt(monthlyObjective)} → ${fmt(next)} FCFA`);
+    setMonthlyObjective(next);
+  };
+  const setIncludeGrundfosVoitureLogged = (next: boolean) => {
+    if (next !== includeGrundfosVoiture) logChange(`GRUNDFOS & Voiture dans les charges : ${includeGrundfosVoiture ? "Inclus" : "Exclu"} → ${next ? "Inclus" : "Exclu"}`);
+    setIncludeGrundfosVoiture(next);
+  };
+  const setCategoryScopeLogged = (next: Record<string, Scope>) => {
+    Object.keys(next).forEach((k) => {
+      if (next[k] !== categoryScope[k]) logChange(`Portée de "${k}" : ${categoryScope[k] || "Personnel"} → ${next[k]}`);
+    });
+    setCategoryScope(next);
+  };
   const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules);
   const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans);
   const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000);
@@ -6740,6 +7025,7 @@ export default function GrandLivre() {
         </header>
 
         <main className="gl-print-full" style={{ maxWidth: 1180, padding: isMobile ? "16px 14px 100px 14px" : "24px 32px 60px 32px" }}>
+          <GlobalReminderBanner transactions={transactions} dismissedDate={dismissedReminderDate} setDismissedDate={setDismissedReminderDate} />
           {tab !== "saisie" && (
             <div className="gl-noprint" style={{ marginBottom: 20 }}>
               {isMobile ? (
@@ -6764,13 +7050,13 @@ export default function GrandLivre() {
             </div>
           )}
 
-          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} />}
+          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
@@ -6784,10 +7070,11 @@ export default function GrandLivre() {
               <ProjectionPanel accounts={accounts} transactions={transactions} />
             </div>
           )}
-          {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
-          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoiture} />}
+          {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
+          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
@@ -6801,6 +7088,14 @@ export default function GrandLivre() {
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
               })}
               restore={(data: any) => {
+                // Filet de sécurité : on garde un instantané de l'état actuel avant
+                // d'écraser quoi que ce soit, pour permettre une annulation en un clic.
+                setPreRestoreSnapshot({
+                  transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+                });
+                setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
+
                 if (data.transactions) setTransactions(data.transactions);
                 if (data.categoryGroups) setCategoryGroups(data.categoryGroups);
                 if (data.categoryScope) setCategoryScope(data.categoryScope);
@@ -6817,6 +7112,30 @@ export default function GrandLivre() {
                 if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
                 if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
                 if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
+              }}
+              undoSnapshotAt={preRestoreSnapshotAt}
+              settingsLog={settingsLog}
+              onUndoRestore={() => {
+                if (!preRestoreSnapshot) return;
+                const data = preRestoreSnapshot;
+                if (data.transactions) setTransactions(data.transactions);
+                if (data.categoryGroups) setCategoryGroups(data.categoryGroups);
+                if (data.categoryScope) setCategoryScope(data.categoryScope);
+                if (data.rules) setRules(data.rules);
+                if (data.loans) setLoans(data.loans);
+                if (typeof data.envelopeCap === "number") setEnvelopeCap(data.envelopeCap);
+                if (data.accounts) setAccounts(data.accounts);
+                if (data.budgets) setBudgets(data.budgets);
+                if (data.goals) setGoals(data.goals);
+                if (data.recurring) setRecurring(data.recurring);
+                if (data.activities) setActivities(data.activities);
+                if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
+                if (data.activityCapital) setActivityCapital(data.activityCapital);
+                if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
+                if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
+                if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
+                setPreRestoreSnapshot(null);
+                setPreRestoreSnapshotAt(null);
               }}
               syncCode={syncCode}
               setSyncCode={setSyncCode}
