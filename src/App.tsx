@@ -3540,11 +3540,11 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // ACTIVITÉS & RENTABILITÉ — suivi par activité réelle (pas par compte, car
 // l'argent circule entre comptes) : marge, ROI et délai de remboursement estimé.
 // ============================================================
-function ActivitiesTab({ transactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories }: {
+function ActivitiesTab({ transactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups }: {
   transactions: Transaction[]; activities: string[]; setActivities: (a: string[]) => void;
   categoryActivity: Record<string, string>; setCategoryActivity: (m: Record<string, string>) => void;
   activityCapital: Record<string, number>; setActivityCapital: (m: Record<string, number>) => void;
-  allCategories: string[];
+  allCategories: string[]; categoryGroups: Record<string, Group>;
 }) {
   const [newActivity, setNewActivity] = useState("");
   const [confirmDeleteActivity, setConfirmDeleteActivity] = useState<string | null>(null);
@@ -3588,7 +3588,16 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
       const monthsLeft = capital > 0 && marge < capital && avgMonthly > 0 ? Math.ceil(remaining / avgMonthly) : null;
       const paidOff = capital > 0 && marge >= capital;
 
-      return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length };
+      // Répartition des dépenses par nature (Nécessaire / Productif / Non-productif)
+      const groupTotals: Record<Group, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
+      tx.filter((t) => t.type === "Dépense").forEach((t) => { groupTotals[categoryGroups[t.category] || "Non classifié"] += t.amount; });
+      const depTotal = depenses || 1;
+      const groups = (["Nécessaire", "Productif", "Non-productif"] as Group[])
+        .map((g) => ({ group: g, value: groupTotals[g], pct: (groupTotals[g] / depTotal) * 100 }))
+        .filter((g) => g.value > 0);
+      if (groupTotals["Non classifié"] > 0) groups.push({ group: "Non classifié", value: groupTotals["Non classifié"], pct: (groupTotals["Non classifié"] / depTotal) * 100 });
+
+      return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length, groups };
     }).filter((s) => s.count > 0 || s.capital > 0);
   }, [transactions, categoryActivity, activityCapital, allActivities]);
 
@@ -3615,13 +3624,18 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
         { header: "Activité", key: "act", width: 22 }, { header: "Transactions", key: "count", width: 14 },
         { header: "Revenus (FCFA)", key: "revenus", width: 18 }, { header: "Dépenses (FCFA)", key: "depenses", width: 18 },
         { header: "Marge (FCFA)", key: "marge", width: 18 }, { header: "Marge/mois moy. (FCFA)", key: "avgMonthly", width: 22 },
+        { header: "Dont Nécessaire (FCFA)", key: "necessaire", width: 20 }, { header: "Dont Productif (FCFA)", key: "productif", width: 20 },
+        { header: "Dont Non-productif (FCFA)", key: "nonproductif", width: 22 },
         { header: "Capital investi (FCFA)", key: "capital", width: 20 }, { header: "ROI (%)", key: "roi", width: 12 },
         { header: "Reste à rembourser (FCFA)", key: "remaining", width: 24 }, { header: "Mois estimés restants", key: "monthsLeft", width: 20 },
       ];
       styleHeaderRow(ws1.getRow(1));
+      const SLATE = "FF6E7FA8";
       stats.forEach((s) => {
+        const gv = (g: Group) => s.groups.find((x) => x.group === g)?.value || 0;
         const row = ws1.addRow({
           act: s.act, count: s.count, revenus: s.revenus, depenses: s.depenses, marge: s.marge, avgMonthly: s.avgMonthly,
+          necessaire: gv("Nécessaire") || "", productif: gv("Productif") || "", nonproductif: gv("Non-productif") || "",
           capital: s.capital || "", roi: s.roiPct !== null ? Math.round(s.roiPct) : "", remaining: s.capital > 0 ? s.remaining : "",
           monthsLeft: s.monthsLeft ?? (s.paidOff ? "Remboursé" : ""),
         });
@@ -3629,7 +3643,10 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
         row.getCell("depenses").font = { color: { argb: CLAY } };
         row.getCell("marge").font = { bold: true, color: { argb: s.marge >= 0 ? EMERALD : CLAY } };
         row.getCell("avgMonthly").font = { color: { argb: s.avgMonthly >= 0 ? EMERALD : CLAY } };
-        ["revenus", "depenses", "marge", "avgMonthly", "capital", "remaining"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
+        row.getCell("necessaire").font = { color: { argb: SLATE } };
+        row.getCell("productif").font = { color: { argb: EMERALD } };
+        row.getCell("nonproductif").font = { color: { argb: CLAY } };
+        ["revenus", "depenses", "marge", "avgMonthly", "necessaire", "productif", "nonproductif", "capital", "remaining"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
         row.getCell("count").alignment = { horizontal: "center" };
         row.getCell("roi").alignment = { horizontal: "center" };
         row.getCell("monthsLeft").alignment = { horizontal: "center" };
@@ -3754,6 +3771,28 @@ function ActivitiesTab({ transactions, activities, setActivities, categoryActivi
                       : s.monthsLeft !== null
                         ? `reste ${fmt(s.remaining)} FCFA — remboursement estimé dans ~${s.monthsLeft} mois au rythme actuel`
                         : `reste ${fmt(s.remaining)} FCFA — rythme actuel insuffisant pour estimer un délai`}
+                  </div>
+                </div>
+              )}
+              {s.groups.length > 0 && (
+                <div style={{ marginTop: s.capital > 0 ? 14 : 4, paddingTop: 14, borderTop: `1px solid ${COLOR.hairline}` }}>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+                    Répartition des dépenses par nature
+                  </div>
+                  <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", marginBottom: 10 }}>
+                    {s.groups.map((g) => (
+                      <div key={g.group} style={{ width: `${g.pct}%`, background: groupColor[g.group] }} title={`${g.group} : ${g.pct.toFixed(0)}%`} />
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+                    {s.groups.map((g) => (
+                      <div key={g.group} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[g.group], flexShrink: 0 }} />
+                        <span style={{ color: COLOR.inkMuted }}>{g.group}</span>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(g.value)} FCFA</span>
+                        <span style={{ color: COLOR.inkMuted }}>({g.pct.toFixed(0)}%)</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -5886,7 +5925,7 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} categoryGroups={resolvedGroups} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
