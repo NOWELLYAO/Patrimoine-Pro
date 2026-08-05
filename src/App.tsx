@@ -1411,6 +1411,103 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
   return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, remainingBudget, hasObjective, upcomingTotal };
 }
 
+// Note du jour : Excellent / Bon / Moyen / Faible — combine trois signaux concrets :
+// le respect du seuil quotidien, la dépense du jour comparée à l'habitude, et l'absence
+// de dérapage sur une sous-catégorie déjà repérée comme en dérive ce mois-ci.
+function computeDayScore(transactions: Transaction[], monthlyObjective: number) {
+  const today = todayISO();
+  const curMonth = dateToMonthKey(today);
+  const dayNum = new Date(today + "T00:00:00").getDate();
+  const daysInMonth = daysInMonthOf(curMonth);
+
+  const todayTx = transactions.filter((t) => t.date === today);
+  const todayDep = todayTx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+  const todayRev = todayTx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+  const todaySolde = todayRev - todayDep;
+
+  // Dépense quotidienne "habituelle" : médiane des 30 jours précédents (jours à 0 inclus,
+  // pour refléter le vrai rythme, pas seulement les jours où il y a eu une dépense).
+  const dailyDepenses: Record<string, number> = {};
+  transactions.forEach((t) => { if (t.type === "Dépense" && t.date < today) dailyDepenses[t.date] = (dailyDepenses[t.date] || 0) + t.amount; });
+  const last30: number[] = [];
+  const cursor = new Date(today + "T00:00:00");
+  for (let i = 1; i <= 30; i++) {
+    cursor.setDate(cursor.getDate() - 1);
+    const iso = `${cursor.getFullYear()}-${pad2(cursor.getMonth() + 1)}-${pad2(cursor.getDate())}`;
+    last30.push(dailyDepenses[iso] || 0);
+  }
+  const avgHistDaily = median(last30);
+
+  const advice = generateDailyAdvice(transactions, monthlyObjective);
+  const dailyThreshold = advice.dailyThreshold;
+
+  // A. Respect du seuil quotidien (si un objectif mensuel est défini)
+  let seuilScore = 60;
+  if (dailyThreshold !== null) {
+    seuilScore = todayDep <= dailyThreshold ? 100 : Math.max(0, 100 - ((todayDep - dailyThreshold) / Math.max(dailyThreshold, 1)) * 100);
+  }
+
+  // B. Dépense du jour comparée à l'habitude (médiane des 30 derniers jours)
+  let habitScore = 60;
+  if (avgHistDaily > 0) {
+    const ratio = todayDep / avgHistDaily;
+    habitScore = Math.max(0, Math.min(100, 100 - (ratio - 1) * 60));
+  } else if (todayDep === 0) {
+    habitScore = 100;
+  }
+
+  // C. Absence de dérapage sur une sous-catégorie déjà repérée en dérive ce mois-ci
+  const drift = analyzeSubcategoryDrift(transactions, curMonth, dayNum, daysInMonth);
+  const driftedKeys = new Set(drift.filter((d) => d.diffPct > 0).map((d) => `${d.category}::${d.subcategory}`));
+  const touchesDrift = todayTx.some((t) => t.type === "Dépense" && driftedKeys.has(`${t.category}::${t.subcategory || "(non précisé)"}`));
+  const driftScore = drift.length ? (touchesDrift ? 25 : 100) : 70;
+
+  const overall = (seuilScore + habitScore + driftScore) / 3;
+  let grade = "Faible", gradeColor = COLOR.clay;
+  if (overall >= 80) { grade = "Excellent"; gradeColor = COLOR.emerald; }
+  else if (overall >= 60) { grade = "Bon"; gradeColor = COLOR.emeraldSoft; }
+  else if (overall >= 40) { grade = "Moyen"; gradeColor = COLOR.gold; }
+
+  return { overall, grade, gradeColor, seuilScore, habitScore, driftScore, todayDep, todayRev, todaySolde, avgHistDaily, dailyThreshold, touchesDrift, hasDriftData: drift.length > 0 };
+}
+
+function DayScoreBadge({ transactions, monthlyObjective, compact }: { transactions: Transaction[]; monthlyObjective: number; compact?: boolean }) {
+  const score = useMemo(() => computeDayScore(transactions, monthlyObjective), [transactions, monthlyObjective]);
+  const sub = [
+    { label: "Seuil du jour respecté", value: score.seuilScore },
+    { label: "Vs. dépense habituelle", value: score.habitScore },
+    { label: "Sous-catégories surveillées", value: score.driftScore },
+  ];
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 16, background: `linear-gradient(135deg, ${score.gradeColor}22 0%, ${COLOR.surfaceRaised} 65%)`,
+      border: `1px solid ${score.gradeColor}`, borderRadius: 14, padding: compact ? "12px 16px" : "16px 20px",
+    }}>
+      <div style={{ width: compact ? 52 : 64, height: compact ? 52 : 64, borderRadius: "50%", border: `3px solid ${score.gradeColor}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: compact ? 14 : 17, fontWeight: 700, color: score.gradeColor }}>{Math.round(score.overall)}</span>
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "'Fraunces', serif", fontSize: compact ? 15 : 17, fontWeight: 600, color: score.gradeColor }}>Journée {score.grade}</span>
+          <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{dateLabelFull(todayISO())}</span>
+        </div>
+        {!compact && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+            {sub.map((s) => (
+              <div key={s.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 11, color: COLOR.inkMuted, width: 190, flexShrink: 0 }}>{s.label}</span>
+                <div style={{ flex: 1, height: 5, background: COLOR.hairline, borderRadius: 3, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${s.value}%`, background: score.gradeColor }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DailyAdvisorButton({ transactions, monthlyObjective, setMonthlyObjective }: {
   transactions: Transaction[]; monthlyObjective: number; setMonthlyObjective: (n: number) => void;
 }) {
@@ -1461,6 +1558,10 @@ function DailyAdvisorButton({ transactions, monthlyObjective, setMonthlyObjectiv
             </div>
 
             <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: 18, WebkitOverflowScrolling: "touch" }}>
+
+              <div style={{ marginBottom: 14 }}>
+                <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} compact />
+              </div>
 
               <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -5259,6 +5360,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} />
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} />
