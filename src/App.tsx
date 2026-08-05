@@ -1315,6 +1315,89 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   return { rows, totalFixe, totalVariable, totalOccasionnelle, avgRevenu, resteAVivre, lookback };
 }
 
+// ============================================================
+// RATIOS FINANCIERS INSTITUTIONNELS — les mêmes repères que ceux utilisés par
+// les banques, le CFPB (régulateur américain de la protection financière) et
+// les cabinets de conseil en gestion de patrimoine, appliqués aux vraies
+// données de l'utilisateur plutôt qu'à des hypothèses.
+// ============================================================
+type RatioVerdict = "sain" | "vigilance" | "risque";
+interface RatioResult { key: string; label: string; value: number; unit: "%" | "mois" | "FCFA"; verdict: RatioVerdict; benchmark: string; explain: string; }
+
+function computeFinancialRatios(
+  transactions: Transaction[], accounts: Account[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean
+) {
+  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture);
+  const netWorth = totalAccountsBalance(accounts, transactions);
+  const essentialMonthly = charges.totalFixe + charges.totalVariable;
+
+  const ratios: RatioResult[] = [];
+
+  // 1. Taux d'épargne — référence académique et institutionnelle : 20% (règle popularisée
+  // par les cabinets de conseil en gestion de patrimoine, ex. Fidelity, et enseignée en
+  // finance personnelle).
+  const tauxEpargne = charges.avgRevenu > 0 ? ((charges.avgRevenu - essentialMonthly) / charges.avgRevenu) * 100 : 0;
+  ratios.push({
+    key: "epargne", label: "Taux d'épargne", value: tauxEpargne, unit: "%",
+    verdict: tauxEpargne >= 20 ? "sain" : tauxEpargne >= 10 ? "vigilance" : "risque",
+    benchmark: "Référence : ≥ 20% (règle largement utilisée en conseil patrimonial)",
+    explain: "Part du revenu mensuel moyen qui n'est ni consommée en charges fixes ni en dépenses variables régulières.",
+  });
+
+  // 2. Ratio charges fixes / revenu — équivalent du "debt-to-income ratio" (DTI) utilisé
+  // par les banques pour l'octroi de crédit. Seuils standards : < 36% sain, 36-43% vigilance,
+  // > 43% zone à risque (repère utilisé aux États-Unis pour les prêts hypothécaires qualifiés).
+  const dti = charges.avgRevenu > 0 ? (charges.totalFixe / charges.avgRevenu) * 100 : 0;
+  ratios.push({
+    key: "dti", label: "Charges fixes / Revenu", value: dti, unit: "%",
+    verdict: dti < 36 ? "sain" : dti <= 43 ? "vigilance" : "risque",
+    benchmark: "Référence bancaire (DTI) : < 36% sain · 36-43% vigilance · > 43% risqué",
+    explain: "Part du revenu mensuel absorbée par les seules charges fixes — l'équivalent du ratio d'endettement utilisé par les banques pour juger de ta capacité à emprunter.",
+  });
+
+  // 3. Ratio logement / revenu — règle des 30% utilisée par les organismes de logement
+  // (ex. HUD aux États-Unis) et la plupart des banques pour évaluer un dossier de prêt.
+  const logementCharge = charges.rows.find((r) => r.poste === "Logement");
+  const logementRatio = logementCharge && charges.avgRevenu > 0 ? (logementCharge.amount / charges.avgRevenu) * 100 : null;
+  if (logementRatio !== null) {
+    ratios.push({
+      key: "logement", label: "Logement / Revenu", value: logementRatio, unit: "%",
+      verdict: logementRatio < 30 ? "sain" : logementRatio <= 40 ? "vigilance" : "risque",
+      benchmark: "Règle des 30% (référence internationale logement) · > 40% considéré à risque",
+      explain: "Part du revenu mensuel absorbée par le seul poste logement.",
+    });
+  }
+
+  // 4. Fonds d'urgence — nombre de mois de charges essentielles couverts par la valeur
+  // nette actuelle. Référence CFPB / conseillers financiers : 3 à 6 mois de dépenses
+  // essentielles en réserve liquide.
+  const moisCouverture = essentialMonthly > 0 ? netWorth / essentialMonthly : 0;
+  ratios.push({
+    key: "urgence", label: "Fonds d'urgence", value: moisCouverture, unit: "mois",
+    verdict: moisCouverture >= 6 ? "sain" : moisCouverture >= 3 ? "vigilance" : "risque",
+    benchmark: "Référence CFPB / conseil patrimonial : 3 à 6 mois de charges essentielles en réserve",
+    explain: "Combien de mois ta valeur nette actuelle couvrirait tes charges fixes + variables régulières si tes revenus s'arrêtaient complètement.",
+  });
+
+  // 5. Concentration des revenus — logique inspirée de l'indice de concentration (type
+  // Herfindahl-Hirschman) utilisé en gestion des risques : une seule source de revenu
+  // dominante = fragilité en cas de choc sur cette source.
+  const lookback = charges.lookback;
+  const revByCat: Record<string, number> = {};
+  transactions.forEach((t) => { if (t.type === "Revenu" && lookback.includes(dateToMonthKey(t.date))) revByCat[t.category] = (revByCat[t.category] || 0) + t.amount; });
+  const totalRevSix = Object.values(revByCat).reduce((a, v) => a + v, 0);
+  const topShare = totalRevSix > 0 ? (Math.max(0, ...Object.values(revByCat)) / totalRevSix) * 100 : 0;
+  const topSource = Object.entries(revByCat).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+  ratios.push({
+    key: "concentration", label: "Concentration des revenus", value: topShare, unit: "%",
+    verdict: topShare < 50 ? "sain" : topShare <= 75 ? "vigilance" : "risque",
+    benchmark: "< 50% diversifié · 50-75% concentré · > 75% forte dépendance à une seule source",
+    explain: `Part du revenu total (6 derniers mois) apportée par la plus grosse source ("${topSource}") — plus c'est élevé, plus un choc sur cette seule source affecterait l'ensemble du budget.`,
+  });
+
+  return { ratios, netWorth, essentialMonthly, topSource, topShare };
+}
+
 // Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
 // plupart des mois, souvent en fin de mois, et qui ne sont pas encore passées ce
 // mois-ci — pour que le conseiller les anticipe plutôt que de les ignorer.
@@ -4364,6 +4447,126 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
   );
 }
 
+// ============================================================
+// DIAGNOSTIC FINANCIER — ratios institutionnels (DTI bancaire, règle des 30%
+// logement, fonds d'urgence CFPB, concentration des revenus) + simulateur de
+// résilience (stress test simplifié : baisse de revenu × durée).
+// ============================================================
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture }: {
+  transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
+}) {
+  const [dropPct, setDropPct] = useState(30);
+  const [duration, setDuration] = useState(6);
+
+  const { ratios, netWorth, essentialMonthly } = useMemo(
+    () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture),
+    [transactions, accounts, chargeOverrides, includeGrundfosVoiture]
+  );
+  const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+
+  const verdictStyle: Record<RatioVerdict, { color: string; bg: string; label: string; icon: any }> = {
+    sain: { color: COLOR.emeraldSoft, bg: "rgba(63,156,122,0.1)", label: "Sain", icon: Check },
+    vigilance: { color: COLOR.goldSoft, bg: "rgba(201,162,39,0.1)", label: "Vigilance", icon: AlertTriangle },
+    risque: { color: COLOR.claySoft, bg: "rgba(193,84,63,0.1)", label: "Risque", icon: AlertTriangle },
+  };
+  const overallVerdict: RatioVerdict = ratios.some((r) => r.verdict === "risque") ? "risque" : ratios.some((r) => r.verdict === "vigilance") ? "vigilance" : "sain";
+
+  // Simulateur de résilience : impact d'une baisse de revenu de X% pendant N mois.
+  const reducedRevenu = charges.avgRevenu * (1 - dropPct / 100);
+  const monthlyDeficit = essentialMonthly - reducedRevenu;
+  const netWorthAfter = netWorth - monthlyDeficit * duration;
+  const monthsToDepletion = monthlyDeficit > 0 ? netWorth / monthlyDeficit : Infinity;
+  const survives = netWorthAfter >= 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, background: `linear-gradient(135deg, ${verdictStyle[overallVerdict].bg} 0%, ${COLOR.surfaceRaised} 70%)`, border: `1px solid ${verdictStyle[overallVerdict].color}`, borderRadius: 14, padding: "16px 20px" }}>
+        <Gauge size={22} color={verdictStyle[overallVerdict].color} />
+        <div>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, fontWeight: 600, color: verdictStyle[overallVerdict].color }}>
+            Diagnostic global : {verdictStyle[overallVerdict].label}
+          </div>
+          <div style={{ fontSize: 12, color: COLOR.inkMuted, marginTop: 2 }}>
+            Basé sur 5 ratios utilisés par les banques, régulateurs financiers et cabinets de conseil en gestion de patrimoine — appliqués à tes vraies données des 6 derniers mois.
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+        {ratios.map((r) => {
+          const s = verdictStyle[r.verdict];
+          const Icon = s.icon;
+          return (
+            <div key={r.key} style={{ background: COLOR.surfaceRaised, border: `1px solid ${s.color}`, borderRadius: 12, padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                <span style={{ fontSize: 12.5, color: COLOR.inkMuted, fontWeight: 600 }}>{r.label}</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: s.color, background: s.bg, borderRadius: 20, padding: "2px 8px" }}>
+                  <Icon size={11} /> {s.label}
+                </span>
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 24, fontWeight: 700, color: s.color, marginBottom: 6 }}>
+                {r.unit === "mois" ? r.value.toFixed(1) : Math.round(r.value)}
+                <span style={{ fontSize: 13, fontWeight: 500, marginLeft: 3 }}>{r.unit === "mois" ? " mois" : r.unit}</span>
+              </div>
+              <div style={{ fontSize: 11, color: COLOR.inkMuted, marginBottom: 4 }}>{r.benchmark}</div>
+              <div style={{ fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.5 }}>{r.explain}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <PanelWithHelp title="Simulateur de résilience" subtitle="Stress test simplifié : que se passerait-il si tes revenus baissaient pendant plusieurs mois ?"
+        explain="Méthode inspirée des tests de résistance utilisés par les régulateurs bancaires (ex. stress tests de la Fed ou de la BCE), adaptée à un budget personnel : on simule une baisse de revenu pendant une durée donnée, charges fixes et variables régulières inchangées, et on regarde ce qu'il resterait de ta valeur nette actuelle à la fin de la période.">
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Baisse de revenu simulée</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.goldSoft, fontWeight: 600 }}>{dropPct}%</span>
+            </div>
+            <input type="range" min={0} max={100} step={5} value={dropPct} onChange={(e) => setDropPct(Number(e.target.value))} style={{ width: "100%", accentColor: COLOR.gold }} />
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Durée</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.goldSoft, fontWeight: 600 }}>{duration} mois</span>
+            </div>
+            <input type="range" min={1} max={24} step={1} value={duration} onChange={(e) => setDuration(Number(e.target.value))} style={{ width: "100%", accentColor: COLOR.gold }} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginTop: 4 }}>
+            <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Revenu réduit simulé / mois</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: COLOR.ink }}>{fmt(reducedRevenu)} FCFA</div>
+            </div>
+            <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Déficit mensuel pendant le choc</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: monthlyDeficit > 0 ? COLOR.claySoft : COLOR.emeraldSoft }}>
+                {monthlyDeficit > 0 ? `−${fmt(monthlyDeficit)}` : `+${fmt(-monthlyDeficit)}`} FCFA
+              </div>
+            </div>
+            <div style={{ background: COLOR.surface, border: `1px solid ${survives ? COLOR.emerald : COLOR.clay}`, borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Valeur nette après {duration} mois de choc</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: survives ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(netWorthAfter)} FCFA</div>
+            </div>
+            <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Tiendrait combien de temps au total</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: COLOR.ink }}>
+                {monthlyDeficit <= 0 ? "Indéfiniment (pas de déficit)" : isFinite(monthsToDepletion) ? `~${monthsToDepletion.toFixed(1)} mois` : "—"}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ padding: "12px 14px", background: survives ? "rgba(63,156,122,0.08)" : "rgba(193,84,63,0.08)", border: `1px solid ${survives ? COLOR.emerald : COLOR.clay}`, borderRadius: 8, fontSize: 12.5, color: survives ? COLOR.emeraldSoft : COLOR.claySoft, lineHeight: 1.6 }}>
+            {survives
+              ? `Avec une baisse de revenu de ${dropPct}% pendant ${duration} mois, ta valeur nette actuelle absorberait le choc sans être épuisée.`
+              : `Avec une baisse de revenu de ${dropPct}% pendant ${duration} mois, ta valeur nette actuelle serait épuisée avant la fin de la période (~${isFinite(monthsToDepletion) ? monthsToDepletion.toFixed(1) : "?"} mois de marge réelle).`}
+          </div>
+        </div>
+      </PanelWithHelp>
+    </div>
+  );
+}
+
 function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Loan, "id">>({ person: "", amount: 0, dateGiven: "2026_8", status: "En attente", notes: "" });
@@ -6078,7 +6281,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -6106,6 +6309,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "business", label: "Business / Personnel", icon: Briefcase },
     { id: "activites", label: "Activités & Rentabilité", icon: Rocket },
     { id: "charges", label: "Charges Fixes & Variables", icon: CalendarRange },
+    { id: "diagnostic", label: "Diagnostic Financier", icon: Gauge },
     { id: "creances", label: "Créances", icon: HandCoins },
     { id: "comptes", label: "Comptes", icon: Wallet },
     { id: "payees", label: "Bénéficiaires", icon: Users },
@@ -6447,6 +6651,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScope} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivities} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivity} activityCapital={activityCapital} setActivityCapital={setActivityCapital} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoiture} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
