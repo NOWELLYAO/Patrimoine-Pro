@@ -1398,6 +1398,70 @@ function computeFinancialRatios(
   return { ratios, netWorth, essentialMonthly, topSource, topShare };
 }
 
+// ============================================================
+// INDICATEURS ASIATIQUES — cadres de gestion financière personnelle
+// popularisés en Chine, au Japon et à Singapour, distincts des repères
+// occidentaux (banques US/CFPB) déjà présents dans le Diagnostic Financier.
+// ============================================================
+const CN_4321_CATEGORIES = {
+  investissement: ["Bourse", "INVEST SGO", "Épargne", "Achat Terrain Port", "ECO PUMP", "Création Entreprise"],
+  protection: ["Âge D’or Retraite", "Plan Éducation", "Securicompte"],
+};
+const KAKEIBO_CATEGORIES = {
+  survie: ["Logement", "Loyer", "PAYEMENT MAISON", "Aliments", "Santé", "Transport", "Utilitaires", "Enfants & Maman"],
+  optionnel: ["Divertissement", "Shopping", "Vêtements", "Personnel", "Voyage", "VACANCE NESHER"],
+  culture: ["Éducation", "FORMATION", "Abonnements", "Pack Club"],
+  extra: ["Cadeaux", "Invitation", "Ajustement", "Générales", "General"],
+};
+
+function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
+  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture);
+  const lookback = charges.lookback;
+  const avgRevenu = charges.avgRevenu;
+
+  const sumFor = (cats: string[]) => {
+    const total = transactions
+      .filter((t) => t.type === "Dépense" && cats.includes(t.category) && lookback.includes(dateToMonthKey(t.date)))
+      .reduce((a, t) => a + t.amount, 0);
+    return total / lookback.length; // moyenne mensuelle sur la fenêtre
+  };
+
+  // --- Règle chinoise du 4-3-2-1 (家庭资产配置法则), enseignée dans les
+  // certifications chinoises de planification financière (AFP) : 40% investissement,
+  // 30% vie courante, 20% protection/assurance, 10% épargne de précaution liquide.
+  const investMonthly = sumFor(CN_4321_CATEGORIES.investissement);
+  const vieCouranteMonthly = charges.totalFixe + charges.totalVariable - investMonthly; // nécessités hors investissement
+  const protectionMonthly = sumFor(CN_4321_CATEGORIES.protection);
+  const liquideMonthly = Math.max(0, avgRevenu - charges.totalFixe - charges.totalVariable); // reste à vivre non dépensé = épargne implicite
+
+  const pct = (v: number) => (avgRevenu > 0 ? (v / avgRevenu) * 100 : 0);
+  const rule4321 = [
+    { label: "Investissement", value: pct(investMonthly), target: 40 },
+    { label: "Vie courante", value: pct(vieCouranteMonthly), target: 30 },
+    { label: "Protection / assurance", value: pct(protectionMonthly), target: 20 },
+    { label: "Épargne de précaution", value: pct(liquideMonthly), target: 10 },
+  ];
+
+  // --- Taux d'épargne norme asiatique : les ménages chinois épargnent
+  // traditionnellement 30 à 45% de leur revenu (contre ~20% recommandé en Occident) —
+  // une des raisons souvent citées du haut niveau d'épargne des ménages en Chine.
+  const tauxEpargne = avgRevenu > 0 ? ((avgRevenu - charges.totalFixe - charges.totalVariable) / avgRevenu) * 100 : 0;
+
+  // --- Kakeibo (家計簿), méthode budgétaire japonaise (Hani Motoko, 1904),
+  // toujours largement utilisée en Asie : classer chaque dépense en 4 catégories
+  // et se poser 4 questions (combien j'ai / combien je veux épargner / combien je
+  // dépense / comment je peux m'améliorer) plutôt que de suivre un simple total.
+  const kakeiboTotal = sumFor(KAKEIBO_CATEGORIES.survie) + sumFor(KAKEIBO_CATEGORIES.optionnel) + sumFor(KAKEIBO_CATEGORIES.culture) + sumFor(KAKEIBO_CATEGORIES.extra) || 1;
+  const kakeibo = [
+    { label: "Survie (nécessités)", key: "survie", value: sumFor(KAKEIBO_CATEGORIES.survie) },
+    { label: "Optionnel (envies)", key: "optionnel", value: sumFor(KAKEIBO_CATEGORIES.optionnel) },
+    { label: "Culture (développement)", key: "culture", value: sumFor(KAKEIBO_CATEGORIES.culture) },
+    { label: "Extra (imprévus)", key: "extra", value: sumFor(KAKEIBO_CATEGORIES.extra) },
+  ].map((k) => ({ ...k, pct: (k.value / kakeiboTotal) * 100 }));
+
+  return { rule4321, tauxEpargne, kakeibo, avgRevenu };
+}
+
 // Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
 // plupart des mois, souvent en fin de mois, et qui ne sont pas encore passées ce
 // mois-ci — pour que le conseiller les anticipe plutôt que de les ignorer.
@@ -4463,6 +4527,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
     [transactions, accounts, chargeOverrides, includeGrundfosVoiture]
   );
   const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+  const asian = useMemo(() => computeAsianIndicators(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
 
   const verdictStyle: Record<RatioVerdict, { color: string; bg: string; label: string; icon: any }> = {
     sain: { color: COLOR.emeraldSoft, bg: "rgba(63,156,122,0.1)", label: "Sain", icon: Check },
@@ -4560,6 +4625,67 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
             {survives
               ? `Avec une baisse de revenu de ${dropPct}% pendant ${duration} mois, ta valeur nette actuelle absorberait le choc sans être épuisée.`
               : `Avec une baisse de revenu de ${dropPct}% pendant ${duration} mois, ta valeur nette actuelle serait épuisée avant la fin de la période (~${isFinite(monthsToDepletion) ? monthsToDepletion.toFixed(1) : "?"} mois de marge réelle).`}
+          </div>
+        </div>
+      </PanelWithHelp>
+
+      <PanelWithHelp title="Indicateurs asiatiques de gestion financière" subtitle="Règle chinoise du 4-3-2-1, norme d'épargne chinoise, méthode Kakeibo japonaise"
+        explain="Ces cadres viennent de traditions de gestion financière personnelle distinctes des repères bancaires occidentaux ci-dessus. La règle du 4-3-2-1 (家庭资产配置法则) est enseignée dans les certifications chinoises de planification financière (AFP Chine). Le taux d'épargne chinois reflète le niveau d'épargne traditionnellement très élevé des ménages en Chine (30 à 45%, contre ~20% recommandé en Occident). Le Kakeibo (家計簿) est une méthode budgétaire japonaise créée en 1904 par Hani Motoko, toujours largement utilisée aujourd'hui — elle classe chaque dépense en 4 catégories plutôt que de suivre un simple total, pour favoriser la réflexion plutôt que le seul chiffrage.">
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, marginBottom: 4 }}>Règle chinoise du 4-3-2-1 (allocation du revenu mensuel)</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Cible : 40% investissement · 30% vie courante · 20% protection/assurance · 10% épargne de précaution</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {asian.rule4321.map((r) => {
+                const diff = r.value - r.target;
+                const aligned = Math.abs(diff) <= 5;
+                const color = aligned ? COLOR.emeraldSoft : Math.abs(diff) <= 15 ? COLOR.goldSoft : COLOR.claySoft;
+                return (
+                  <div key={r.label}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 12.5 }}>
+                      <span style={{ color: COLOR.ink }}>{r.label}</span>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", color }}>{r.value.toFixed(0)}% <span style={{ color: COLOR.inkMuted }}>(cible {r.target}%)</span></span>
+                    </div>
+                    <div style={{ position: "relative", height: 8, background: COLOR.hairline, borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ position: "absolute", left: `${r.target}%`, top: 0, bottom: 0, width: 2, background: COLOR.inkMuted, zIndex: 2 }} />
+                      <div style={{ height: "100%", width: `${Math.min(100, r.value)}%`, background: color }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink }}>Taux d'épargne — norme chinoise</div>
+                <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>Référence : 30 à 45% (moyenne des ménages chinois) — nettement plus exigeante que le standard occidental de 20%</div>
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, fontWeight: 700, color: asian.tauxEpargne >= 30 ? COLOR.emeraldSoft : asian.tauxEpargne >= 20 ? COLOR.goldSoft : COLOR.claySoft }}>
+                {asian.tauxEpargne.toFixed(0)}%
+              </div>
+            </div>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 20 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, marginBottom: 4 }}>Répartition Kakeibo (méthode japonaise)</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Chaque dépense classée en 4 questions plutôt qu'un simple total — moyenne mensuelle sur 6 mois</div>
+            <div style={{ display: "flex", height: 10, borderRadius: 5, overflow: "hidden", marginBottom: 10 }}>
+              {asian.kakeibo.map((k, i) => (
+                <div key={k.key} style={{ width: `${k.pct}%`, background: [COLOR.slateBlue, COLOR.clay, COLOR.gold, COLOR.emerald][i] }} title={`${k.label} : ${k.pct.toFixed(0)}%`} />
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+              {asian.kakeibo.map((k, i) => (
+                <div key={k.key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: [COLOR.slateBlue, COLOR.clay, COLOR.gold, COLOR.emerald][i], flexShrink: 0 }} />
+                  <span style={{ color: COLOR.inkMuted }}>{k.label}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600, marginLeft: "auto" }}>{k.pct.toFixed(0)}%</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </PanelWithHelp>
