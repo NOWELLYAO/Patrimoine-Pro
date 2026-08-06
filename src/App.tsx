@@ -2996,9 +2996,14 @@ function CategoryManagementTab({
         confirmLabel={catSheet?.mode === "new" ? "Créer" : "Renommer"}
         accentColor={accentColor}
         onClose={() => setCatSheet(null)}
-        showGroup={catSheet?.mode === "new"}
+        showGroup
         initialGroup={catSheet?.mode === "rename" && catSheet.oldName ? categoryGroups[catSheet.oldName] : undefined}
-        onSave={(value, group) => { if (catSheet?.mode === "new") addCategory(value, group); else if (catSheet?.oldName) renameCategory(catSheet.oldName, value); }}
+        onSave={(value, group) => {
+          if (catSheet?.mode === "new") { addCategory(value, group); return; }
+          if (!catSheet?.oldName) return;
+          renameCategory(catSheet.oldName, value);
+          if (group) setCategoryGroups({ ...categoryGroups, [value]: group });
+        }}
       />
       <CategoryNameSheet
         open={!!subSheet}
