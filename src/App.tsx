@@ -969,6 +969,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
   const [subcategory, setSubcategory] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [account, setAccount] = useState("");
+  const [note, setNote] = useState("");
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -978,6 +979,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
       setDate(transaction.date); setTime(transaction.time || nowTime()); setType(transaction.type);
       setCategory(transaction.category); setSubcategory(transaction.subcategory || "");
       setAmount(transaction.amount); setAccount(transaction.account || defaultQuickAccount(accounts));
+      setNote(transaction.note || "");
       setSaved(false);
     }
   }, [open, transaction]);
@@ -992,7 +994,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, note: note || undefined });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
@@ -1038,6 +1040,10 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
               onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
               onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
               style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 42, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 260 }} />
+            <input
+              value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ajouter une note"
+              style={{ position: "relative", background: "transparent", border: "none", outline: "none", marginTop: 10, color: COLOR.inkMuted, fontSize: 13.5, fontFamily: "'Inter', sans-serif", textAlign: "center", width: "100%", maxWidth: 320 }}
+            />
           </div>
 
           {/* Compte / Catégorie */}
@@ -5846,9 +5852,10 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                     <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>
                       {dateLabelFull(t.date)}{t.time && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.time}</div>}
                     </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}` }}>
+                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, maxWidth: 260 }}>
                       {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
                       {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
+                      {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</div>}
                     </td>
                     <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
                     <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
