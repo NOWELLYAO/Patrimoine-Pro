@@ -6335,6 +6335,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [quickType, setQuickType] = useState<TxType>("Dépense");
   const [quickAmount, setQuickAmount] = useState<number | "">("");
   const [quickAccount, setQuickAccount] = useState(() => defaultQuickAccount(accounts));
+  const [quickNote, setQuickNote] = useState("");
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -6360,7 +6361,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const quickDateEntries = withGroup.filter((t) => t.date === quickDate).sort((a, b) => b.id.localeCompare(a.id));
 
   const resetForm = () => {
-    setQuickAmount(""); setQuickTime(nowTime()); setEditingId(null);
+    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null);
   };
 
   const submit = () => {
@@ -6368,10 +6369,10 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     if (editingId) {
       setTransactions(transactions.map((t) => t.id === editingId ? {
         ...t, date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined,
-        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined,
+        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, note: quickNote || undefined,
       } : t));
     } else {
-      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined }]);
+      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, note: quickNote || undefined }]);
     }
     resetForm();
     setJustAdded(true);
@@ -6387,6 +6388,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     setQuickSubcategory(t.subcategory || "");
     setQuickAmount(t.amount);
     setQuickAccount(t.account || defaultQuickAccount(accounts));
+    setQuickNote(t.note || "");
   };
 
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
@@ -6449,6 +6451,10 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                   onChange={(e) => setQuickAmount(e.target.value === "" ? "" : Number(e.target.value))}
                   onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                   style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 42, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 260 }} />
+                <input
+                  value={quickNote} onChange={(e) => setQuickNote(e.target.value)} placeholder="Ajouter une note"
+                  style={{ position: "relative", background: "transparent", border: "none", outline: "none", marginTop: 10, color: COLOR.inkMuted, fontSize: 13.5, fontFamily: "'Inter', sans-serif", textAlign: "center", width: "100%", maxWidth: 320 }}
+                />
               </div>
 
               {/* Compte / Catégorie */}
@@ -6500,12 +6506,13 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {quickDateEntries.map((t) => (
             <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: editingId === t.id ? "rgba(201,162,39,0.08)" : COLOR.surfaceRaised, border: editingId === t.id ? `1px solid ${COLOR.gold}` : "1px solid transparent", borderRadius: 6 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, width: 38 }}>{t.time}</span>}
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block" }} />
-                <span style={{ fontSize: 12.5 }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</span>
-                <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{t.type}</span>
-                {t.account && <span style={{ fontSize: 10.5, color: COLOR.slateBlueSoft }}>{t.account}</span>}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, width: 38, flexShrink: 0 }}>{t.time}</span>}
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block", flexShrink: 0 }} />
+                <span style={{ fontSize: 12.5, whiteSpace: "nowrap" }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</span>
+                <span style={{ fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{t.type}</span>
+                {t.account && <span style={{ fontSize: 10.5, color: COLOR.slateBlueSoft, flexShrink: 0 }}>{t.account}</span>}
+                {t.note && <span style={{ fontSize: 11, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</span>}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)}</span>
