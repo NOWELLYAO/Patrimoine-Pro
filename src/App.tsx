@@ -733,6 +733,42 @@ function computeHealthScore(tauxEpargne: number, pctNonProd: number, monthlyReve
   return { savingsScore, nonProdScore, stabilityScore, overall, grade, gradeColor };
 }
 
+// Rapport narratif du Score de santé financière — explique les 3 composantes
+// (taux d'épargne, poids du non-productif, stabilité des revenus) avec leurs
+// vraies valeurs (pas juste le score sur 100), des exemples concrets, et une
+// synthèse qui identifie la composante la plus faible.
+function generateHealthScoreNarrative(tauxEpargne: number, pctNonProd: number, cv: number, health: { savingsScore: number; nonProdScore: number; stabilityScore: number; overall: number; grade: string }) {
+  const sections = [
+    {
+      key: "savings", title: "Taux d'épargne", you: tauxEpargne, score: health.savingsScore, unit: "%",
+      definition: "Part de ton revenu qui reste une fois toutes les dépenses de la période déduites — la référence utilisée ici est 20%, un repère courant en conseil patrimonial.",
+      examples: ["Argent non dépensé en fin de mois", "Virement vers une épargne", "Investissement du surplus"],
+      verdict: tauxEpargne >= 20 ? "Tu es au-dessus de la référence — c'est un moteur solide pour ta valeur nette." : tauxEpargne >= 10 ? "Tu es sous la référence de 20%, avec de la marge pour progresser." : "Ton taux d'épargne est faible — la quasi-totalité de ton revenu part en dépenses.",
+    },
+    {
+      key: "nonprod", title: "Maîtrise du non-productif", you: pctNonProd, score: health.nonProdScore, unit: "%",
+      definition: "Part de ton revenu partie dans des dépenses classées « Non-productif » — pas indispensables, pas un investissement.",
+      examples: ["Divertissement", "Shopping non essentiel", "Sorties", "Cadeaux", "Abonnements de loisir"],
+      verdict: pctNonProd <= 15 ? "Ces dépenses restent contenues — un bon signe de discipline budgétaire." : pctNonProd <= 30 ? "Ces dépenses prennent une place notable — un levier d'économie réaliste si besoin." : "Ces dépenses représentent une part importante de ton revenu — c'est probablement le levier le plus rapide pour augmenter ton épargne.",
+    },
+    {
+      key: "stability", title: "Stabilité des revenus", you: cv * 100, score: health.stabilityScore, unit: "% de variation",
+      definition: "Mesure à quel point tes revenus varient d'un mois à l'autre (coefficient de variation) — plus c'est bas, plus tes revenus sont prévisibles.",
+      examples: ["Revenu fixe et régulier = stable", "Activité freelance ou saisonnière = plus variable", "Commissions ou primes ponctuelles = pics irréguliers"],
+      verdict: cv <= 0.25 ? "Tes revenus sont réguliers d'un mois à l'autre, ce qui facilite la planification." : cv <= 0.5 ? "Tes revenus varient modérément — prévoir une marge de sécurité reste utile." : "Tes revenus varient beaucoup d'un mois à l'autre — difficile à planifier sans réserve de précaution solide.",
+    },
+  ];
+
+  const weakest = [...sections].sort((a, b) => a.score - b.score)[0];
+  const recommendation = `La composante la plus faible de ton score est "${weakest.title}" (${weakest.score.toFixed(0)}/100). ${
+    weakest.key === "savings" ? "Augmenter ce taux, même progressivement, aurait le plus d'effet sur ton score global."
+    : weakest.key === "nonprod" ? "Réduire un peu ces dépenses non-productives aurait le plus d'effet sur ton score global."
+    : "Constituer une réserve de précaution pour absorber les mois plus faibles aiderait à compenser cette irrégularité."
+  }`;
+
+  return { sections, recommendation };
+}
+
 // Statistiques robustes : la médiane et l'écart absolu médian (MAD, mis à l'échelle
 // pour être comparable à un écart-type) sont beaucoup moins sensibles à UN mois
 // exceptionnel qu'une simple moyenne + écart-type classiques.
@@ -1476,6 +1512,65 @@ function computeFinancialRatios(
   return { ratios, netWorth, essentialMonthly, topSource, topShare };
 }
 
+// Rapport narratif pour les 5 ratios institutionnels (DTI bancaire, règle des
+// 30% logement, fonds d'urgence CFPB, concentration des revenus, taux d'épargne)
+// — même esprit que le rapport asiatique, mais avec un contenu propre à chaque
+// ratio (définition, exemples concrets, verdict basé sur le seuil déjà calculé).
+function generateRatiosNarrative(ratios: RatioResult[]): { sections: { key: string; title: string; you: number; unit: string; definition: string; examples: string[]; verdict: string; benchmark: string }[]; checks: { ok: boolean; text: string }[]; recommendation: string } {
+  const meta: Record<string, { definition: string; examples: string[]; goodPhrase: string; okPhrase: string; badPhrase: string }> = {
+    epargne: {
+      definition: "Part de ton revenu mensuel qui n'est ni consommée en charges fixes ni en dépenses variables régulières — donc disponible pour être épargnée ou investie.",
+      examples: ["Virement automatique vers une épargne", "Argent non dépensé en fin de mois", "Provision pour un projet futur"],
+      goodPhrase: "C'est un très bon niveau, au-dessus de la référence de conseil patrimonial (20%).",
+      okPhrase: "Tu es dans une zone correcte mais avec une marge de progression avant d'atteindre un niveau confortable.",
+      badPhrase: "C'est un niveau bas — la plupart de ton revenu part en charges, laissant peu de marge pour te constituer un patrimoine.",
+    },
+    dti: {
+      definition: "Part de ton revenu absorbée par tes seules charges fixes — l'équivalent du ratio d'endettement (debt-to-income) que les banques utilisent pour juger de ta capacité à emprunter.",
+      examples: ["Mensualités de prêt", "Loyer fixe", "Abonnements obligatoires", "Remboursements de dettes"],
+      goodPhrase: "Tes charges fixes laissent une vraie marge de manœuvre sur ton revenu.",
+      okPhrase: "Tes charges fixes prennent une part significative de ton revenu — à surveiller si de nouvelles charges s'ajoutent.",
+      badPhrase: "Tes charges fixes absorbent une très grosse part de ton revenu — une banque considérerait probablement ce niveau comme risqué pour un nouveau prêt.",
+    },
+    logement: {
+      definition: "Part de ton revenu consacrée uniquement à ton logement.",
+      examples: ["Loyer", "Mensualité de prêt immobilier", "Charges de copropriété"],
+      goodPhrase: "Ton logement reste dans une proportion saine de ton budget.",
+      okPhrase: "Ton logement pèse plus lourd que la référence habituelle, sans être alarmant.",
+      badPhrase: "Ton logement absorbe une part très importante de ton revenu, ce qui réduit d'autant ta capacité à épargner ou investir ailleurs.",
+    },
+    urgence: {
+      definition: "Combien de mois ta valeur nette actuelle couvrirait tes charges essentielles si tes revenus s'arrêtaient complètement.",
+      examples: ["Perte d'emploi", "Accident ou maladie", "Panne majeure", "Réparation imprévue importante"],
+      goodPhrase: "Tu as un vrai coussin de sécurité en cas de coup dur.",
+      okPhrase: "Tu as un début de réserve, mais elle ne couvrirait qu'une partie d'un imprévu prolongé.",
+      badPhrase: "Ta réserve de précaution est très faible — un imprévu sérieux (perte de revenu, urgence médicale) te mettrait rapidement en difficulté.",
+    },
+    concentration: {
+      definition: "Part de ton revenu total qui provient d'une seule et même source — plus c'est élevé, plus un choc sur cette source affecterait tout ton budget d'un coup.",
+      examples: ["Salaire d'un seul employeur", "Un seul client majeur", "Une seule activité locative"],
+      goodPhrase: "Tes revenus sont bien diversifiés entre plusieurs sources.",
+      okPhrase: "Une source domine sans être totalement exclusive — un vrai plan B existe si elle faiblit.",
+      badPhrase: "Une seule source représente l'essentiel de ton revenu — si elle s'arrête, il n'y a presque rien pour compenser.",
+    },
+  };
+
+  const sections = ratios.map((r) => {
+    const m = meta[r.key];
+    const verdict = r.verdict === "sain" ? m.goodPhrase : r.verdict === "vigilance" ? m.okPhrase : m.badPhrase;
+    return { key: r.key, title: r.label, you: r.value, unit: r.unit, definition: m.definition, examples: m.examples, verdict, benchmark: r.benchmark };
+  });
+
+  const checks = ratios.map((r) => ({ ok: r.verdict === "sain", text: `${r.label} : ${r.unit === "mois" ? r.value.toFixed(1) + " mois" : Math.round(r.value) + r.unit} — ${r.verdict === "sain" ? "sain" : r.verdict === "vigilance" ? "à surveiller" : "en risque"}.` }));
+
+  const worstRatio = ratios.filter((r) => r.verdict !== "sain").sort((a, b) => (a.verdict === "risque" ? -1 : 1) - (b.verdict === "risque" ? -1 : 1))[0];
+  const recommendation = worstRatio
+    ? `Le point le plus urgent à traiter est "${worstRatio.label}" (${worstRatio.unit === "mois" ? worstRatio.value.toFixed(1) + " mois" : Math.round(worstRatio.value) + worstRatio.unit}) — ${worstRatio.benchmark.toLowerCase()}. C'est ce ratio qui, une fois amélioré, réduirait le plus ta fragilité financière globale.`
+    : "Tous tes ratios institutionnels sont dans la zone saine — la priorité devient de consolider cette position plutôt que de corriger un point faible.";
+
+  return { sections, checks, recommendation };
+}
+
 // ============================================================
 // INDICATEURS ASIATIQUES — cadres de gestion financière personnelle
 // popularisés en Chine, au Japon et à Singapour, distincts des repères
@@ -1548,6 +1643,115 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
   ].map((k) => ({ ...k, pct: (k.value / kakeiboTotal) * 100 }));
 
   return { rule4321, tauxEpargne, kakeibo, avgRevenu };
+}
+
+// ============================================================
+// RAPPORT NARRATIF DÉTAILLÉ — transforme les chiffres bruts des indicateurs
+// asiatiques en un vrai texte explicatif : définition de chaque catégorie,
+// exemples concrets, comparaison chiffrée à l'objectif, verdict dynamique,
+// puis une synthèse globale avec recommandation. Généré à partir des données
+// réelles à chaque ouverture, pas un texte figé.
+// ============================================================
+interface NarrativeSection { title: string; you: number; target: number; direction: "plus_is_better" | "less_is_better"; definition: string; examples: string[]; verdict: string; }
+
+function verdictFor(value: number, target: number, direction: "plus_is_better" | "less_is_better"): string {
+  const gap = direction === "plus_is_better" ? value - target : target - value;
+  if (gap >= -3) {
+    return direction === "plus_is_better" && value > target + 5
+      ? "Tu dépasses largement l'objectif."
+      : "Tu es proche de l'objectif — c'est l'une de tes meilleures catégories.";
+  }
+  if (gap >= -15) return "Tu es en dessous de l'objectif, avec une marge de progression réelle.";
+  return "Tu es très loin de l'objectif.";
+}
+
+function generateAsian4321Narrative(rule4321: { label: string; value: number; target: number }[]): NarrativeSection[] {
+  const defs: Record<string, { definition: string; examples: string[]; direction: "plus_is_better" | "less_is_better" }> = {
+    "Investissement": {
+      definition: "Cela correspond à l'argent placé pour créer de la richesse à long terme, pas dépensé.",
+      examples: ["Actions", "Immobilier", "ETF", "Entreprise", "Terrain", "Obligations", "Parts dans une société"],
+      direction: "plus_is_better",
+    },
+    "Vie courante": {
+      definition: "Ce sont les dépenses nécessaires pour vivre au quotidien.",
+      examples: ["Nourriture", "Carburant", "Restaurants", "Vêtements", "Sorties", "Téléphone", "Internet", "Abonnements", "Loisirs", "Cadeaux"],
+      direction: "less_is_better",
+    },
+    "Protection / assurance": {
+      definition: "Ce sont les dépenses qui protègent ton avenir en cas de coup dur.",
+      examples: ["Assurance maladie", "Assurance vie", "Retraite", "Assurance habitation", "Assurance automobile", "Assurance professionnelle"],
+      direction: "plus_is_better",
+    },
+    "Épargne de précaution": {
+      definition: "C'est l'argent qui reste disponible en cas d'imprévu.",
+      examples: ["Accident", "Maladie", "Perte d'emploi", "Panne de voiture", "Grosse réparation"],
+      direction: "plus_is_better",
+    },
+  };
+  return rule4321.map((r) => {
+    const d = defs[r.label] || { definition: "", examples: [], direction: "plus_is_better" as const };
+    return { title: r.label, you: r.value, target: r.target, direction: d.direction, definition: d.definition, examples: d.examples, verdict: verdictFor(r.value, r.target, d.direction) };
+  });
+}
+
+function generateKakeiboNarrative(kakeibo: { label: string; key: string; pct: number }[]): NarrativeSection[] {
+  const defs: Record<string, { definition: string; examples: string[]; target: number; commentary: (pct: number) => string }> = {
+    survie: {
+      definition: "Ce sont les dépenses indispensables pour vivre.",
+      examples: ["Loyer", "Alimentation", "Eau", "Électricité", "Carburant pour aller travailler", "Transport"],
+      target: 50,
+      commentary: (pct) => (pct <= 55 ? "C'est raisonnable." : "C'est élevé pour un poste censé être incompressible."),
+    },
+    optionnel: {
+      definition: "Ce sont les envies, pas les besoins.",
+      examples: ["Restaurants", "Shopping", "Netflix", "Sorties", "Gadgets", "Voyages loisirs"],
+      target: 20,
+      commentary: (pct) => (pct >= 30 ? "C'est presque autant que les dépenses essentielles — un vrai levier d'économie si besoin." : "C'est sous contrôle."),
+    },
+    culture: {
+      definition: "Cette catégorie concerne l'investissement dans ton propre développement.",
+      examples: ["Livres", "Formations", "MBA", "Cours en ligne", "Conférences", "Apprentissage"],
+      target: 10,
+      commentary: (pct) => (pct <= 5 ? "Pour quelqu'un qui souhaite progresser professionnellement, c'est assez faible." : "C'est un niveau correct d'investissement sur toi-même."),
+    },
+    extra: {
+      definition: "Cette catégorie regroupe les dépenses exceptionnelles ou non planifiées.",
+      examples: ["Réparations", "Cadeaux", "Urgences", "Frais imprévus", "Dépenses non planifiées"],
+      target: 15,
+      commentary: (pct) => (pct >= 25 ? "C'est élevé — cela signifie probablement beaucoup de dépenses inhabituelles, ou que certaines dépenses sont mal catégorisées dans l'app." : "C'est un niveau normal d'imprévus."),
+    },
+  };
+  return kakeibo.map((k) => {
+    const d = defs[k.key];
+    return { title: k.label, you: k.pct, target: d.target, direction: "less_is_better" as const, definition: d.definition, examples: d.examples, verdict: d.commentary(k.pct) };
+  });
+}
+
+function generateFinancialProfileSynthesis(rule4321Narr: NarrativeSection[], tauxEpargne: number, kakeiboNarr: NarrativeSection[]): { checks: { ok: boolean; text: string }[]; recommendation: string } {
+  const invest = rule4321Narr.find((r) => r.title === "Investissement");
+  const vieCourante = rule4321Narr.find((r) => r.title === "Vie courante");
+  const protection = rule4321Narr.find((r) => r.title === "Protection / assurance");
+  const extra = kakeiboNarr.find((r) => r.title.startsWith("Extra"));
+
+  const checks: { ok: boolean; text: string }[] = [];
+  checks.push({ ok: tauxEpargne >= 20, text: `Capacité d'épargne ${tauxEpargne >= 20 ? "correcte" : "insuffisante"} (${tauxEpargne.toFixed(0)}% selon l'indicateur de l'app).` });
+  if (invest) checks.push({ ok: invest.you >= invest.target - 5, text: `Investissement ${invest.you >= invest.target - 5 ? "à un niveau sain" : `très faible (${invest.you.toFixed(0)}% contre un objectif de ${invest.target}%)`}.` });
+  if (vieCourante) checks.push({ ok: vieCourante.you <= vieCourante.target + 10, text: vieCourante.you <= vieCourante.target + 10 ? "Dépenses de vie courante maîtrisées." : `Dépenses de vie courante beaucoup trop élevées (${vieCourante.you.toFixed(0)}% contre ${vieCourante.target}%).` });
+  if (protection) checks.push({ ok: protection.you >= protection.target - 8, text: protection.you >= protection.target - 8 ? "Protection financière correcte." : `Très peu de protection financière (${protection.you.toFixed(0)}%).` });
+  if (extra) checks.push({ ok: extra.you < 20, text: extra.you >= 20 ? `Les dépenses imprévues représentent une part importante (${extra.you.toFixed(0)}%), signe possible d'un manque de planification.` : "Dépenses imprévues sous contrôle." });
+
+  const worst = [invest, vieCourante, protection].filter((s): s is NarrativeSection => !!s)
+    .sort((a, b) => {
+      const gapA = a.direction === "plus_is_better" ? a.target - a.you : a.you - a.target;
+      const gapB = b.direction === "plus_is_better" ? b.target - b.you : b.you - b.target;
+      return gapB - gapA;
+    })[0];
+
+  const recommendation = worst
+    ? `Si tu souhaites utiliser cette analyse pour améliorer ta situation, l'objectif principal serait de ${worst.title === "Vie courante" ? "réduire progressivement les dépenses de vie courante et les imprévus" : `renforcer "${worst.title}"`} afin de libérer davantage de ressources pour l'investissement — la catégorie qui a le plus d'impact sur la création de patrimoine à long terme.`
+    : "Ta répartition est globalement équilibrée par rapport aux références utilisées ici.";
+
+  return { checks, recommendation };
 }
 
 // Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
@@ -2122,6 +2326,60 @@ function HeatmapCalendar({ filtered }: { filtered: any[] }) {
 // ============================================================
 // APERÇU TAB (KPIs + valeur nette + revenu/dépense + groupes + santé + comparaison)
 // ============================================================
+// Fiche de lecture pour le rapport narratif du Score de santé financière.
+function HealthScoreNarrativeSheet({ open, onClose, tauxEpargne, pctNonProd, cv, health }: {
+  open: boolean; onClose: () => void; tauxEpargne: number; pctNonProd: number; cv: number;
+  health: { savingsScore: number; nonProdScore: number; stabilityScore: number; overall: number; grade: string; gradeColor: string };
+}) {
+  if (!open) return null;
+  const report = generateHealthScoreNarrative(tauxEpargne, pctNonProd, cv, health);
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 480, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 620, maxHeight: "90vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, color: COLOR.ink }}>Rapport détaillé — Score de santé financière</div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+        </div>
+        <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "20px 22px", WebkitOverflowScrolling: "touch" }}>
+          <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 20 }}>
+            Ton score global est de <strong style={{ color: health.gradeColor }}>{health.overall.toFixed(0)}/100 ({health.grade})</strong>, calculé comme la moyenne de 3 composantes. Voici ce que chacune signifie concrètement.
+          </p>
+          {report.sections.map((s) => {
+            const color = s.score >= 70 ? COLOR.emeraldSoft : s.score >= 40 ? COLOR.goldSoft : COLOR.claySoft;
+            return (
+              <div key={s.key} style={{ marginBottom: 22 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
+                  <span style={{ fontFamily: "'Fraunces', serif", fontSize: 15.5, color: COLOR.ink }}>{s.title}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color }}>{s.you.toFixed(0)}{s.unit} · score {s.score.toFixed(0)}/100</span>
+                </div>
+                <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, margin: "4px 0 8px 0" }}>{s.definition}</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                  {s.examples.map((ex) => (
+                    <span key={ex} style={{ fontSize: 10.5, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "3px 10px" }}>{ex}</span>
+                  ))}
+                </div>
+                <div style={{ fontSize: 12.5, color, fontWeight: 600, display: "flex", alignItems: "flex-start", gap: 6 }}>
+                  <ArrowRight size={13} style={{ flexShrink: 0, marginTop: 2 }} /> {s.verdict}
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 18, marginTop: 4 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLOR.ink, marginBottom: 10 }}>Ce qui ferait le plus progresser ton score</div>
+            <div style={{ padding: "12px 14px", background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+              {report.recommendation}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
   filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[];
   chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean; monthlyObjective: number;
@@ -2145,6 +2403,8 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
 
   const monthlyRevenues = byMonth.map((m) => m.revenus);
   const health = computeHealthScore(tauxEpargne, pctNonProd, monthlyRevenues);
+  const healthCv = mean(monthlyRevenues) > 0 ? stdev(monthlyRevenues) / mean(monthlyRevenues) : 1;
+  const [healthNarrativeOpen, setHealthNarrativeOpen] = useState(false);
 
   const groupBreakdown = useMemo(() => {
     const m: Record<string, number> = {};
@@ -2180,7 +2440,15 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
         <Kpi label="Dépense moyenne / mois" value={fmt(totalDepenses / monthsInRange)} tone={COLOR.claySoft} />
       </div>
 
-      <Panel title="Score de santé financière" subtitle="Composite : taux d'épargne, poids du non-productif, stabilité des revenus">
+      <Panel title="Score de santé financière" subtitle="Composite : taux d'épargne, poids du non-productif, stabilité des revenus"
+        right={
+          <button onClick={() => setHealthNarrativeOpen(true)} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
+            borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer",
+          }}>
+            <BookOpen size={13} /> Rapport détaillé
+          </button>
+        }>
         <div style={{ display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
           <div style={{ position: "relative", width: 130, height: 130, flexShrink: 0 }}>
             <svg width={130} height={130}>
@@ -2212,6 +2480,8 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
           </div>
         </div>
       </Panel>
+
+      <HealthScoreNarrativeSheet open={healthNarrativeOpen} onClose={() => setHealthNarrativeOpen(false)} tauxEpargne={tauxEpargne} pctNonProd={pctNonProd} cv={healthCv} health={health} />
 
       {cur && (
         <Panel title="Comparaison période sur période" subtitle="Dernier mois filtré vs mois précédent / vs même mois l'an dernier">
@@ -5437,11 +5707,158 @@ function RapprochementTab({ transactions, setTransactions, accounts }: {
   );
 }
 
+// Fiche de lecture pour le rapport narratif détaillé (4-3-2-1 + Kakeibo +
+// synthèse) — ouverte à la demande pour ne pas alourdir la page.
+function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }: {
+  open: boolean; onClose: () => void;
+  rule4321: { label: string; value: number; target: number }[]; tauxEpargne: number; kakeibo: { label: string; key: string; pct: number }[];
+}) {
+  if (!open) return null;
+  const narr4321 = generateAsian4321Narrative(rule4321);
+  const narrKakeibo = generateKakeiboNarrative(kakeibo);
+  const synthesis = generateFinancialProfileSynthesis(narr4321, tauxEpargne, narrKakeibo);
+
+  const Section = ({ s }: { s: NarrativeSection }) => {
+    const color = s.verdict.includes("loin") || s.verdict.includes("élevé") || s.verdict.includes("faible")
+      ? COLOR.claySoft : s.verdict.includes("marge de progression") ? COLOR.goldSoft : COLOR.emeraldSoft;
+    return (
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
+          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 15.5, color: COLOR.ink }}>{s.title}</span>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: COLOR.inkMuted }}>Toi : <strong style={{ color }}>{s.you.toFixed(0)}%</strong> · Objectif : {s.target}%</span>
+        </div>
+        <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, margin: "4px 0 8px 0" }}>{s.definition}</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {s.examples.map((ex) => (
+            <span key={ex} style={{ fontSize: 10.5, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "3px 10px" }}>{ex}</span>
+          ))}
+        </div>
+        <div style={{ fontSize: 12.5, color, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+          <ArrowRight size={13} /> {s.verdict}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 480, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 620, maxHeight: "90vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, color: COLOR.ink }}>Rapport détaillé — Indicateurs asiatiques</div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+        </div>
+        <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "20px 22px", WebkitOverflowScrolling: "touch" }}>
+
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLOR.goldSoft, marginBottom: 4 }}>1. Règle chinoise du 4-3-2-1</div>
+          <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 18 }}>
+            Cette règle indique comment chaque revenu mensuel devrait idéalement être réparti : 40% investissement, 30% vie courante, 20% protection, 10% épargne de précaution. Voici comment tes chiffres se comparent.
+          </p>
+          {narr4321.map((s) => <Section key={s.title} s={s} />)}
+
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLOR.goldSoft, marginBottom: 4, marginTop: 8 }}>2. Taux d'épargne — norme chinoise</div>
+          <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 22 }}>
+            Ton taux d'épargne est de <strong style={{ color: COLOR.ink }}>{tauxEpargne.toFixed(0)}%</strong>. Cela ne veut pas dire que tu mets ce pourcentage de côté sur un compte — cela signifie que {tauxEpargne.toFixed(0)}% de tes revenus ne sont pas consommés en dépenses courantes (épargne + investissements + protection cumulés). Référence : Chine 30 à 45%, Occident environ 20%.
+            {" "}{tauxEpargne >= 30 ? "Tu dépasses la référence chinoise." : tauxEpargne >= 20 ? "Tu es dans la moyenne occidentale, mais sous la référence chinoise." : "Tu es sous les deux références."}
+          </p>
+
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLOR.goldSoft, marginBottom: 4 }}>3. Répartition Kakeibo (méthode japonaise)</div>
+          <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 18 }}>Le Kakeibo classe chaque dépense en quatre catégories, pour favoriser la réflexion plutôt qu'un simple total.</p>
+          {narrKakeibo.map((s) => <Section key={s.title} s={s} />)}
+
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 18, marginTop: 4 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLOR.ink, marginBottom: 10 }}>Ce que ton profil financier raconte</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+              {synthesis.checks.map((c, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, fontSize: 12.5, color: c.ok ? COLOR.emeraldSoft : COLOR.claySoft, lineHeight: 1.5 }}>
+                  <span style={{ flexShrink: 0 }}>{c.ok ? "✅" : "⚠️"}</span>
+                  <span>{c.text}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: "12px 14px", background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+              {synthesis.recommendation}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
+function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClose: () => void; ratios: RatioResult[] }) {
+  if (!open) return null;
+  const report = generateRatiosNarrative(ratios);
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 480, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 620, maxHeight: "90vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, color: COLOR.ink }}>Rapport détaillé — Ratios institutionnels</div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+        </div>
+        <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "20px 22px", WebkitOverflowScrolling: "touch" }}>
+          <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, marginBottom: 20 }}>
+            Ces 5 repères viennent des banques, des régulateurs financiers (ex. CFPB américain) et des cabinets de conseil en gestion de patrimoine — pas des seuils inventés pour l'app. Voici ce que chacun signifie concrètement, et où tu te situes.
+          </p>
+          {report.sections.map((s) => {
+            const color = s.verdict.startsWith("C'est un très bon") || s.verdict.startsWith("Tu as un vrai") || s.verdict.startsWith("Tes revenus sont bien") || s.verdict.startsWith("Tes charges fixes laissent") || s.verdict.startsWith("Ton logement reste")
+              ? COLOR.emeraldSoft
+              : s.verdict.startsWith("C'est un niveau bas") || s.verdict.startsWith("Tes charges fixes absorbent") || s.verdict.startsWith("Ton logement absorbe") || s.verdict.startsWith("Ta réserve") || s.verdict.startsWith("Une seule source")
+                ? COLOR.claySoft : COLOR.goldSoft;
+            return (
+              <div key={s.key} style={{ marginBottom: 22 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
+                  <span style={{ fontFamily: "'Fraunces', serif", fontSize: 15.5, color: COLOR.ink }}>{s.title}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color }}>{s.unit === "mois" ? s.you.toFixed(1) + " mois" : Math.round(s.you) + s.unit}</span>
+                </div>
+                <p style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6, margin: "4px 0 8px 0" }}>{s.definition}</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                  {s.examples.map((ex) => (
+                    <span key={ex} style={{ fontSize: 10.5, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "3px 10px" }}>{ex}</span>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: COLOR.inkMuted, marginBottom: 6 }}>{s.benchmark}</div>
+                <div style={{ fontSize: 12.5, color, fontWeight: 600, display: "flex", alignItems: "flex-start", gap: 6 }}>
+                  <ArrowRight size={13} style={{ flexShrink: 0, marginTop: 2 }} /> {s.verdict}
+                </div>
+              </div>
+            );
+          })}
+
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 18, marginTop: 4 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLOR.ink, marginBottom: 10 }}>Ce que tes ratios racontent</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+              {report.checks.map((c, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, fontSize: 12.5, color: c.ok ? COLOR.emeraldSoft : COLOR.claySoft, lineHeight: 1.5 }}>
+                  <span style={{ flexShrink: 0 }}>{c.ok ? "✅" : "⚠️"}</span>
+                  <span>{c.text}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: "12px 14px", background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+              {report.recommendation}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
+  const [narrativeOpen, setNarrativeOpen] = useState(false);
+  const [ratiosNarrativeOpen, setRatiosNarrativeOpen] = useState(false);
 
   const { ratios, netWorth, essentialMonthly } = useMemo(
     () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture),
@@ -5466,9 +5883,9 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 14, background: `linear-gradient(135deg, ${verdictStyle[overallVerdict].bg} 0%, ${COLOR.surfaceRaised} 70%)`, border: `1px solid ${verdictStyle[overallVerdict].color}`, borderRadius: 14, padding: "16px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, background: `linear-gradient(135deg, ${verdictStyle[overallVerdict].bg} 0%, ${COLOR.surfaceRaised} 70%)`, border: `1px solid ${verdictStyle[overallVerdict].color}`, borderRadius: 14, padding: "16px 20px", flexWrap: "wrap" }}>
         <Gauge size={22} color={verdictStyle[overallVerdict].color} />
-        <div>
+        <div style={{ flex: 1, minWidth: 200 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, fontWeight: 600, color: verdictStyle[overallVerdict].color }}>
             Diagnostic global : {verdictStyle[overallVerdict].label}
           </div>
@@ -5476,6 +5893,12 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
             Basé sur 5 ratios utilisés par les banques, régulateurs financiers et cabinets de conseil en gestion de patrimoine — appliqués à tes vraies données des 6 derniers mois.
           </div>
         </div>
+        <button onClick={() => setRatiosNarrativeOpen(true)} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
+          borderRadius: 8, color: COLOR.goldSoft, padding: "9px 16px", fontSize: 12.5, cursor: "pointer", flexShrink: 0,
+        }}>
+          <BookOpen size={13} /> Rapport détaillé
+        </button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
@@ -5553,6 +5976,14 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
       <PanelWithHelp title="Indicateurs asiatiques de gestion financière" subtitle="Règle chinoise du 4-3-2-1, norme d'épargne chinoise, méthode Kakeibo japonaise"
         collapsible defaultOpen={false}
+        right={
+          <button onClick={(e) => { e.stopPropagation(); setNarrativeOpen(true); }} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
+            borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer",
+          }}>
+            <BookOpen size={13} /> Rapport détaillé
+          </button>
+        }
         explain="Ces cadres viennent de traditions de gestion financière personnelle distinctes des repères bancaires occidentaux ci-dessus. La règle du 4-3-2-1 (家庭资产配置法则) est enseignée dans les certifications chinoises de planification financière (AFP Chine). Le taux d'épargne chinois reflète le niveau d'épargne traditionnellement très élevé des ménages en Chine (30 à 45%, contre ~20% recommandé en Occident). Le Kakeibo (家計簿) est une méthode budgétaire japonaise créée en 1904 par Hani Motoko, toujours largement utilisée aujourd'hui — elle classe chaque dépense en 4 catégories plutôt que de suivre un simple total, pour favoriser la réflexion plutôt que le seul chiffrage.">
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 
@@ -5612,6 +6043,15 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
           </div>
         </div>
       </PanelWithHelp>
+
+      <NarrativeReportSheet
+        open={narrativeOpen}
+        onClose={() => setNarrativeOpen(false)}
+        rule4321={asian.rule4321}
+        tauxEpargne={asian.tauxEpargne}
+        kakeibo={asian.kakeibo}
+      />
+      <RatiosNarrativeSheet open={ratiosNarrativeOpen} onClose={() => setRatiosNarrativeOpen(false)} ratios={ratios} />
     </div>
   );
 }
