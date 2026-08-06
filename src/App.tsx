@@ -449,15 +449,23 @@ const stdev = (arr: number[]) => {
 };
 
 const GROUPS: Group[] = ["Nécessaire", "Productif", "Non-productif", "Non classifié"];
+// Overrides modifiables par l'utilisateur (Gestion des catégories) — synchronisés
+// depuis l'état persistant de l'app à chaque rendu. Tant qu'aucune modification
+// n'a été faite, on retombe sur les listes intégrées ci-dessus.
+let CUSTOM_DEP_SUBCATS: Record<string, string[]> | null = null;
+let CUSTOM_REV_SUBCATS: Record<string, string[]> | null = null;
+function activeSubcatMap(type: TxType): Record<string, string[]> {
+  return (type === "Dépense" ? CUSTOM_DEP_SUBCATS : CUSTOM_REV_SUBCATS) || (type === "Dépense" ? depSubcategories : revSubcategories);
+}
 function getSubcategories(type: TxType, category: string): string[] {
-  return (type === "Dépense" ? depSubcategories[category] : revSubcategories[category]) || [];
+  return activeSubcatMap(type)[category] || [];
 }
 function normalizeText(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 function categoriesForType(transactions: Transaction[], type: TxType): string[] {
   const used = new Set(transactions.filter((t) => t.type === type).map((t) => t.category));
-  const known = Object.keys(type === "Dépense" ? depSubcategories : revSubcategories);
+  const known = Object.keys(activeSubcatMap(type));
   known.forEach((c) => used.add(c));
   return Array.from(used).sort((a, b) => a.localeCompare(b, "fr"));
 }
@@ -2353,6 +2361,229 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
 // ============================================================
 // CATÉGORIES TAB (reclassification + détection d'anomalies)
 // ============================================================
+// ============================================================
+// GESTION DES CATÉGORIES — créer, renommer, supprimer catégories et
+// sous-catégories, avec répercussion automatique sur les transactions, les
+// groupes (Nécessaire/Productif/Non-productif), les portées Business/Personnel,
+// les activités et les budgets. Une catégorie/sous-catégorie déjà utilisée ne
+// peut être supprimée qu'en fusionnant ses transactions vers une autre.
+// ============================================================
+function CategoryManagementTab({
+  transactions, setTransactions, customDepSubcategories, setCustomDepSubcategories, customRevSubcategories, setCustomRevSubcategories,
+  categoryGroups, setCategoryGroups, categoryScope, setCategoryScope, categoryActivity, setCategoryActivity, budgets, setBudgets,
+}: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
+  customDepSubcategories: Record<string, string[]>; setCustomDepSubcategories: (m: Record<string, string[]>) => void;
+  customRevSubcategories: Record<string, string[]>; setCustomRevSubcategories: (m: Record<string, string[]>) => void;
+  categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
+  categoryScope: Record<string, Scope>; setCategoryScope: (s: Record<string, Scope>) => void;
+  categoryActivity: Record<string, string>; setCategoryActivity: (a: Record<string, string>) => void;
+  budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void;
+}) {
+  const [typeView, setTypeView] = useState<TxType>("Dépense");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [newCategory, setNewCategory] = useState("");
+  const [newSubcatFor, setNewSubcatFor] = useState<string | null>(null);
+  const [newSubcatName, setNewSubcatName] = useState("");
+  const [editingCat, setEditingCat] = useState<string | null>(null);
+  const [editingCatValue, setEditingCatValue] = useState("");
+  const [editingSub, setEditingSub] = useState<{ cat: string; sub: string } | null>(null);
+  const [editingSubValue, setEditingSubValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<{ kind: "cat" | "sub"; cat: string; sub?: string } | null>(null);
+  const [mergeInto, setMergeInto] = useState("");
+
+  const activeMap = typeView === "Dépense" ? customDepSubcategories : customRevSubcategories;
+  const setActiveMap = typeView === "Dépense" ? setCustomDepSubcategories : setCustomRevSubcategories;
+  const categories = categoriesForType(transactions, typeView);
+
+  const countForCat = (cat: string) => transactions.filter((t) => t.category === cat && t.type === typeView).length;
+  const countForSub = (cat: string, sub: string) => transactions.filter((t) => t.category === cat && t.subcategory === sub && t.type === typeView).length;
+
+  const addCategory = () => {
+    const name = newCategory.trim();
+    if (!name || activeMap[name] !== undefined) return;
+    setActiveMap({ ...activeMap, [name]: [] });
+    setNewCategory("");
+  };
+
+  const addSubcategory = (cat: string) => {
+    const name = newSubcatName.trim();
+    if (!name) return;
+    const subs = activeMap[cat] || [];
+    if (subs.includes(name)) return;
+    setActiveMap({ ...activeMap, [cat]: [...subs, name] });
+    setNewSubcatName(""); setNewSubcatFor(null);
+  };
+
+  const renameKeyed = (map: Record<string, any> | undefined, setMap: ((m: any) => void) | undefined, oldKey: string, newKey: string) => {
+    if (!map || !setMap || map[oldKey] === undefined) return;
+    const next = { ...map }; next[newKey] = next[oldKey]; delete next[oldKey]; setMap(next);
+  };
+
+  const renameCategory = (oldName: string) => {
+    const newName = editingCatValue.trim();
+    if (!newName || newName === oldName || activeMap[newName] !== undefined) { setEditingCat(null); return; }
+    const next = { ...activeMap }; next[newName] = next[oldName] || []; delete next[oldName]; setActiveMap(next);
+    setTransactions(transactions.map((t) => (t.category === oldName && t.type === typeView ? { ...t, category: newName } : t)));
+    renameKeyed(categoryGroups, setCategoryGroups, oldName, newName);
+    renameKeyed(categoryScope, setCategoryScope, oldName, newName);
+    renameKeyed(categoryActivity, setCategoryActivity, oldName, newName);
+    setBudgets(budgets.map((b) => (b.category === oldName ? { ...b, category: newName } : b)));
+    setEditingCat(null);
+  };
+
+  const renameSubcategory = (cat: string, oldSub: string) => {
+    const newSub = editingSubValue.trim();
+    if (!newSub || newSub === oldSub) { setEditingSub(null); return; }
+    const subs = (activeMap[cat] || []).map((s) => (s === oldSub ? newSub : s));
+    setActiveMap({ ...activeMap, [cat]: subs });
+    setTransactions(transactions.map((t) => (t.category === cat && t.subcategory === oldSub && t.type === typeView ? { ...t, subcategory: newSub } : t)));
+    setEditingSub(null);
+  };
+
+  const performDelete = () => {
+    if (!deleteTarget) return;
+    if (deleteTarget.kind === "cat") {
+      const cat = deleteTarget.cat;
+      const count = countForCat(cat);
+      if (count > 0) {
+        if (!mergeInto) return;
+        setTransactions(transactions.map((t) => (t.category === cat && t.type === typeView ? { ...t, category: mergeInto, subcategory: undefined } : t)));
+      }
+      const next = { ...activeMap }; delete next[cat]; setActiveMap(next);
+      const ng = { ...categoryGroups }; delete ng[cat]; setCategoryGroups(ng);
+      const ns = { ...categoryScope }; delete ns[cat]; setCategoryScope(ns);
+      const na = { ...categoryActivity }; delete na[cat]; setCategoryActivity(na);
+      setBudgets(budgets.filter((b) => b.category !== cat));
+    } else {
+      const { cat, sub } = deleteTarget;
+      if (!sub) return;
+      const count = countForSub(cat, sub);
+      if (count > 0) {
+        setTransactions(transactions.map((t) => (t.category === cat && t.subcategory === sub && t.type === typeView ? { ...t, subcategory: mergeInto || undefined } : t)));
+      }
+      setActiveMap({ ...activeMap, [cat]: (activeMap[cat] || []).filter((s) => s !== sub) });
+    }
+    setDeleteTarget(null); setMergeInto("");
+  };
+
+  const deleteCount = deleteTarget ? (deleteTarget.kind === "cat" ? countForCat(deleteTarget.cat) : countForSub(deleteTarget.cat, deleteTarget.sub || "")) : 0;
+  const mergeOptions = deleteTarget?.kind === "cat" ? categories.filter((c) => c !== deleteTarget.cat) : (deleteTarget ? activeMap[deleteTarget.cat] || [] : []).filter((s: string) => s !== deleteTarget?.sub);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <PanelWithHelp title="Gestion des catégories" subtitle="Créer, renommer et supprimer des catégories et sous-catégories"
+        explain="Renommer une catégorie ou sous-catégorie met à jour automatiquement toutes les transactions existantes qui l'utilisent, ainsi que son groupe (Nécessaire/Productif/Non-productif), sa portée Business/Personnel, son activité et ses budgets. Supprimer une catégorie déjà utilisée par des transactions exige de choisir une catégorie de remplacement — les transactions y sont alors basculées avant la suppression, pour ne jamais perdre de données silencieusement.">
+        <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}`, marginBottom: 18, width: "fit-content" }}>
+          {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
+            <button key={ty} onClick={() => setTypeView(ty)} style={{
+              padding: "6px 16px", borderRadius: 12, fontSize: 12.5, cursor: "pointer", border: "none",
+              background: typeView === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : "transparent",
+              color: typeView === ty ? COLOR.bg : COLOR.inkMuted,
+            }}>{ty}</button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+          <input style={{ ...inputStyle, flex: 1 }} placeholder="Nouvelle catégorie" value={newCategory}
+            onChange={(e) => setNewCategory(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addCategory(); }} />
+          <button onClick={addCategory} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "8px 16px", fontSize: 12.5, cursor: "pointer" }}>
+            <Plus size={13} /> Ajouter
+          </button>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {categories.map((cat) => {
+            const isOpen = expanded.has(cat);
+            const subs = activeMap[cat] || [];
+            const count = countForCat(cat);
+            return (
+              <div key={cat} style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px" }}>
+                  <button onClick={() => setExpanded((prev) => { const n = new Set(prev); n.has(cat) ? n.delete(cat) : n.add(cat); return n; })} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}>
+                    <ChevronDown size={14} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                  </button>
+                  {editingCat === cat ? (
+                    <input autoFocus value={editingCatValue} onChange={(e) => setEditingCatValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") renameCategory(cat); if (e.key === "Escape") setEditingCat(null); }}
+                      onBlur={() => renameCategory(cat)} style={{ ...inputStyle, flex: 1 }} />
+                  ) : (
+                    <span style={{ flex: 1, fontSize: 13.5, color: COLOR.ink, fontWeight: 600 }}>{cat} <span style={{ fontWeight: 400, fontSize: 11, color: COLOR.inkMuted }}>({count} tx · {subs.length} sous-cat.)</span></span>
+                  )}
+                  <button onClick={() => { setEditingCat(cat); setEditingCatValue(cat); }} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
+                  <button onClick={() => { setDeleteTarget({ kind: "cat", cat }); setMergeInto(""); }} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+                </div>
+                {isOpen && (
+                  <div style={{ padding: "0 14px 12px 40px", display: "flex", flexDirection: "column", gap: 6 }}>
+                    {subs.map((sub) => (
+                      <div key={sub} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {editingSub?.cat === cat && editingSub.sub === sub ? (
+                          <input autoFocus value={editingSubValue} onChange={(e) => setEditingSubValue(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") renameSubcategory(cat, sub); if (e.key === "Escape") setEditingSub(null); }}
+                            onBlur={() => renameSubcategory(cat, sub)} style={{ ...inputStyle, flex: 1, fontSize: 12.5 }} />
+                        ) : (
+                          <span style={{ flex: 1, fontSize: 12.5, color: COLOR.inkMuted }}>{sub} <span style={{ fontSize: 10.5 }}>({countForSub(cat, sub)} tx)</span></span>
+                        )}
+                        <button onClick={() => { setEditingSub({ cat, sub }); setEditingSubValue(sub); }} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={11} /></button>
+                        <button onClick={() => { setDeleteTarget({ kind: "sub", cat, sub }); setMergeInto(""); }} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={11} /></button>
+                      </div>
+                    ))}
+                    {newSubcatFor === cat ? (
+                      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                        <input autoFocus style={{ ...inputStyle, flex: 1, fontSize: 12.5 }} placeholder="Nom de la sous-catégorie" value={newSubcatName}
+                          onChange={(e) => setNewSubcatName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addSubcategory(cat); if (e.key === "Escape") setNewSubcatFor(null); }} />
+                        <button onClick={() => addSubcategory(cat)} style={{ background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}>Ajouter</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setNewSubcatFor(cat); setNewSubcatName(""); }} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 11.5, padding: "4px 0", width: "fit-content" }}>
+                        <Plus size={11} /> Ajouter une sous-catégorie
+                      </button>
+                    )}
+                    {!subs.length && !newSubcatFor && <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Aucune sous-catégorie.</div>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {!categories.length && <EmptyState text="Aucune catégorie." />}
+        </div>
+      </PanelWithHelp>
+
+      <ConfirmDialog
+        open={!!deleteTarget && deleteCount === 0}
+        title={deleteTarget?.kind === "cat" ? `Supprimer la catégorie "${deleteTarget.cat}" ?` : `Supprimer la sous-catégorie "${deleteTarget?.sub}" ?`}
+        message="Aucune transaction ne l'utilise actuellement — suppression sans impact."
+        onConfirm={performDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      {deleteTarget && deleteCount > 0 && (
+        <div onClick={() => setDeleteTarget(null)} style={{ position: "fixed", inset: 0, zIndex: 500, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 420, background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 14, padding: 20 }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink, marginBottom: 8 }}>
+              {deleteTarget.kind === "cat" ? `"${deleteTarget.cat}" est utilisée par ${deleteCount} transaction(s)` : `"${deleteTarget.sub}" est utilisée par ${deleteCount} transaction(s)`}
+            </div>
+            <div style={{ fontSize: 12.5, color: COLOR.inkMuted, marginBottom: 14, lineHeight: 1.6 }}>
+              Choisis {deleteTarget.kind === "cat" ? "une catégorie" : "une sous-catégorie (ou aucune)"} vers laquelle basculer ces transactions avant suppression — aucune donnée ne sera perdue.
+            </div>
+            <select value={mergeInto} onChange={(e) => setMergeInto(e.target.value)} style={{ ...inputStyle, width: "100%", marginBottom: 16 }}>
+              <option value="">{deleteTarget.kind === "sub" ? "— aucune sous-catégorie —" : "— choisir —"}</option>
+              {mergeOptions.map((o: string) => <option key={o} value={o}>{o}</option>)}
+            </select>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setDeleteTarget(null)} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: `1px solid ${COLOR.hairline}`, background: "transparent", color: COLOR.inkMuted, cursor: "pointer", fontSize: 13 }}>Annuler</button>
+              <button onClick={performDelete} disabled={deleteTarget.kind === "cat" && !mergeInto} style={{
+                flex: 1, padding: "10px 0", borderRadius: 8, border: "none", cursor: deleteTarget.kind === "cat" && !mergeInto ? "default" : "pointer",
+                background: deleteTarget.kind === "cat" && !mergeInto ? COLOR.hairline : COLOR.clay, color: deleteTarget.kind === "cat" && !mergeInto ? COLOR.inkMuted : COLOR.bg, fontWeight: 700, fontSize: 13,
+              }}>Fusionner et supprimer</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGroups }: {
   filtered: any[]; categoryGroups: Record<string, Group>; resolvedGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
 }) {
@@ -6803,7 +7034,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -6821,6 +7052,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "mensuel", label: "Rapport mensuel", icon: CalendarRange },
     { id: "journalier", label: "Rapport journalier", icon: CalendarDays },
     { id: "categories", label: "Catégories", icon: PiggyBank },
+    { id: "gestioncategories", label: "Gestion des catégories", icon: Layers },
     { id: "groupes", label: "Groupes", icon: Layers },
     { id: "enveloppes", label: "Enveloppes", icon: Mail },
     { id: "budgets", label: "Budgets par catégorie", icon: ClipboardList },
@@ -6859,6 +7091,10 @@ export default function GrandLivre() {
   const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
   const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
   const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
+  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories);
+  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories);
+  CUSTOM_DEP_SUBCATS = customDepSubcategories;
+  CUSTOM_REV_SUBCATS = customRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
 
   const chargeModeDesc = (o?: ChargeOverride) => !o || o.mode === "auto" ? "Auto" : o.mode === "fixe" ? `Fixe${o.amount !== undefined ? ` (${fmt(o.amount)} FCFA)` : ""}` : o.mode === "variable" ? "Variable régulière" : o.mode === "exclu" ? "Exclu" : "Occasionnelle";
@@ -7037,6 +7273,8 @@ export default function GrandLivre() {
       if (typeof remote.monthlyObjective === "number") setMonthlyObjective(remote.monthlyObjective);
       if (remote.chargeOverrides) setChargeOverrides(remote.chargeOverrides);
       if (typeof remote.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(remote.includeGrundfosVoiture);
+      if (remote.customDepSubcategories) setCustomDepSubcategories(remote.customDepSubcategories);
+      if (remote.customRevSubcategories) setCustomRevSubcategories(remote.customRevSubcategories);
       setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }
     setSyncStatus("synced");
@@ -7079,14 +7317,14 @@ export default function GrandLivre() {
       setSyncStatus("syncing");
       const ok = await pushRemoteState(syncCode, {
         transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-        activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+        activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }, 1500);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
 
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
@@ -7208,6 +7446,15 @@ export default function GrandLivre() {
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
+          {tab === "gestioncategories" && <CategoryManagementTab
+            transactions={transactions} setTransactions={setTransactions}
+            customDepSubcategories={customDepSubcategories} setCustomDepSubcategories={setCustomDepSubcategories}
+            customRevSubcategories={customRevSubcategories} setCustomRevSubcategories={setCustomRevSubcategories}
+            categoryGroups={categoryGroups} setCategoryGroups={setCategoryGroups}
+            categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged}
+            categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged}
+            budgets={budgets} setBudgets={setBudgets}
+          />}
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
           {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
           {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} />}
@@ -7234,14 +7481,14 @@ export default function GrandLivre() {
             <SauvegardeTab
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+                activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
               })}
               restore={(data: any) => {
                 // Filet de sécurité : on garde un instantané de l'état actuel avant
                 // d'écraser quoi que ce soit, pour permettre une annulation en un clic.
                 setPreRestoreSnapshot({
                   transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
                 });
                 setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
 
@@ -7261,6 +7508,8 @@ export default function GrandLivre() {
                 if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
                 if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
                 if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
+                if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
+                if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
               }}
               undoSnapshotAt={preRestoreSnapshotAt}
               settingsLog={settingsLog}
@@ -7283,6 +7532,8 @@ export default function GrandLivre() {
                 if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
                 if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
                 if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
+                if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
+                if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
                 setPreRestoreSnapshot(null);
                 setPreRestoreSnapshotAt(null);
               }}
