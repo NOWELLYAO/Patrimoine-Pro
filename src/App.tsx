@@ -488,6 +488,18 @@ const groupColor: Record<string, string> = {
   "Nécessaire": COLOR.slateBlue, "Productif": COLOR.emerald, "Non-productif": COLOR.clay,
   "Non classifié": COLOR.inkMuted, "Revenu": COLOR.goldSoft,
 };
+// Résout le groupe (Nécessaire/Productif/Non-productif) d'une transaction : regarde
+// d'abord si sa SOUS-catégorie a un groupe qui lui est propre (clé "Catégorie::Sous-catégorie"
+// dans categoryGroups), sinon retombe sur le groupe de la catégorie entière. Permet à des
+// sous-catégories d'une même catégorie d'avoir des natures différentes (ex : "Abonnements"
+// globalement Non-productif, mais "Abonnements · Assurance SAF" classée Nécessaire).
+function groupFor(t: { category: string; subcategory?: string }, categoryGroups: Record<string, Group>): Group {
+  if (t.subcategory) {
+    const subKey = `${t.category}::${t.subcategory}`;
+    if (categoryGroups[subKey]) return categoryGroups[subKey];
+  }
+  return categoryGroups[t.category] || "Non classifié";
+}
 
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
@@ -2764,19 +2776,19 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
 // Fiche de saisie de nom, même esprit visuel que "Saisie rapide" — grand champ
 // central, dégradé doré — réutilisée pour créer/renommer une catégorie ou une
 // sous-catégorie plutôt qu'un simple champ texte en ligne.
-function CategoryNameSheet({ open, title, subtitle, initialValue, confirmLabel, accentColor, onClose, onSave, showGroup, initialGroup }: {
+function CategoryNameSheet({ open, title, subtitle, initialValue, confirmLabel, accentColor, onClose, onSave, showGroup, initialGroup, allowFollowCategory }: {
   open: boolean; title: string; subtitle?: string; initialValue: string; confirmLabel: string; accentColor: string;
-  onClose: () => void; onSave: (value: string, group?: Group) => void; showGroup?: boolean; initialGroup?: Group;
+  onClose: () => void; onSave: (value: string, group?: Group) => void; showGroup?: boolean; initialGroup?: Group; allowFollowCategory?: boolean;
 }) {
   const [value, setValue] = useState(initialValue);
-  const [group, setGroup] = useState<Group>(initialGroup || "Nécessaire");
+  const [group, setGroup] = useState<Group | null>(initialGroup || (allowFollowCategory ? null : "Nécessaire"));
   const [saved, setSaved] = useState(false);
-  useEffect(() => { if (open) { setValue(initialValue); setGroup(initialGroup || "Nécessaire"); setSaved(false); } }, [open, initialValue, initialGroup]);
+  useEffect(() => { if (open) { setValue(initialValue); setGroup(initialGroup || (allowFollowCategory ? null : "Nécessaire")); setSaved(false); } }, [open, initialValue, initialGroup, allowFollowCategory]);
   if (!open) return null;
 
   const submit = () => {
     if (!value.trim()) return;
-    onSave(value.trim(), showGroup ? group : undefined);
+    onSave(value.trim(), showGroup && group ? group : undefined);
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 500);
   };
@@ -2795,7 +2807,7 @@ function CategoryNameSheet({ open, title, subtitle, initialValue, confirmLabel, 
             <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, color: accentColor }}>{title}</div>
             <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
           </div>
-          {subtitle && <div style={{ padding: "4px 20px 0 20px", fontSize: 11.5, color: COLOR.inkMuted }}>{subtitle}</div>}
+          {subtitle && <div style={{ padding: "4px 20px 0 20px", fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.5 }}>{subtitle}</div>}
 
           <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "22px 24px 10px 24px" }}>
             <Layers size={64} style={{ position: "absolute", top: 14, color: accentColor, opacity: 0.08, pointerEvents: "none" }} />
@@ -2808,8 +2820,17 @@ function CategoryNameSheet({ open, title, subtitle, initialValue, confirmLabel, 
 
           {showGroup && (
             <div style={{ padding: "4px 20px 16px 20px" }}>
-              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, textAlign: "center" }}>Nature de cette catégorie</div>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, textAlign: "center" }}>Nature de cette {allowFollowCategory ? "sous-catégorie" : "catégorie"}</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {allowFollowCategory && (
+                  <button onClick={() => setGroup(null)} title="Ne définit rien de spécifique — hérite du groupe de la catégorie parente" style={{
+                    flex: "1 1 100%", padding: "8px 6px", borderRadius: 10, cursor: "pointer", textAlign: "center",
+                    border: `1px solid ${group === null ? COLOR.gold : COLOR.hairline}`,
+                    background: group === null ? "rgba(201,162,39,0.14)" : "transparent",
+                  }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: group === null ? COLOR.goldSoft : COLOR.ink }}>Suivre la catégorie (par défaut)</div>
+                  </button>
+                )}
                 {groupOptions.map((g) => (
                   <button key={g.key} onClick={() => setGroup(g.key)} title={g.hint} style={{
                     flex: 1, padding: "10px 6px", borderRadius: 10, cursor: "pointer", textAlign: "center",
@@ -2872,10 +2893,11 @@ function CategoryManagementTab({
     if (group) setCategoryGroups({ ...categoryGroups, [name]: group });
   };
 
-  const addSubcategory = (cat: string, name: string) => {
+  const addSubcategory = (cat: string, name: string, group?: Group) => {
     const subs = activeMap[cat] || [];
     if (subs.includes(name)) return;
     setActiveMap({ ...activeMap, [cat]: [...subs, name] });
+    if (group) setCategoryGroups({ ...categoryGroups, [`${cat}::${name}`]: group });
   };
 
   const renameKeyed = (map: Record<string, any> | undefined, setMap: ((m: any) => void) | undefined, oldKey: string, newKey: string) => {
@@ -2891,13 +2913,26 @@ function CategoryManagementTab({
     renameKeyed(categoryScope, setCategoryScope, oldName, newName);
     renameKeyed(categoryActivity, setCategoryActivity, oldName, newName);
     setBudgets(budgets.map((b) => (b.category === oldName ? { ...b, category: newName } : b)));
+    // Répercute aussi les groupes par sous-catégorie ("Ancien::Sous" -> "Nouveau::Sous").
+    const ng = { ...categoryGroups };
+    Object.keys(ng).forEach((k) => { if (k.startsWith(`${oldName}::`)) { ng[k.replace(`${oldName}::`, `${newName}::`)] = ng[k]; delete ng[k]; } });
+    setCategoryGroups(ng);
   };
 
-  const renameSubcategory = (cat: string, oldSub: string, newSub: string) => {
-    if (newSub === oldSub) return;
+  const renameSubcategory = (cat: string, oldSub: string, newSub: string, group?: Group) => {
     const subs = (activeMap[cat] || []).map((s) => (s === oldSub ? newSub : s));
-    setActiveMap({ ...activeMap, [cat]: subs });
-    setTransactions(transactions.map((t) => (t.category === cat && t.subcategory === oldSub && t.type === typeView ? { ...t, subcategory: newSub } : t)));
+    if (newSub !== oldSub) {
+      setActiveMap({ ...activeMap, [cat]: subs });
+      setTransactions(transactions.map((t) => (t.category === cat && t.subcategory === oldSub && t.type === typeView ? { ...t, subcategory: newSub } : t)));
+    }
+    if (group) {
+      const next = { ...categoryGroups };
+      delete next[`${cat}::${oldSub}`];
+      next[`${cat}::${newSub}`] = group;
+      setCategoryGroups(next);
+    } else if (newSub !== oldSub) {
+      renameKeyed(categoryGroups, setCategoryGroups, `${cat}::${oldSub}`, `${cat}::${newSub}`);
+    }
   };
 
   const performDelete = () => {
@@ -3008,12 +3043,15 @@ function CategoryManagementTab({
       <CategoryNameSheet
         open={!!subSheet}
         title={subSheet?.mode === "new" ? "Nouvelle sous-catégorie" : "Renommer la sous-catégorie"}
-        subtitle={subSheet ? `Dans « ${subSheet.cat} »` : undefined}
+        subtitle={subSheet ? `Dans « ${subSheet.cat} » — laisse "Suivre la catégorie" pour garder le groupe de "${subSheet.cat}" (${categoryGroups[subSheet.cat] || "Non classifié"})` : undefined}
         initialValue={subSheet?.mode === "rename" ? subSheet.oldName || "" : ""}
         confirmLabel={subSheet?.mode === "new" ? "Créer" : "Renommer"}
         accentColor={accentColor}
         onClose={() => setSubSheet(null)}
-        onSave={(value) => { if (!subSheet) return; if (subSheet.mode === "new") addSubcategory(subSheet.cat, value); else if (subSheet.oldName) renameSubcategory(subSheet.cat, subSheet.oldName, value); }}
+        showGroup
+        allowFollowCategory
+        initialGroup={subSheet?.mode === "rename" && subSheet.oldName ? categoryGroups[`${subSheet.cat}::${subSheet.oldName}`] : undefined}
+        onSave={(value, group) => { if (!subSheet) return; if (subSheet.mode === "new") addSubcategory(subSheet.cat, value, group); else if (subSheet.oldName) renameSubcategory(subSheet.cat, subSheet.oldName, value, group); }}
       />
 
       <ConfirmDialog
@@ -3451,7 +3489,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[];
 }) {
   const withGroup = useMemo(
-    () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") })),
+    () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : groupFor(t, categoryGroups) })),
     [transactions, categoryGroups]
   );
 
@@ -3653,7 +3691,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   onNavigate?: (tab: Tab, data?: any) => void;
 }) {
   const withGroup = useMemo(
-    () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") })),
+    () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : groupFor(t, categoryGroups) })),
     [transactions, categoryGroups]
   );
 
@@ -5106,7 +5144,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 
       // Répartition des dépenses par nature (Nécessaire / Productif / Non-productif)
       const groupTotals: Record<Group, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
-      tx.filter((t) => t.type === "Dépense").forEach((t) => { groupTotals[categoryGroups[t.category] || "Non classifié"] += t.amount; });
+      tx.filter((t) => t.type === "Dépense").forEach((t) => { groupTotals[groupFor(t, categoryGroups)] += t.amount; });
       const depTotal = depenses || 1;
       const groups = (["Nécessaire", "Productif", "Non-productif"] as Group[])
         .map((g) => ({ group: g, value: groupTotals[g], pct: (groupTotals[g] / depTotal) * 100 }))
@@ -5120,13 +5158,13 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
   // Catégories qui composent un groupe (Nécessaire/Productif/Non-productif) au sein d'une activité donnée.
   const catsForGroup = (act: string, group: Group) => {
     const rows: Record<string, number> = {};
-    transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && (categoryGroups[t.category] || "Non classifié") === group)
+    transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && groupFor(t, categoryGroups) === group)
       .forEach((t) => { rows[t.category] = (rows[t.category] || 0) + t.amount; });
     const total = Object.values(rows).reduce((a, v) => a + v, 0) || 1;
     return Object.entries(rows).map(([name, value]) => ({ name, value, pct: (value / total) * 100 })).sort((a, b) => b.value - a.value);
   };
   const txForGroupCat = (act: string, group: Group, cat: string) =>
-    transactions.filter((t) => t.type === "Dépense" && t.category === cat && activityFor(t.category) === act && (categoryGroups[t.category] || "Non classifié") === group)
+    transactions.filter((t) => t.type === "Dépense" && t.category === cat && activityFor(t.category) === act && groupFor(t, categoryGroups) === group)
       .sort((a, b) => b.date.localeCompare(a.date));
 
   const startEdit = (t: Transaction) => setEditingTx(t);
@@ -7501,7 +7539,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const currentMonthKey = dateToMonthKey(today);
   const weekAgo = (() => { const d = new Date(); d.setDate(d.getDate() - 6); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
 
-  const withGroup = transactions.map((t) => ({ ...t, group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") }));
+  const withGroup = transactions.map((t) => ({ ...t, group: t.type === "Revenu" ? "Revenu" : groupFor(t, categoryGroups) }));
 
   const sumFor = (pred: (t: any) => boolean) => {
     const arr = withGroup.filter(pred);
@@ -8153,7 +8191,7 @@ export default function GrandLivre() {
     ...t,
     date: t.date || todayISO(),
     month: dateToMonthKey(t.date),
-    group: t.type === "Revenu" ? "Revenu" : (resolvedGroups[t.category] || "Non classifié"),
+    group: t.type === "Revenu" ? "Revenu" : groupFor(t, resolvedGroups),
     scope: categoryScope[t.category] || "Personnel",
   })), [transactions, resolvedGroups, categoryScope]);
 
