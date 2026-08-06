@@ -3960,6 +3960,54 @@ function ProjectionTooltip({ active, payload }: any) {
   );
 }
 
+// ============================================================
+// RAPPORT VALEUR NETTE — historique mensuel complet, avec pour chaque mois
+// une explication automatique (principal poste de dépense, principal poste de
+// revenu), plus les plus grosses transactions individuelles toutes périodes
+// confondues.
+// ============================================================
+function computeNetWorthReport(accounts: Account[], transactions: Transaction[]) {
+  const series = liveNetWorthSeries(accounts, transactions);
+
+  const rows = series.map(([month, netWorth], i) => {
+    const prevNW = i > 0 ? series[i - 1][1] : accounts.reduce((a, acc) => a + acc.openingBalance, 0);
+    const delta = netWorth - prevNW;
+    const monthTx = transactions.filter((t) => dateToMonthKey(t.date) === month);
+    const revenu = monthTx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+    const depense = monthTx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+
+    const depByCat: Record<string, number> = {};
+    monthTx.filter((t) => t.type === "Dépense").forEach((t) => { depByCat[t.category] = (depByCat[t.category] || 0) + t.amount; });
+    const topDepCat = Object.entries(depByCat).sort((a, b) => b[1] - a[1])[0];
+
+    const revByCat: Record<string, number> = {};
+    monthTx.filter((t) => t.type === "Revenu").forEach((t) => { revByCat[t.category] = (revByCat[t.category] || 0) + t.amount; });
+    const topRevCat = Object.entries(revByCat).sort((a, b) => b[1] - a[1])[0];
+
+    let explanation = "";
+    if (delta >= 0) {
+      explanation = topRevCat
+        ? `Hausse portée par "${topRevCat[0]}" (${fmt(topRevCat[1])} FCFA)${topDepCat ? `, malgré ${fmt(topDepCat[1])} FCFA sur "${topDepCat[0]}"` : ""}.`
+        : "Peu de mouvement ce mois-ci.";
+    } else {
+      explanation = topDepCat
+        ? `Baisse tirée par "${topDepCat[0]}" (${fmt(topDepCat[1])} FCFA)${topRevCat ? `, partiellement compensée par ${fmt(topRevCat[1])} FCFA de "${topRevCat[0]}"` : ""}.`
+        : "Peu de mouvement ce mois-ci.";
+    }
+
+    return { month, netWorth, delta, revenu, depense, topDepCat, topRevCat, explanation, count: monthTx.length };
+  });
+
+  const depTx = transactions.filter((t) => t.type === "Dépense").sort((a, b) => b.amount - a.amount).slice(0, 15);
+  const revTx = transactions.filter((t) => t.type === "Revenu").sort((a, b) => b.amount - a.amount).slice(0, 15);
+
+  const best = rows.reduce((a, b) => (b.delta > a.delta ? b : a), rows[0]);
+  const worst = rows.reduce((a, b) => (b.delta < a.delta ? b : a), rows[0]);
+
+  return { rows, depTx, revTx, best, worst };
+}
+
+
 function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; transactions: Transaction[] }) {
   const [months, setMonths] = useState(12);
   const { points, avgDelta } = projectNetWorth(months, liveNetWorthSeries(accounts, transactions));
@@ -4150,6 +4198,163 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
         </div>
       </div>
     </PanelWithHelp>
+  );
+}
+
+// ============================================================
+// PAGE VALEUR NETTE — historique mensuel complet, rapport explicatif
+// mois par mois, et plus grosses transactions individuelles.
+// ============================================================
+function NetWorthTab({ accounts, transactions }: { accounts: Account[]; transactions: Transaction[] }) {
+  const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
+  const report = useMemo(() => computeNetWorthReport(accounts, transactions), [accounts, transactions]);
+  const current = report.rows[report.rows.length - 1];
+  const first = report.rows[0];
+  const totalGrowth = current && first ? current.netWorth - (report.rows.length > 1 ? first.netWorth - first.delta : first.netWorth) : 0;
+
+  const exportNetWorthExcel = async () => {
+    setXlsState("loading");
+    try {
+      const ExcelJS: any = await import(/* @vite-ignore */ "exceljs");
+      const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", WHITE = "FFFFFFFF", MUTED = "FF8A9A8E";
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Grand Livre"; wb.created = new Date();
+      const styleHeaderRow = (row: any) => {
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; c.alignment = { vertical: "middle" }; });
+        row.height = 22;
+      };
+      const ws1 = wb.addWorksheet("Valeur nette mensuelle");
+      ws1.columns = [
+        { header: "Mois", key: "month", width: 16 }, { header: "Valeur nette (FCFA)", key: "nw", width: 20 },
+        { header: "Variation (FCFA)", key: "delta", width: 18 }, { header: "Revenus", key: "rev", width: 16 }, { header: "Dépenses", key: "dep", width: 16 },
+        { header: "Principal poste dépense", key: "topdep", width: 26 }, { header: "Principal poste revenu", key: "toprev", width: 26 }, { header: "Explication", key: "expl", width: 50 },
+      ];
+      styleHeaderRow(ws1.getRow(1));
+      report.rows.forEach((r) => {
+        const row = ws1.addRow({
+          month: monthLabel(r.month), nw: r.netWorth, delta: r.delta, rev: r.revenu, dep: r.depense,
+          topdep: r.topDepCat ? `${r.topDepCat[0]} (${fmt(r.topDepCat[1])})` : "", toprev: r.topRevCat ? `${r.topRevCat[0]} (${fmt(r.topRevCat[1])})` : "", expl: r.explanation,
+        });
+        row.getCell("nw").font = { bold: true, color: { argb: GOLD } };
+        row.getCell("delta").font = { color: { argb: r.delta >= 0 ? EMERALD : CLAY } };
+        row.getCell("rev").font = { color: { argb: EMERALD } };
+        row.getCell("dep").font = { color: { argb: CLAY } };
+        ["nw", "delta", "rev", "dep"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
+        row.getCell("expl").alignment = { wrapText: true };
+      });
+
+      const ws2 = wb.addWorksheet("Plus grosses dépenses");
+      ws2.columns = [{ header: "Date", key: "date", width: 12 }, { header: "Catégorie", key: "cat", width: 24 }, { header: "Sous-catégorie", key: "sub", width: 20 }, { header: "Montant (FCFA)", key: "amount", width: 18 }];
+      styleHeaderRow(ws2.getRow(1));
+      report.depTx.forEach((t) => {
+        const row = ws2.addRow({ date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", amount: t.amount });
+        row.getCell("amount").font = { color: { argb: CLAY }, bold: true }; row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
+      });
+
+      const ws3 = wb.addWorksheet("Plus gros revenus");
+      ws3.columns = [{ header: "Date", key: "date", width: 12 }, { header: "Catégorie", key: "cat", width: 24 }, { header: "Sous-catégorie", key: "sub", width: 20 }, { header: "Montant (FCFA)", key: "amount", width: 18 }];
+      styleHeaderRow(ws3.getRow(1));
+      report.revTx.forEach((t) => {
+        const row = ws3.addRow({ date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", amount: t.amount });
+        row.getCell("amount").font = { color: { argb: EMERALD }, bold: true }; row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `grand-livre_valeur-nette_${todayISO()}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      setXlsState("idle");
+    } catch {
+      setXlsState("error");
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Kpi label="Valeur nette actuelle" value={fmt(current?.netWorth ?? 0)} tone={COLOR.goldSoft} icon={Wallet} />
+        <Kpi label="Évolution totale (période)" value={fmt(totalGrowth)} tone={totalGrowth >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={totalGrowth >= 0 ? TrendingUp : TrendingDown} />
+        <Kpi label="Meilleur mois" value={report.best ? `${monthLabel(report.best.month)} (+${fmt(report.best.delta)})` : "—"} tone={COLOR.emeraldSoft} icon={TrendingUp} />
+        <Kpi label="Pire mois" value={report.worst ? `${monthLabel(report.worst.month)} (${fmt(report.worst.delta)})` : "—"} tone={COLOR.claySoft} icon={TrendingDown} />
+      </div>
+
+      <PanelWithHelp title="Valeur nette mensuelle" subtitle="Historique complet, avec l'explication automatique de chaque variation"
+        explain="Pour chaque mois, la variation de valeur nette est expliquée par le principal poste de dépense et le principal poste de revenu de ce mois-là — pas une simple observation du solde, mais une tentative de dire concrètement ce qui l'a fait bouger."
+        right={
+          <button onClick={exportNetWorthExcel} disabled={xlsState === "loading"} style={{
+            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+          }}>
+            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+          </button>
+        }>
+        <ResponsiveContainer width="100%" height={220}>
+          <AreaChart data={report.rows.map((r) => ({ mois: monthLabel(r.month), valeur: r.netWorth }))} margin={{ left: 0, right: 10, top: 10 }}>
+            <defs>
+              <linearGradient id="nwGrad2" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={COLOR.gold} stopOpacity={0.35} />
+                <stop offset="100%" stopColor={COLOR.gold} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+            <XAxis dataKey="mois" tick={{ fill: COLOR.inkMuted, fontSize: 9.5 }} interval={Math.floor(report.rows.length / 10)} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+            <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
+            <Tooltip content={<CustomTooltip />} />
+            <Area type="monotone" dataKey="valeur" name="Valeur nette" stroke={COLOR.goldSoft} strokeWidth={2.5} fill="url(#nwGrad2)" />
+          </AreaChart>
+        </ResponsiveContainer>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
+          {report.rows.slice().reverse().map((r) => (
+            <div key={r.month} style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+                <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: COLOR.ink }}>{monthLabel(r.month)}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.inkMuted }}>{fmt(r.netWorth)} FCFA</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 700, color: r.delta >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{r.delta >= 0 ? "+" : ""}{fmt(r.delta)}</span>
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{r.explanation}</div>
+            </div>
+          ))}
+        </div>
+      </PanelWithHelp>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 20 }}>
+        <Panel title="Les plus grosses dépenses" subtitle="Toutes périodes confondues, les 15 transactions les plus élevées">
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {report.depTx.map((t) => (
+              <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, color: COLOR.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{dateLabelFull(t.date)}</div>
+                </div>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 600, color: COLOR.claySoft, flexShrink: 0, marginLeft: 10 }}>{fmt(t.amount)}</span>
+              </div>
+            ))}
+            {!report.depTx.length && <EmptyState text="Aucune dépense." />}
+          </div>
+        </Panel>
+        <Panel title="Les plus gros revenus" subtitle="Toutes périodes confondues, les 15 transactions les plus élevées">
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {report.revTx.map((t) => (
+              <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, color: COLOR.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{dateLabelFull(t.date)}</div>
+                </div>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 600, color: COLOR.emeraldSoft, flexShrink: 0, marginLeft: 10 }}>{fmt(t.amount)}</span>
+              </div>
+            ))}
+            {!report.revTx.length && <EmptyState text="Aucun revenu." />}
+          </div>
+        </Panel>
+      </div>
+    </div>
   );
 }
 
@@ -7076,7 +7281,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "valeurnette" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -7084,6 +7289,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
   ]},
   { section: "Tableau de bord", items: [
     { id: "apercu", label: "Aperçu", icon: LayoutDashboard },
+    { id: "valeurnette", label: "Valeur nette", icon: Wallet },
     { id: "flux", label: "Flux & Calendrier", icon: Workflow },
     { id: "comparatif", label: "Comparatif annuel", icon: BarChart3 },
     { id: "comparateur", label: "Comparateur", icon: GitCompare },
@@ -7479,6 +7685,7 @@ export default function GrandLivre() {
           )}
 
           {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
+          {tab === "valeurnette" && <NetWorthTab accounts={accounts} transactions={transactions} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
