@@ -398,6 +398,12 @@ function monthSortKey(m: string) {
   return parseInt(y, 10) * 12 + parseInt(mm, 10);
 }
 const fmt = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
+// Les PDF utilisent les polices standard de jsPDF (Helvetica), qui ne supportent
+// que l'encodage WinAnsi/Latin-1 — l'espace fine insécable utilisée par fmt() pour
+// séparer les milliers (format français réel) n'en fait pas partie et s'affichait
+// comme "/" ou coupait le nombre. On utilise ici une espace normale, sûre dans
+// n'importe quelle police PDF, uniquement pour ce qui part dans un export PDF.
+const fmtPdf = (n: number) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 const fmtShort = (n: number) => {
   const abs = Math.abs(n);
   if (abs >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
@@ -3692,14 +3698,14 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         doc.text(value, x + 5, kpiY + 15);
         doc.setFont("helvetica", "normal");
       };
-      drawKpiBox(14, `TOTAL ${typeView.toUpperCase()}`, `${fmt(total)} FCFA`, typeView === "Revenu" ? 63 : 193, typeView === "Revenu" ? 156 : 84, typeView === "Revenu" ? 122 : 63);
-      drawKpiBox(14 + kpiW + 8, "VS PÉRIODE PRÉC.", `${delta >= 0 ? "+" : "−"}${fmt(Math.abs(delta))}`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
+      drawKpiBox(14, `TOTAL ${typeView.toUpperCase()}`, `${fmtPdf(total)} FCFA`, typeView === "Revenu" ? 63 : 193, typeView === "Revenu" ? 156 : 84, typeView === "Revenu" ? 122 : 63);
+      drawKpiBox(14 + kpiW + 8, "VS PÉRIODE PRÉC.", `${delta >= 0 ? "+" : "−"}${fmtPdf(Math.abs(delta))}`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
       drawKpiBox(14 + (kpiW + 8) * 2, "VARIATION", `${delta >= 0 ? "+" : "−"}${Math.abs(deltaPct).toFixed(0)}%`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
 
       autoTable(doc, {
         startY: 68,
         head: [["Catégorie", "Montant (FCFA)", "% du total"]],
-        body: catList.map((c) => [c.name, fmt(c.value), `${c.pct.toFixed(0)}%`]),
+        body: catList.map((c) => [c.name, fmtPdf(c.value), `${c.pct.toFixed(0)}%`]),
         headStyles: { fillColor: [26, 43, 76] },
         styles: { fontSize: 8.5 },
         columnStyles: { 1: { halign: "right" }, 2: { halign: "right" } },
@@ -3716,7 +3722,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         autoTable(doc, {
           startY: y + 3,
           head: [["Sous-catégorie", "Montant (FCFA)", "% de la catégorie"]],
-          body: subs.map((s) => [s.name, fmt(s.value), `${s.pct.toFixed(0)}%`]),
+          body: subs.map((s) => [s.name, fmtPdf(s.value), `${s.pct.toFixed(0)}%`]),
           headStyles: { fillColor: [201, 162, 39], textColor: [26, 26, 26] },
           styles: { fontSize: 8 },
           columnStyles: { 1: { halign: "right" }, 2: { halign: "right" } },
@@ -7158,9 +7164,9 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
         doc.text(value, x + 5, kpiY + 15);
         doc.setFont("helvetica", "normal");
       };
-      drawKpiBox(14, "REVENUS", `${fmt(totalRevenus)} FCFA`, 63, 156, 122);
-      drawKpiBox(14 + kpiW + 8, "DÉPENSES", `${fmt(totalDepenses)} FCFA`, 193, 84, 63);
-      drawKpiBox(14 + (kpiW + 8) * 2, "SOLDE", `${fmt(solde)} FCFA`, solde >= 0 ? 63 : 193, solde >= 0 ? 156 : 84, solde >= 0 ? 122 : 63);
+      drawKpiBox(14, "REVENUS", `${fmtPdf(totalRevenus)} FCFA`, 63, 156, 122);
+      drawKpiBox(14 + kpiW + 8, "DÉPENSES", `${fmtPdf(totalDepenses)} FCFA`, 193, 84, 63);
+      drawKpiBox(14 + (kpiW + 8) * 2, "SOLDE", `${fmtPdf(solde)} FCFA`, solde >= 0 ? 63 : 193, solde >= 0 ? 156 : 84, solde >= 0 ? 122 : 63);
 
       // Graphique en barres dessiné à la main (revenus vs dépenses par mois, jusqu'à 12 mois)
       let chartBottom = 68;
@@ -7193,13 +7199,13 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       let curMonth: string | null = null, monthRev = 0, monthDep = 0;
       const pushSubtotal = () => {
         if (curMonth === null) return;
-        rows.push([{ content: `▸ Sous-total ${monthLabel(curMonth)}`, colSpan: 4 }, { content: `Rev: ${fmt(monthRev)} / Dép: ${fmt(monthDep)}`, styles: { halign: "right" } }]);
+        rows.push([{ content: `▸ Sous-total ${monthLabel(curMonth)}`, colSpan: 4 }, { content: `Rev: ${fmtPdf(monthRev)} / Dép: ${fmtPdf(monthDep)}`, styles: { halign: "right" } }]);
       };
       sortedTx.forEach((t) => {
         if (curMonth !== null && t.month !== curMonth) { pushSubtotal(); monthRev = 0; monthDep = 0; }
         curMonth = t.month;
         if (t.type === "Revenu") monthRev += t.amount; else monthDep += t.amount;
-        rows.push([dateLabelFull(t.date), t.time || "—", t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, fmt(t.amount)]);
+        rows.push([dateLabelFull(t.date), t.time || "—", t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, fmtPdf(t.amount)]);
       });
       pushSubtotal();
 
