@@ -6505,17 +6505,18 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       <Panel title={`Entrées du ${dateLabelFull(quickDate)}`} subtitle={`Revenus ${fmt(sumFor((t) => t.date === quickDate).rev)} · Dépenses ${fmt(sumFor((t) => t.date === quickDate).dep)} · Solde ${fmt(sumFor((t) => t.date === quickDate).solde)}`}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {quickDateEntries.map((t) => (
-            <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: editingId === t.id ? "rgba(201,162,39,0.08)" : COLOR.surfaceRaised, border: editingId === t.id ? `1px solid ${COLOR.gold}` : "1px solid transparent", borderRadius: 6 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, width: 38, flexShrink: 0 }}>{t.time}</span>}
+            <div key={t.id} style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "4px 10px", padding: "8px 12px", background: editingId === t.id ? "rgba(201,162,39,0.08)" : COLOR.surfaceRaised, border: editingId === t.id ? `1px solid ${COLOR.gold}` : "1px solid transparent", borderRadius: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 160px", overflow: "hidden" }}>
+                {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{t.time}</span>}
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block", flexShrink: 0 }} />
-                <span style={{ fontSize: 12.5, whiteSpace: "nowrap" }}>{t.category}{t.subcategory && ` · ${t.subcategory}`}</span>
-                <span style={{ fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{t.type}</span>
-                {t.account && <span style={{ fontSize: 10.5, color: COLOR.slateBlueSoft, flexShrink: 0 }}>{t.account}</span>}
-                {t.note && <span style={{ fontSize: 11, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</span>}
+                <span style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                  {t.category}{t.subcategory && ` · ${t.subcategory}`}
+                  {t.account && <span style={{ color: COLOR.slateBlueSoft }}> · {t.account}</span>}
+                  {t.note && <span style={{ color: COLOR.inkMuted, fontStyle: "italic" }}> · « {t.note} »</span>}
+                </span>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, marginLeft: "auto" }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, whiteSpace: "nowrap" }}>{fmt(t.amount)}</span>
                 <button onClick={() => editEntry(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
                 <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
               </div>
