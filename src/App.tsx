@@ -3560,8 +3560,9 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
 // ============================================================
 const DONUT_COLORS = [COLOR.emerald, COLOR.slateBlue, COLOR.gold, COLOR.violet, COLOR.clay, COLOR.emeraldSoft, COLOR.slateBlueSoft, COLOR.goldSoft];
 
-function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMonths, accounts }: {
+function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMonths, accounts, onNavigate }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; categoryGroups: Record<string, Group>; allMonths: string[]; accounts: Account[];
+  onNavigate?: (tab: Tab, data?: any) => void;
 }) {
   const withGroup = useMemo(
     () => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié") })),
@@ -3847,6 +3848,12 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: COLOR.ink }}>{fmt(c.value)} FCFA</div>
                     <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{c.pct.toFixed(0)}%</div>
                   </div>
+                  {onNavigate && (
+                    <button onClick={(e) => { e.stopPropagation(); onNavigate("categoryoverview", { category: c.name, type: typeView }); }}
+                      title="Voir la tendance mensuelle de cette catégorie" style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
+                      <Activity size={15} />
+                    </button>
+                  )}
                 </div>
                 {isOpen && (
                   <div style={{ padding: "0 0 14px 54px", display: "flex", flexDirection: "column", gap: 2, borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -3932,8 +3939,8 @@ function trailingRange(allMonths: string[], n: number): [string, string] {
   return [from, cur];
 }
 
-function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
-  transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[];
+function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navContext }: {
+  transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[]; navContext?: { tab: Tab; data: any } | null;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [type, setType] = useState<TxType>("Dépense");
@@ -3941,6 +3948,17 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths }: {
   const [subcategory, setSubcategory] = useState("");
   const [presetKey, setPresetKey] = useState("6m");
   const [granularity, setGranularity] = useState<"mois" | "jour">("mois");
+
+  // Arrivée depuis un lien contextuel (ex: clic sur une catégorie ailleurs dans l'app) —
+  // pré-sélectionne cette catégorie/type au lieu du choix par défaut.
+  useEffect(() => {
+    if (navContext?.tab === "categoryoverview" && navContext.data?.category) {
+      setType(navContext.data.type || "Dépense");
+      setCategory(navContext.data.category);
+      setSubcategory(navContext.data.subcategory || "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navContext]);
 
   const presets: { key: string; label: string; range: () => [string, string] }[] = [
     { key: "mtd", label: "MTD", range: () => { const k = dateToMonthKey(todayISO()); return [k, k]; } },
@@ -4946,11 +4964,11 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // ACTIVITÉS & RENTABILITÉ — suivi par activité réelle (pas par compte, car
 // l'argent circule entre comptes) : marge, ROI et délai de remboursement estimé.
 // ============================================================
-function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups, accounts }: {
+function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups, accounts, onNavigate }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; activities: string[]; setActivities: (a: string[]) => void;
   categoryActivity: Record<string, string>; setCategoryActivity: (m: Record<string, string>) => void;
   activityCapital: Record<string, number>; setActivityCapital: (m: Record<string, number>) => void;
-  allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
+  allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[]; onNavigate?: (tab: Tab, data?: any) => void;
 }) {
   const [newActivity, setNewActivity] = useState("");
   const [confirmDeleteActivity, setConfirmDeleteActivity] = useState<string | null>(null);
@@ -5305,6 +5323,11 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       </CollapsibleSection>
 
       <CollapsibleSection title="Assigner chaque catégorie à une activité" subtitle="Par catégorie, indépendamment du compte utilisé pour la transaction">
+        {onNavigate && (
+          <button onClick={() => onNavigate("gestioncategories")} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 11.5, padding: "0 0 12px 0" }}>
+            Une catégorie manque ou est mal nommée ? La créer/renommer dans Gestion des catégories <ArrowRight size={11} />
+          </button>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {allCategories.map((c) => (
             <div key={c} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -5350,9 +5373,9 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 // CHARGES FIXES vs VARIABLES — pilote classifyCharges, laisse l'utilisateur
 // ajuster chaque poste, exporte un rapport, et donne un "reste à vivre" estimé.
 // ============================================================
-function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture }: {
+function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate }: {
   transactions: Transaction[]; chargeOverrides: Record<string, ChargeOverride>; setChargeOverrides: (o: Record<string, ChargeOverride>) => void;
-  includeGrundfosVoiture: boolean; setIncludeGrundfosVoiture: (b: boolean) => void;
+  includeGrundfosVoiture: boolean; setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void;
 }) {
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
   const result = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
@@ -5458,6 +5481,15 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         <Kpi label="Variables régulières / mois" value={fmt(result.totalVariable)} tone={COLOR.goldSoft} icon={Repeat} />
         <Kpi label="Reste à vivre estimé / mois" value={fmt(result.resteAVivre)} tone={result.resteAVivre >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
       </div>
+
+      {onNavigate && (
+        <button onClick={() => onNavigate("diagnostic")} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`,
+          borderRadius: 8, color: COLOR.slateBlueSoft, padding: "8px 14px", fontSize: 12, cursor: "pointer", width: "fit-content",
+        }}>
+          <Gauge size={13} /> Voir ces charges dans le Diagnostic Financier (ratios DTI, logement/revenu…) <ArrowRight size={12} />
+        </button>
+      )}
 
       <PanelWithHelp title="Classification des charges" subtitle="Basée sur la régularité (mois présents sur 6) et la variabilité du montant — ajustable poste par poste"
         explain="Un poste est classé 'Fixe' automatiquement s'il apparaît sur au moins 5 des 6 derniers mois avec un montant peu variable (coefficient de variation < 20%). 'Variable régulière' s'il revient souvent mais avec un montant qui fluctue. 'Occasionnel' sinon. Tu peux forcer le mode et le montant de n'importe quel poste — utile par exemple pour un loyer qui vient de changer, ou une sous-catégorie que tu sais fixe malgré des données historiques bruitées."
@@ -5858,8 +5890,9 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
   );
 }
 
-function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture }: {
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, onNavigate }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
+  onNavigate?: (tab: Tab, data?: any) => void;
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
@@ -5924,7 +5957,12 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
                 <span style={{ fontSize: 13, fontWeight: 500, marginLeft: 3 }}>{r.unit === "mois" ? " mois" : r.unit}</span>
               </div>
               <div style={{ fontSize: 11, color: COLOR.inkMuted, marginBottom: 4 }}>{r.benchmark}</div>
-              <div style={{ fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.5 }}>{r.explain}</div>
+              <div style={{ fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.5, marginBottom: (r.key === "dti" || r.key === "logement") && onNavigate ? 8 : 0 }}>{r.explain}</div>
+              {(r.key === "dti" || r.key === "logement") && onNavigate && (
+                <button onClick={() => onNavigate("charges")} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 11, padding: 0 }}>
+                  Voir le détail dans Charges Fixes & Variables <ArrowRight size={11} />
+                </button>
+              )}
             </div>
           );
         })}
@@ -7929,6 +7967,12 @@ export default function GrandLivre() {
   const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals);
   const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring);
   const [tab, setTab] = useState<Tab>("saisie");
+  // Navigation contextuelle entre pages : navigateTo("categoryoverview", { category: "Shopping" })
+  // change d'onglet ET transmet un contexte que la page de destination applique à son
+  // ouverture (ex : catégorie déjà sélectionnée) — pour relier les pages entre elles
+  // selon leur logique plutôt que de forcer une navigation manuelle à chaque fois.
+  const [navContext, setNavContext] = useState<{ tab: Tab; data: any } | null>(null);
+  const navigateTo = (target: Tab, data?: any) => { setNavContext({ tab: target, data }); setTab(target); };
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const isMobile = useIsMobile();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -8225,8 +8269,8 @@ export default function GrandLivre() {
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} />}
-          {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
+          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
+          {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} navContext={navContext} />}
           {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
@@ -8252,9 +8296,9 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} />}
-          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} />}
-          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} />}
+          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} onNavigate={navigateTo} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
