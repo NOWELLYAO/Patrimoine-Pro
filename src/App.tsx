@@ -4205,12 +4205,26 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
 // PAGE VALEUR NETTE — historique mensuel complet, rapport explicatif
 // mois par mois, et plus grosses transactions individuelles.
 // ============================================================
-function NetWorthTab({ accounts, transactions }: { accounts: Account[]; transactions: Transaction[] }) {
+function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[]; transactions: Transaction[]; filters: Filters }) {
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
-  const report = useMemo(() => computeNetWorthReport(accounts, transactions), [accounts, transactions]);
-  const current = report.rows[report.rows.length - 1];
-  const first = report.rows[0];
-  const totalGrowth = current && first ? current.netWorth - (report.rows.length > 1 ? first.netWorth - first.delta : first.netWorth) : 0;
+  // La série complète est toujours calculée sur tout l'historique — un cumul de valeur
+  // nette n'a de sens que reconstruit depuis le début. Seul l'AFFICHAGE (tableau, graphique,
+  // KPI, plus grosses transactions) respecte ensuite le filtre "Du mois / Au mois" global,
+  // comme sur les autres pages de l'app.
+  const fullReport = useMemo(() => computeNetWorthReport(accounts, transactions), [accounts, transactions]);
+  const fromKey = monthSortKey(filters.from), toKey = monthSortKey(filters.to);
+  const rows = useMemo(() => fullReport.rows.filter((r) => { const k = monthSortKey(r.month); return k >= fromKey && k <= toKey; }), [fullReport, fromKey, toKey]);
+  const report = useMemo(() => {
+    const inRange = transactions.filter((t) => { const k = monthSortKey(dateToMonthKey(t.date)); return k >= fromKey && k <= toKey; });
+    const depTx = inRange.filter((t) => t.type === "Dépense").sort((a, b) => b.amount - a.amount).slice(0, 15);
+    const revTx = inRange.filter((t) => t.type === "Revenu").sort((a, b) => b.amount - a.amount).slice(0, 15);
+    return { rows, depTx, revTx };
+  }, [rows, transactions, fromKey, toKey]);
+  const current = rows[rows.length - 1];
+  const first = rows[0];
+  const totalGrowth = current && first ? current.netWorth - (rows.length > 1 ? first.netWorth - first.delta : first.netWorth) : 0;
+  const best = rows.length ? rows.reduce((a, b) => (b.delta > a.delta ? b : a), rows[0]) : undefined;
+  const worst = rows.length ? rows.reduce((a, b) => (b.delta < a.delta ? b : a), rows[0]) : undefined;
 
   const exportNetWorthExcel = async () => {
     setXlsState("loading");
@@ -4276,11 +4290,11 @@ function NetWorthTab({ accounts, transactions }: { accounts: Account[]; transact
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Valeur nette actuelle" value={fmt(current?.netWorth ?? 0)} tone={COLOR.goldSoft} icon={Wallet} />
         <Kpi label="Évolution totale (période)" value={fmt(totalGrowth)} tone={totalGrowth >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={totalGrowth >= 0 ? TrendingUp : TrendingDown} />
-        <Kpi label="Meilleur mois" value={report.best ? `${monthLabel(report.best.month)} (+${fmt(report.best.delta)})` : "—"} tone={COLOR.emeraldSoft} icon={TrendingUp} />
-        <Kpi label="Pire mois" value={report.worst ? `${monthLabel(report.worst.month)} (${fmt(report.worst.delta)})` : "—"} tone={COLOR.claySoft} icon={TrendingDown} />
+        <Kpi label="Meilleur mois" value={best ? `${monthLabel(best.month)} (+${fmt(best.delta)})` : "—"} tone={COLOR.emeraldSoft} icon={TrendingUp} />
+        <Kpi label="Pire mois" value={worst ? `${monthLabel(worst.month)} (${fmt(worst.delta)})` : "—"} tone={COLOR.claySoft} icon={TrendingDown} />
       </div>
 
-      <PanelWithHelp title="Valeur nette mensuelle" subtitle="Historique complet, avec l'explication automatique de chaque variation"
+      <PanelWithHelp title="Valeur nette mensuelle" subtitle={`${monthLabel(filters.from)} — ${monthLabel(filters.to)} · explication automatique de chaque variation`}
         explain="Pour chaque mois, la variation de valeur nette est expliquée par le principal poste de dépense et le principal poste de revenu de ce mois-là — pas une simple observation du solde, mais une tentative de dire concrètement ce qui l'a fait bouger."
         right={
           <button onClick={exportNetWorthExcel} disabled={xlsState === "loading"} style={{
@@ -4325,7 +4339,7 @@ function NetWorthTab({ accounts, transactions }: { accounts: Account[]; transact
       </PanelWithHelp>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 20 }}>
-        <Panel title="Les plus grosses dépenses" subtitle="Toutes périodes confondues, les 15 transactions les plus élevées">
+        <Panel title="Les plus grosses dépenses" subtitle={`${monthLabel(filters.from)} — ${monthLabel(filters.to)} · les 15 transactions les plus élevées`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {report.depTx.map((t) => (
               <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -4339,7 +4353,7 @@ function NetWorthTab({ accounts, transactions }: { accounts: Account[]; transact
             {!report.depTx.length && <EmptyState text="Aucune dépense." />}
           </div>
         </Panel>
-        <Panel title="Les plus gros revenus" subtitle="Toutes périodes confondues, les 15 transactions les plus élevées">
+        <Panel title="Les plus gros revenus" subtitle={`${monthLabel(filters.from)} — ${monthLabel(filters.to)} · les 15 transactions les plus élevées`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {report.revTx.map((t) => (
               <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -7685,7 +7699,7 @@ export default function GrandLivre() {
           )}
 
           {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
-          {tab === "valeurnette" && <NetWorthTab accounts={accounts} transactions={transactions} />}
+          {tab === "valeurnette" && <NetWorthTab accounts={accounts} transactions={transactions} filters={filters} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
