@@ -535,12 +535,84 @@ function Panel({ title, subtitle, right, children, style = {} }: {
   );
 }
 
+// Panneau repliable — même carte visuelle que Panel, mais fermé (ou ouvert) par
+// défaut avec un clic sur l'en-tête pour dérouler. Utilisé pour raccourcir les
+// pages qui empilent beaucoup de contenu, sans rien retirer : tout reste
+// accessible, juste replié tant qu'on n'en a pas besoin.
+function CollapsibleSection({ title, subtitle, defaultOpen = false, badge, badgeColor, children }: {
+  title: string; subtitle?: string; defaultOpen?: boolean; badge?: string; badgeColor?: string; children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, overflow: "hidden" }}>
+      <button onClick={() => setOpen((v) => !v)} style={{
+        width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
+        padding: "20px 24px", background: "transparent", border: "none", cursor: "pointer", textAlign: "left",
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <h3 style={{ fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 500, margin: 0, color: COLOR.ink }}>{title}</h3>
+          {subtitle && <div style={{ color: COLOR.inkMuted, fontSize: 12.5, marginTop: 4 }}>{subtitle}</div>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          {badge && <span style={{ fontSize: 11, fontWeight: 700, color: badgeColor || COLOR.goldSoft, background: `${badgeColor || COLOR.gold}22`, borderRadius: 20, padding: "3px 10px", whiteSpace: "nowrap" }}>{badge}</span>}
+          <ChevronDown size={17} color={COLOR.inkMuted} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
+        </div>
+      </button>
+      {open && <div style={{ padding: "0 24px 24px 24px" }}>{children}</div>}
+    </div>
+  );
+}
+
 // Panneau avec bouton d'aide (?) — affiche une explication du graphique au clic,
-// juste au-dessus du contenu, sans quitter la page.
-function PanelWithHelp({ title, subtitle, explain, right, children, style = {} }: {
+// juste au-dessus du contenu, sans quitter la page. Optionnellement repliable
+// (collapsible + defaultOpen) pour raccourcir les pages qui empilent plusieurs
+// de ces panneaux — comportement par défaut inchangé si non précisé.
+function PanelWithHelp({ title, subtitle, explain, right, children, style = {}, collapsible = false, defaultOpen = true, badge, badgeColor }: {
   title?: string; subtitle?: string; explain: string; right?: React.ReactNode; children: React.ReactNode; style?: React.CSSProperties;
+  collapsible?: boolean; defaultOpen?: boolean; badge?: string; badgeColor?: string;
 }) {
   const [showHelp, setShowHelp] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
+
+  const helpButton = (
+    <button onClick={() => setShowHelp((s) => !s)} title="Comprendre ce graphique" style={{
+      width: 24, height: 24, borderRadius: "50%", border: `1px solid ${showHelp ? COLOR.gold : COLOR.hairline}`,
+      background: showHelp ? "rgba(201,162,39,0.15)" : "transparent", color: showHelp ? COLOR.goldSoft : COLOR.inkMuted,
+      cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+    }}>
+      <HelpCircle size={14} />
+    </button>
+  );
+  const explainBlock = showHelp && (
+    <div style={{ background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "12px 14px", marginBottom: 16, fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+      {explain}
+    </div>
+  );
+
+  if (collapsible) {
+    return (
+      <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, overflow: "hidden", ...style }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => setOpen((v) => !v)} style={{
+            flex: 1, minWidth: 0, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
+            padding: "20px 24px", background: "transparent", border: "none", cursor: "pointer", textAlign: "left",
+          }}>
+            <div style={{ minWidth: 0 }}>
+              {title && <h3 style={{ fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 500, margin: 0, color: COLOR.ink }}>{title}</h3>}
+              {subtitle && <div style={{ color: COLOR.inkMuted, fontSize: 12.5, marginTop: 4 }}>{subtitle}</div>}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              {badge && <span style={{ fontSize: 11, fontWeight: 700, color: badgeColor || COLOR.goldSoft, background: `${badgeColor || COLOR.gold}22`, borderRadius: 20, padding: "3px 10px", whiteSpace: "nowrap" }}>{badge}</span>}
+              <ChevronDown size={17} color={COLOR.inkMuted} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
+            </div>
+          </button>
+          {open && <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 24, flexShrink: 0 }}>{right}{helpButton}</div>}
+        </div>
+        {open && <div style={{ padding: "0 24px 24px 24px" }}>{explainBlock}{children}</div>}
+      </div>
+    );
+  }
+
   return (
     <Panel
       title={title}
@@ -549,21 +621,11 @@ function PanelWithHelp({ title, subtitle, explain, right, children, style = {} }
       right={
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {right}
-          <button onClick={() => setShowHelp((s) => !s)} title="Comprendre ce graphique" style={{
-            width: 24, height: 24, borderRadius: "50%", border: `1px solid ${showHelp ? COLOR.gold : COLOR.hairline}`,
-            background: showHelp ? "rgba(201,162,39,0.15)" : "transparent", color: showHelp ? COLOR.goldSoft : COLOR.inkMuted,
-            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-          }}>
-            <HelpCircle size={14} />
-          </button>
+          {helpButton}
         </div>
       }
     >
-      {showHelp && (
-        <div style={{ background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "12px 14px", marginBottom: 16, fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
-          {explain}
-        </div>
-      )}
+      {explainBlock}
       {children}
     </Panel>
   );
@@ -4017,6 +4079,7 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
 
   return (
     <PanelWithHelp title="Projection de valeur nette" subtitle="Basée sur la tendance médiane des derniers relevés — bande optimiste/pessimiste robuste aux écarts ponctuels"
+      collapsible defaultOpen={false}
       explain="La ligne dorée centrale prolonge la variation médiane de ta valeur nette sur tes derniers mois (jusqu'à 9). Les deux lignes pointillées (vert=optimiste, rouge=prudent) montrent une fourchette autour de cette projection, basée sur l'écart absolu médian plutôt qu'un écart-type classique — un seul mois exceptionnel (gros achat, rentrée imprévue) pèse donc beaucoup moins sur la prévision qu'avant. C'est une extrapolation statistique, pas une garantie."
       right={
         <div style={{ display: "flex", gap: 6 }}>
@@ -4127,6 +4190,7 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
 
   return (
     <PanelWithHelp title="Projection sur mesure" subtitle="Simule ta valeur nette à une échéance donnée en excluant ou en fixant certaines charges"
+      collapsible defaultOpen={false}
       explain="Coche les catégories à exclure entièrement de la projection (ex : une dette qui sera soldée, un déménagement ponctuel qui ne se reproduira pas), et/ou remplace une catégorie par un montant fixe mensuel (ex : un nouveau loyer). Le calcul utilise la médiane des 6 derniers mois pour rester robuste face aux mois exceptionnels, avec une fourchette prudent/optimiste basée sur le pire et le meilleur mois de revenu réellement observés — plutôt qu'un chiffre unique qui masquerait la vraie volatilité.">
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
 
@@ -4225,6 +4289,8 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
   const totalGrowth = current && first ? current.netWorth - (rows.length > 1 ? first.netWorth - first.delta : first.netWorth) : 0;
   const best = rows.length ? rows.reduce((a, b) => (b.delta > a.delta ? b : a), rows[0]) : undefined;
   const worst = rows.length ? rows.reduce((a, b) => (b.delta < a.delta ? b : a), rows[0]) : undefined;
+  const [visibleMonths, setVisibleMonths] = useState(6);
+  useEffect(() => { setVisibleMonths(6); }, [fromKey, toKey]);
 
   const exportNetWorthExcel = async () => {
     setXlsState("loading");
@@ -4323,7 +4389,7 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
         </ResponsiveContainer>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
-          {report.rows.slice().reverse().map((r) => (
+          {report.rows.slice().reverse().slice(0, visibleMonths).map((r) => (
             <div key={r.month} style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
                 <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: COLOR.ink }}>{monthLabel(r.month)}</span>
@@ -4335,6 +4401,14 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
               <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{r.explanation}</div>
             </div>
           ))}
+          {report.rows.length > visibleMonths && (
+            <button onClick={() => setVisibleMonths((v) => v + 6)} style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "transparent",
+              border: `1px dashed ${COLOR.hairline}`, borderRadius: 10, color: COLOR.goldSoft, padding: "10px 0", fontSize: 12.5, cursor: "pointer", marginTop: 4,
+            }}>
+              <ChevronDown size={14} /> Afficher les {Math.min(6, report.rows.length - visibleMonths)} mois précédents ({report.rows.length - visibleMonths} restants)
+            </button>
+          )}
         </div>
       </PanelWithHelp>
 
@@ -4929,7 +5003,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         </div>
       </PanelWithHelp>
 
-      <Panel title="Gérer les activités" subtitle="Ajoute une activité, et renseigne un capital investi si tu veux suivre un retour sur investissement (ex : achat d'un véhicule)">
+      <CollapsibleSection title="Gérer les activités" subtitle="Ajoute une activité, et renseigne un capital investi si tu veux suivre un retour sur investissement (ex : achat d'un véhicule)">
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
           <input style={{ ...inputStyle, flex: 1 }} placeholder="Nouvelle activité (ex : Vente Pompe)" value={newActivity}
             onChange={(e) => setNewActivity(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addActivity(); }} />
@@ -4952,9 +5026,9 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
           ))}
           {!activities.length && <EmptyState text="Aucune activité personnalisée. « Personnel » reste le fourre-tout par défaut." />}
         </div>
-      </Panel>
+      </CollapsibleSection>
 
-      <Panel title="Assigner chaque catégorie à une activité" subtitle="Par catégorie, indépendamment du compte utilisé pour la transaction">
+      <CollapsibleSection title="Assigner chaque catégorie à une activité" subtitle="Par catégorie, indépendamment du compte utilisé pour la transaction">
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {allCategories.map((c) => (
             <div key={c} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -4966,7 +5040,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
             </div>
           ))}
         </div>
-      </Panel>
+      </CollapsibleSection>
 
       <ConfirmDialog
         open={!!confirmDeleteActivity}
@@ -5428,6 +5502,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
       </div>
 
       <PanelWithHelp title="Simulateur de résilience" subtitle="Stress test simplifié : que se passerait-il si tes revenus baissaient pendant plusieurs mois ?"
+        collapsible defaultOpen={false}
         explain="Méthode inspirée des tests de résistance utilisés par les régulateurs bancaires (ex. stress tests de la Fed ou de la BCE), adaptée à un budget personnel : on simule une baisse de revenu pendant une durée donnée, charges fixes et variables régulières inchangées, et on regarde ce qu'il resterait de ta valeur nette actuelle à la fin de la période.">
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div>
@@ -5477,6 +5552,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
       </PanelWithHelp>
 
       <PanelWithHelp title="Indicateurs asiatiques de gestion financière" subtitle="Règle chinoise du 4-3-2-1, norme d'épargne chinoise, méthode Kakeibo japonaise"
+        collapsible defaultOpen={false}
         explain="Ces cadres viennent de traditions de gestion financière personnelle distinctes des repères bancaires occidentaux ci-dessus. La règle du 4-3-2-1 (家庭资产配置法则) est enseignée dans les certifications chinoises de planification financière (AFP Chine). Le taux d'épargne chinois reflète le niveau d'épargne traditionnellement très élevé des ménages en Chine (30 à 45%, contre ~20% recommandé en Occident). Le Kakeibo (家計簿) est une méthode budgétaire japonaise créée en 1904 par Hani Motoko, toujours largement utilisée aujourd'hui — elle classe chaque dépense en 4 catégories plutôt que de suivre un simple total, pour favoriser la réflexion plutôt que le seul chiffrage.">
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 
