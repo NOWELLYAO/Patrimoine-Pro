@@ -1381,12 +1381,12 @@ const defaultChargeOverrides: Record<string, ChargeOverride> = {
   "Abonnements::Claude": { mode: "variable" }, // abonnement récent (3/6 mois), montant encore instable — à reclasser en Fixe une fois stabilisé
 };
 
-function classifyCharges(transactions: Transaction[], overrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
+function classifyCharges(transactions: Transaction[], overrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, monthsWindow: number = 6) {
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const lookback: string[] = [];
   let mk = prevMonthKey(curMonth);
-  for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+  for (let i = 0; i < monthsWindow; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
 
   const byPosteMonth: Record<string, Record<string, number>> = {};
   transactions.forEach((t) => {
@@ -1399,9 +1399,14 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     byPosteMonth[poste][tmk] = (byPosteMonth[poste][tmk] || 0) + t.amount;
   });
 
+  // Seuils de régularité exprimés en proportion du nombre de mois observés (≈83%
+  // et ≈67%, les mêmes ratios qu'avec la fenêtre de 6 mois d'origine) plutôt qu'en
+  // nombre de mois fixe — pour rester cohérents quelle que soit la taille de la fenêtre.
+  const fixedRatio = 5 / 6, variableRatio = 4 / 6;
   const rows = Object.entries(byPosteMonth).map(([poste, months]) => {
     const vals = lookback.map((m) => months[m] || 0);
     const present = vals.filter((v) => v > 0).length;
+    const presentRatio = present / monthsWindow;
     const meanV = mean(vals);
     const medianV = median(vals);
     const sd = stdev(vals);
@@ -1413,9 +1418,9 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     if (override && override.mode !== "auto") {
       mode = override.mode;
       amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : medianV;
-    } else if (present >= 5 && cv !== null && cv < 20) {
+    } else if (presentRatio >= fixedRatio && cv !== null && cv < 20) {
       mode = "fixe"; amount = medianV;
-    } else if (present >= 4) {
+    } else if (presentRatio >= variableRatio) {
       mode = "variable"; amount = medianV;
     } else {
       mode = "occasionnelle"; amount = medianV;
@@ -1435,6 +1440,18 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   return { rows, totalFixe, totalVariable, totalOccasionnelle, avgRevenu, resteAVivre, lookback };
 }
 
+// Construit la liste des mois depuis le tout premier mois de transactions
+// disponible jusqu'au mois précédant aujourd'hui — pour les analyses qui doivent
+// porter sur tout l'historique (ex : indicateurs asiatiques) plutôt que sur une
+// fenêtre glissante de 6 mois, sur suggestion explicite de l'utilisateur.
+function monthsSinceInception(transactions: Transaction[]): number {
+  if (!transactions.length) return 6;
+  const today = todayISO();
+  const curMonth = dateToMonthKey(today);
+  const firstMonth = transactions.map((t) => dateToMonthKey(t.date)).sort((a, b) => monthSortKey(a) - monthSortKey(b))[0];
+  return Math.max(1, monthSortKey(prevMonthKey(curMonth)) - monthSortKey(firstMonth) + 1);
+}
+
 // ============================================================
 // RATIOS FINANCIERS INSTITUTIONNELS — les mêmes repères que ceux utilisés par
 // les banques, le CFPB (régulateur américain de la protection financière) et
@@ -1447,7 +1464,10 @@ interface RatioResult { key: string; label: string; value: number; unit: "%" | "
 function computeFinancialRatios(
   transactions: Transaction[], accounts: Account[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean
 ) {
-  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture);
+  // Sur suggestion explicite de l'utilisateur (06/08/2026) : toute la page Diagnostic
+  // Financier porte désormais sur l'historique complet plutôt qu'une fenêtre de 6 mois.
+  const windowMonths = monthsSinceInception(transactions);
+  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
   const netWorth = totalAccountsBalance(accounts, transactions);
   const essentialMonthly = charges.totalFixe + charges.totalVariable;
 
@@ -1512,7 +1532,7 @@ function computeFinancialRatios(
     key: "concentration", label: "Concentration des revenus", value: topShare, unit: "%",
     verdict: topShare < 50 ? "sain" : topShare <= 75 ? "vigilance" : "risque",
     benchmark: "< 50% diversifié · 50-75% concentré · > 75% forte dépendance à une seule source",
-    explain: `Part du revenu total (6 derniers mois) apportée par la plus grosse source ("${topSource}") — plus c'est élevé, plus un choc sur cette seule source affecterait l'ensemble du budget.`,
+    explain: `Part du revenu total (historique complet, ${windowMonths} mois) apportée par la plus grosse source ("${topSource}") — plus c'est élevé, plus un choc sur cette seule source affecterait l'ensemble du budget.`,
   });
 
   return { ratios, netWorth, essentialMonthly, topSource, topShare };
@@ -1590,14 +1610,23 @@ const CN_4321_CATEGORIES = {
   protection: ["Âge D’or Retraite", "Plan Éducation", "Securicompte"],
 };
 const KAKEIBO_CATEGORIES = {
-  survie: ["Logement", "Loyer", "PAYEMENT MAISON", "Aliments", "Santé", "Transport", "Utilitaires", "Enfants & Maman"],
-  optionnel: ["Divertissement", "Shopping", "Vêtements", "Personnel", "Voyage", "VACANCE NESHER"],
-  culture: ["Éducation", "FORMATION", "Abonnements", "Pack Club"],
-  extra: ["Cadeaux", "Invitation", "Ajustement", "Générales", "General"],
+  // Structure ajustée par l'utilisateur le 06/08/2026, adaptée à son niveau de
+  // revenus et ses habitudes réelles (ex : Pack Club = besoin bancaire courant,
+  // Abonnements/Cadeaux/Invitations = envies plutôt qu'imprévus, Utilitaires
+  // interprété comme téléphone/accessoires = une envie plutôt qu'un besoin).
+  survie: ["Logement", "Loyer", "PAYEMENT MAISON", "Enfants & Maman", "Aliments", "Santé", "Transport", "Pack Club"],
+  optionnel: ["Utilitaires", "Divertissement", "Shopping", "VACANCE NESHER", "Vêtements", "Personnel", "Voyage", "Abonnements", "Cadeaux", "Invitation"],
+  culture: ["Éducation", "FORMATION"],
+  extra: ["Ajustement", "Générales", "General"],
 };
 
 function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
-  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture);
+  // Sur suggestion explicite de l'utilisateur (06/08/2026) : ces indicateurs portent
+  // sur tout l'historique depuis la toute première transaction, pas sur une fenêtre
+  // glissante de 6 mois — plus représentatif pour des ratios censés refléter un
+  // comportement de fond plutôt qu'un instantané récent.
+  const windowMonths = monthsSinceInception(transactions);
+  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
   const lookback = charges.lookback;
   const avgRevenu = charges.avgRevenu;
 
@@ -1620,8 +1649,13 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
     .reduce((a, t) => a + t.amount, 0) / lookback.length;
   const investMonthly = sumFor(CN_4321_CATEGORIES.investissement);
   const protectionMonthly = sumFor(CN_4321_CATEGORIES.protection);
-  const vieCouranteMonthly = Math.max(0, totalDepensesMonthly - investMonthly - protectionMonthly);
-  const liquideMonthly = Math.max(0, avgRevenu - totalDepensesMonthly); // reste à vivre non dépensé = épargne implicite
+  // Ni "vie courante" ni "épargne de précaution" ne sont plancherisées à 0 : si les
+  // dépenses dépassent le revenu moyen, l'épargne de précaution devient RÉELLEMENT
+  // négative (un déficit), et c'est affiché tel quel plutôt que masqué en silence.
+  // Grâce à ça, les 4 pourcentages totalisent toujours exactement 100%.
+  const vieCouranteMonthly = totalDepensesMonthly - investMonthly - protectionMonthly;
+  const liquideMonthly = avgRevenu - totalDepensesMonthly;
+  const hasDeficit = liquideMonthly < 0;
 
   const pct = (v: number) => (avgRevenu > 0 ? (v / avgRevenu) * 100 : 0);
   const rule4321 = [
@@ -1648,7 +1682,7 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
     { label: "Extra (imprévus)", key: "extra", value: sumFor(KAKEIBO_CATEGORIES.extra) },
   ].map((k) => ({ ...k, pct: (k.value / kakeiboTotal) * 100 }));
 
-  return { rule4321, tauxEpargne, kakeibo, avgRevenu };
+  return { rule4321, tauxEpargne, kakeibo, avgRevenu, hasDeficit, windowMonths };
 }
 
 // ============================================================
@@ -5903,7 +5937,8 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
     () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture),
     [transactions, accounts, chargeOverrides, includeGrundfosVoiture]
   );
-  const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+  const windowMonths = useMemo(() => monthsSinceInception(transactions), [transactions]);
+  const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths), [transactions, chargeOverrides, includeGrundfosVoiture, windowMonths]);
   const asian = useMemo(() => computeAsianIndicators(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
 
   const verdictStyle: Record<RatioVerdict, { color: string; bg: string; label: string; icon: any }> = {
@@ -5929,7 +5964,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
             Diagnostic global : {verdictStyle[overallVerdict].label}
           </div>
           <div style={{ fontSize: 12, color: COLOR.inkMuted, marginTop: 2 }}>
-            Basé sur 5 ratios utilisés par les banques, régulateurs financiers et cabinets de conseil en gestion de patrimoine — appliqués à tes vraies données des 6 derniers mois.
+            Basé sur 5 ratios utilisés par les banques, régulateurs financiers et cabinets de conseil en gestion de patrimoine — appliqués à tout ton historique ({windowMonths} mois, depuis ta première transaction).
           </div>
         </div>
         <button onClick={() => setRatiosNarrativeOpen(true)} style={{
@@ -6034,11 +6069,19 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, marginBottom: 4 }}>Règle chinoise du 4-3-2-1 (allocation du revenu mensuel)</div>
             <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Cible : 40% investissement · 30% vie courante · 20% protection/assurance · 10% épargne de précaution</div>
+            {asian.hasDeficit && (
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "rgba(193,84,63,0.1)", border: `1px solid ${COLOR.clay}`, borderRadius: 8, padding: "10px 12px", marginBottom: 14 }}>
+                <AlertTriangle size={14} color={COLOR.claySoft} style={{ flexShrink: 0, marginTop: 1 }} />
+                <div style={{ fontSize: 12, color: COLOR.claySoft, lineHeight: 1.5 }}>
+                  <strong>Déficit réel sur cette période :</strong> les dépenses moyennes dépassent le revenu moyen. "Épargne de précaution" est donc négative — ce n'est pas une erreur d'affichage, c'est le signe qu'il n'y a structurellement rien à mettre de côté sur cette période, et même un prélèvement sur l'existant.
+                </div>
+              </div>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {asian.rule4321.map((r) => {
                 const diff = r.value - r.target;
                 const aligned = Math.abs(diff) <= 5;
-                const color = aligned ? COLOR.emeraldSoft : Math.abs(diff) <= 15 ? COLOR.goldSoft : COLOR.claySoft;
+                const color = r.value < 0 ? COLOR.claySoft : aligned ? COLOR.emeraldSoft : Math.abs(diff) <= 15 ? COLOR.goldSoft : COLOR.claySoft;
                 return (
                   <div key={r.label}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 12.5 }}>
@@ -6047,7 +6090,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
                     </div>
                     <div style={{ position: "relative", height: 8, background: COLOR.hairline, borderRadius: 4, overflow: "hidden" }}>
                       <div style={{ position: "absolute", left: `${r.target}%`, top: 0, bottom: 0, width: 2, background: COLOR.inkMuted, zIndex: 2 }} />
-                      <div style={{ height: "100%", width: `${Math.min(100, r.value)}%`, background: color }} />
+                      <div style={{ height: "100%", width: `${Math.max(0, Math.min(100, r.value))}%`, background: color }} />
                     </div>
                   </div>
                 );
@@ -6069,7 +6112,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
           <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 20 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, marginBottom: 4 }}>Répartition Kakeibo (méthode japonaise)</div>
-            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Chaque dépense classée en 4 questions plutôt qu'un simple total — moyenne mensuelle sur 6 mois</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Chaque dépense classée en 4 questions plutôt qu'un simple total — moyenne mensuelle sur tout l'historique ({windowMonths} mois)</div>
             <div style={{ display: "flex", height: 10, borderRadius: 5, overflow: "hidden", marginBottom: 10 }}>
               {asian.kakeibo.map((k, i) => (
                 <div key={k.key} style={{ width: `${k.pct}%`, background: [COLOR.slateBlue, COLOR.clay, COLOR.gold, COLOR.emerald][i] }} title={`${k.label} : ${k.pct.toFixed(0)}%`} />
