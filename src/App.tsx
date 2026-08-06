@@ -3742,6 +3742,139 @@ function ProjectionPanel({ accounts, transactions }: { accounts: Account[]; tran
 }
 
 // ============================================================
+// PROJECTION SUR MESURE — simule la valeur nette à une échéance donnée en
+// excluant certaines catégories (ex: dette bientôt soldée, déménagement
+// ponctuel) et/ou en remplaçant une catégorie par un montant fixe mensuel
+// (ex: nouveau loyer). Basée sur la médiane des 6 derniers mois pour rester
+// robuste, avec une fourchette prudent/optimiste reflétant la vraie volatilité
+// des revenus observée plutôt qu'un chiffre unique trompeur.
+// ============================================================
+function CustomProjectionPanel({ transactions, accounts, allCategories }: {
+  transactions: Transaction[]; accounts: Account[]; allCategories: string[];
+}) {
+  const [excluded, setExcluded] = useState<string[]>([]);
+  const [overrideCategory, setOverrideCategory] = useState("");
+  const [overrideAmount, setOverrideAmount] = useState<number | "">("");
+  const [monthsAhead, setMonthsAhead] = useState(24);
+
+  const toggleExcluded = (cat: string) => setExcluded((prev) => (prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]));
+
+  const result = useMemo(() => {
+    const today = todayISO();
+    const curMonth = dateToMonthKey(today);
+    const lookback: string[] = [];
+    let mk = prevMonthKey(curMonth);
+    for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+
+    const revByMonth: Record<string, number> = {};
+    const depByMonth: Record<string, number> = {};
+    transactions.forEach((t) => {
+      const tmk = dateToMonthKey(t.date);
+      if (!lookback.includes(tmk)) return;
+      if (t.type === "Revenu") { revByMonth[tmk] = (revByMonth[tmk] || 0) + t.amount; return; }
+      // Dépense : exclue si dans la liste, ou si c'est la catégorie remplacée par un montant fixe (comptée à part).
+      if (excluded.includes(t.category)) return;
+      if (overrideCategory && t.category === overrideCategory) return;
+      depByMonth[tmk] = (depByMonth[tmk] || 0) + t.amount;
+    });
+
+    const revVals = lookback.map((m) => revByMonth[m] || 0);
+    const depVals = lookback.map((m) => depByMonth[m] || 0);
+    const medRev = median(revVals);
+    const medDep = median(depVals) + (overrideCategory && overrideAmount !== "" ? Number(overrideAmount) : 0);
+    const monthlyNet = medRev - medDep;
+
+    const currentNW = totalAccountsBalance(accounts, transactions);
+    const central = currentNW + monthlyNet * monthsAhead;
+    const prudent = currentNW + (Math.min(...revVals) - medDep) * monthsAhead;
+    const optimiste = currentNW + (Math.max(...revVals) - medDep) * monthsAhead;
+
+    return { medRev, medDep, monthlyNet, currentNW, central, prudent, optimiste, lookback };
+  }, [transactions, accounts, excluded, overrideCategory, overrideAmount, monthsAhead]);
+
+  const targetDate = (() => {
+    const d = new Date(todayISO() + "T00:00:00");
+    d.setMonth(d.getMonth() + monthsAhead);
+    return d.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+  })();
+
+  return (
+    <PanelWithHelp title="Projection sur mesure" subtitle="Simule ta valeur nette à une échéance donnée en excluant ou en fixant certaines charges"
+      explain="Coche les catégories à exclure entièrement de la projection (ex : une dette qui sera soldée, un déménagement ponctuel qui ne se reproduira pas), et/ou remplace une catégorie par un montant fixe mensuel (ex : un nouveau loyer). Le calcul utilise la médiane des 6 derniers mois pour rester robuste face aux mois exceptionnels, avec une fourchette prudent/optimiste basée sur le pire et le meilleur mois de revenu réellement observés — plutôt qu'un chiffre unique qui masquerait la vraie volatilité.">
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+
+        <div>
+          <div style={{ fontSize: 12, color: COLOR.inkMuted, marginBottom: 8 }}>Exclure entièrement ces catégories de la projection :</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {allCategories.map((c) => (
+              <button key={c} onClick={() => toggleExcluded(c)} style={{
+                padding: "5px 12px", borderRadius: 16, fontSize: 11.5, cursor: "pointer",
+                border: `1px solid ${excluded.includes(c) ? COLOR.clay : COLOR.hairline}`,
+                background: excluded.includes(c) ? "rgba(193,84,63,0.14)" : "transparent",
+                color: excluded.includes(c) ? COLOR.claySoft : COLOR.inkMuted,
+              }}>{c}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Remplacer une catégorie par un montant fixe</label>
+            <select value={overrideCategory} onChange={(e) => setOverrideCategory(e.target.value)} style={{ ...inputStyle, width: 200 }}>
+              <option value="">— aucune —</option>
+              {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          {overrideCategory && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nouveau montant / mois</label>
+              <input type="number" inputMode="numeric" style={{ ...inputStyle, width: 160, textAlign: "right" }} placeholder="Ex : 650000" value={overrideAmount}
+                onChange={(e) => setOverrideAmount(e.target.value === "" ? "" : Number(e.target.value))} />
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Échéance</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[12, 24, 36].map((m) => (
+                <button key={m} onClick={() => setMonthsAhead(m)} style={{
+                  padding: "8px 14px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                  border: `1px solid ${monthsAhead === m ? COLOR.gold : COLOR.hairline}`,
+                  background: monthsAhead === m ? "rgba(201,162,39,0.14)" : "transparent",
+                  color: monthsAhead === m ? COLOR.goldSoft : COLOR.inkMuted,
+                }}>{m} mois</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Solde mensuel net projeté</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 600, color: result.monthlyNet >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(result.monthlyNet)} FCFA</div>
+          </div>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.gold}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.goldSoft, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Valeur nette estimée — {targetDate}</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 700, color: COLOR.ink }}>{fmt(result.central)} FCFA</div>
+          </div>
+          <div style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Fourchette prudent — optimiste</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.ink }}>
+              <span style={{ color: COLOR.claySoft }}>{fmt(result.prudent)}</span>
+              <span style={{ color: COLOR.inkMuted }}> — </span>
+              <span style={{ color: COLOR.emeraldSoft }}>{fmt(result.optimiste)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ fontSize: 11.5, color: COLOR.inkMuted, lineHeight: 1.6 }}>
+          Basé sur un revenu médian de {fmt(result.medRev)} FCFA/mois et des dépenses médianes de {fmt(result.medDep)} FCFA/mois (hors catégories exclues{overrideCategory ? `, "${overrideCategory}" fixée à ${overrideAmount || 0} FCFA/mois` : ""}), sur les 6 derniers mois complets. La valeur nette actuelle de départ est {fmt(result.currentNW)} FCFA.
+        </div>
+      </div>
+    </PanelWithHelp>
+  );
+}
+
+// ============================================================
 // OBJECTIF D'ÉPARGNE
 // ============================================================
 function GoalsPanel({ goals, setGoals, accounts, transactions }: { goals: Goal[]; setGoals: (g: Goal[]) => void; accounts: Account[]; transactions: Transaction[] }) {
@@ -7068,6 +7201,7 @@ export default function GrandLivre() {
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
               <GoalsPanel goals={goals} setGoals={setGoals} accounts={accounts} transactions={transactions} />
               <ProjectionPanel accounts={accounts} transactions={transactions} />
+              <CustomProjectionPanel transactions={transactions} accounts={accounts} allCategories={allCategories} />
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
