@@ -2368,6 +2368,59 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
 // les activités et les budgets. Une catégorie/sous-catégorie déjà utilisée ne
 // peut être supprimée qu'en fusionnant ses transactions vers une autre.
 // ============================================================
+// Fiche de saisie de nom, même esprit visuel que "Saisie rapide" — grand champ
+// central, dégradé doré — réutilisée pour créer/renommer une catégorie ou une
+// sous-catégorie plutôt qu'un simple champ texte en ligne.
+function CategoryNameSheet({ open, title, subtitle, initialValue, confirmLabel, accentColor, onClose, onSave }: {
+  open: boolean; title: string; subtitle?: string; initialValue: string; confirmLabel: string; accentColor: string;
+  onClose: () => void; onSave: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { if (open) { setValue(initialValue); setSaved(false); } }, [open, initialValue]);
+  if (!open) return null;
+
+  const submit = () => {
+    if (!value.trim()) return;
+    onSave(value.trim());
+    setSaved(true);
+    setTimeout(() => { setSaved(false); onClose(); }, 500);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 470, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460 }}>
+        <div style={{ background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.surface} 70%)`, border: `1px solid ${COLOR.hairline}`, borderBottom: "none", borderRadius: "16px 16px 0 0", overflow: "hidden" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px 0 20px" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, color: accentColor }}>{title}</div>
+            <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
+          </div>
+          {subtitle && <div style={{ padding: "4px 20px 0 20px", fontSize: 11.5, color: COLOR.inkMuted }}>{subtitle}</div>}
+
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "22px 24px 10px 24px" }}>
+            <Layers size={64} style={{ position: "absolute", top: 14, color: accentColor, opacity: 0.08, pointerEvents: "none" }} />
+            <input
+              autoFocus value={value} placeholder="Nom…" onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+              style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 28, fontWeight: 600, fontFamily: "'Fraunces', serif", textAlign: "center", width: "100%" }}
+            />
+          </div>
+
+          <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "16px 20px" }}>
+            <button onClick={submit} disabled={!value.trim()} style={{
+              width: "100%", padding: "14px 0", borderRadius: 12, border: "none",
+              background: saved ? COLOR.emerald : !value.trim() ? COLOR.hairline : accentColor,
+              color: saved ? COLOR.bg : !value.trim() ? COLOR.inkMuted : COLOR.bg,
+              fontSize: 14.5, fontWeight: 700, cursor: !value.trim() ? "default" : "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.15s",
+            }}>{saved ? <Check size={17} /> : null} {saved ? "Enregistré" : confirmLabel}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CategoryManagementTab({
   transactions, setTransactions, customDepSubcategories, setCustomDepSubcategories, customRevSubcategories, setCustomRevSubcategories,
   categoryGroups, setCategoryGroups, categoryScope, setCategoryScope, categoryActivity, setCategoryActivity, budgets, setBudgets,
@@ -2382,37 +2435,28 @@ function CategoryManagementTab({
 }) {
   const [typeView, setTypeView] = useState<TxType>("Dépense");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [newCategory, setNewCategory] = useState("");
-  const [newSubcatFor, setNewSubcatFor] = useState<string | null>(null);
-  const [newSubcatName, setNewSubcatName] = useState("");
-  const [editingCat, setEditingCat] = useState<string | null>(null);
-  const [editingCatValue, setEditingCatValue] = useState("");
-  const [editingSub, setEditingSub] = useState<{ cat: string; sub: string } | null>(null);
-  const [editingSubValue, setEditingSubValue] = useState("");
+  const [catSheet, setCatSheet] = useState<{ mode: "new" | "rename"; oldName?: string } | null>(null);
+  const [subSheet, setSubSheet] = useState<{ cat: string; mode: "new" | "rename"; oldName?: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ kind: "cat" | "sub"; cat: string; sub?: string } | null>(null);
   const [mergeInto, setMergeInto] = useState("");
 
   const activeMap = typeView === "Dépense" ? customDepSubcategories : customRevSubcategories;
   const setActiveMap = typeView === "Dépense" ? setCustomDepSubcategories : setCustomRevSubcategories;
   const categories = categoriesForType(transactions, typeView);
+  const accentColor = typeView === "Revenu" ? COLOR.emeraldSoft : COLOR.goldSoft;
 
   const countForCat = (cat: string) => transactions.filter((t) => t.category === cat && t.type === typeView).length;
   const countForSub = (cat: string, sub: string) => transactions.filter((t) => t.category === cat && t.subcategory === sub && t.type === typeView).length;
 
-  const addCategory = () => {
-    const name = newCategory.trim();
-    if (!name || activeMap[name] !== undefined) return;
+  const addCategory = (name: string) => {
+    if (activeMap[name] !== undefined) return;
     setActiveMap({ ...activeMap, [name]: [] });
-    setNewCategory("");
   };
 
-  const addSubcategory = (cat: string) => {
-    const name = newSubcatName.trim();
-    if (!name) return;
+  const addSubcategory = (cat: string, name: string) => {
     const subs = activeMap[cat] || [];
     if (subs.includes(name)) return;
     setActiveMap({ ...activeMap, [cat]: [...subs, name] });
-    setNewSubcatName(""); setNewSubcatFor(null);
   };
 
   const renameKeyed = (map: Record<string, any> | undefined, setMap: ((m: any) => void) | undefined, oldKey: string, newKey: string) => {
@@ -2420,25 +2464,21 @@ function CategoryManagementTab({
     const next = { ...map }; next[newKey] = next[oldKey]; delete next[oldKey]; setMap(next);
   };
 
-  const renameCategory = (oldName: string) => {
-    const newName = editingCatValue.trim();
-    if (!newName || newName === oldName || activeMap[newName] !== undefined) { setEditingCat(null); return; }
+  const renameCategory = (oldName: string, newName: string) => {
+    if (newName === oldName || activeMap[newName] !== undefined) return;
     const next = { ...activeMap }; next[newName] = next[oldName] || []; delete next[oldName]; setActiveMap(next);
     setTransactions(transactions.map((t) => (t.category === oldName && t.type === typeView ? { ...t, category: newName } : t)));
     renameKeyed(categoryGroups, setCategoryGroups, oldName, newName);
     renameKeyed(categoryScope, setCategoryScope, oldName, newName);
     renameKeyed(categoryActivity, setCategoryActivity, oldName, newName);
     setBudgets(budgets.map((b) => (b.category === oldName ? { ...b, category: newName } : b)));
-    setEditingCat(null);
   };
 
-  const renameSubcategory = (cat: string, oldSub: string) => {
-    const newSub = editingSubValue.trim();
-    if (!newSub || newSub === oldSub) { setEditingSub(null); return; }
+  const renameSubcategory = (cat: string, oldSub: string, newSub: string) => {
+    if (newSub === oldSub) return;
     const subs = (activeMap[cat] || []).map((s) => (s === oldSub ? newSub : s));
     setActiveMap({ ...activeMap, [cat]: subs });
     setTransactions(transactions.map((t) => (t.category === cat && t.subcategory === oldSub && t.type === typeView ? { ...t, subcategory: newSub } : t)));
-    setEditingSub(null);
   };
 
   const performDelete = () => {
@@ -2474,21 +2514,21 @@ function CategoryManagementTab({
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <PanelWithHelp title="Gestion des catégories" subtitle="Créer, renommer et supprimer des catégories et sous-catégories"
         explain="Renommer une catégorie ou sous-catégorie met à jour automatiquement toutes les transactions existantes qui l'utilisent, ainsi que son groupe (Nécessaire/Productif/Non-productif), sa portée Business/Personnel, son activité et ses budgets. Supprimer une catégorie déjà utilisée par des transactions exige de choisir une catégorie de remplacement — les transactions y sont alors basculées avant la suppression, pour ne jamais perdre de données silencieusement.">
-        <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}`, marginBottom: 18, width: "fit-content" }}>
-          {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
-            <button key={ty} onClick={() => setTypeView(ty)} style={{
-              padding: "6px 16px", borderRadius: 12, fontSize: 12.5, cursor: "pointer", border: "none",
-              background: typeView === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : "transparent",
-              color: typeView === ty ? COLOR.bg : COLOR.inkMuted,
-            }}>{ty}</button>
-          ))}
-        </div>
-
-        <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
-          <input style={{ ...inputStyle, flex: 1 }} placeholder="Nouvelle catégorie" value={newCategory}
-            onChange={(e) => setNewCategory(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addCategory(); }} />
-          <button onClick={addCategory} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "8px 16px", fontSize: 12.5, cursor: "pointer" }}>
-            <Plus size={13} /> Ajouter
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 18 }}>
+          <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
+            {(["Dépense", "Revenu"] as TxType[]).map((ty) => (
+              <button key={ty} onClick={() => setTypeView(ty)} style={{
+                padding: "6px 16px", borderRadius: 12, fontSize: 12.5, cursor: "pointer", border: "none",
+                background: typeView === ty ? (ty === "Revenu" ? COLOR.emerald : COLOR.clay) : "transparent",
+                color: typeView === ty ? COLOR.bg : COLOR.inkMuted,
+              }}>{ty}</button>
+            ))}
+          </div>
+          <button onClick={() => setCatSheet({ mode: "new" })} style={{
+            display: "flex", alignItems: "center", gap: 8, background: `linear-gradient(135deg, ${accentColor}22 0%, ${COLOR.surfaceRaised} 70%)`,
+            border: `1px solid ${accentColor}`, borderRadius: 10, color: accentColor, padding: "9px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+          }}>
+            <Plus size={15} /> Nouvelle catégorie
           </button>
         </div>
 
@@ -2503,43 +2543,23 @@ function CategoryManagementTab({
                   <button onClick={() => setExpanded((prev) => { const n = new Set(prev); n.has(cat) ? n.delete(cat) : n.add(cat); return n; })} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}>
                     <ChevronDown size={14} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
                   </button>
-                  {editingCat === cat ? (
-                    <input autoFocus value={editingCatValue} onChange={(e) => setEditingCatValue(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") renameCategory(cat); if (e.key === "Escape") setEditingCat(null); }}
-                      onBlur={() => renameCategory(cat)} style={{ ...inputStyle, flex: 1 }} />
-                  ) : (
-                    <span style={{ flex: 1, fontSize: 13.5, color: COLOR.ink, fontWeight: 600 }}>{cat} <span style={{ fontWeight: 400, fontSize: 11, color: COLOR.inkMuted }}>({count} tx · {subs.length} sous-cat.)</span></span>
-                  )}
-                  <button onClick={() => { setEditingCat(cat); setEditingCatValue(cat); }} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
+                  <span style={{ flex: 1, fontSize: 13.5, color: COLOR.ink, fontWeight: 600, fontFamily: "'Fraunces', serif" }}>{cat} <span style={{ fontWeight: 400, fontSize: 11, color: COLOR.inkMuted, fontFamily: "'Inter', sans-serif" }}>({count} tx · {subs.length} sous-cat.)</span></span>
+                  <button onClick={() => setCatSheet({ mode: "rename", oldName: cat })} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
                   <button onClick={() => { setDeleteTarget({ kind: "cat", cat }); setMergeInto(""); }} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
                 </div>
                 {isOpen && (
                   <div style={{ padding: "0 14px 12px 40px", display: "flex", flexDirection: "column", gap: 6 }}>
                     {subs.map((sub) => (
                       <div key={sub} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        {editingSub?.cat === cat && editingSub.sub === sub ? (
-                          <input autoFocus value={editingSubValue} onChange={(e) => setEditingSubValue(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") renameSubcategory(cat, sub); if (e.key === "Escape") setEditingSub(null); }}
-                            onBlur={() => renameSubcategory(cat, sub)} style={{ ...inputStyle, flex: 1, fontSize: 12.5 }} />
-                        ) : (
-                          <span style={{ flex: 1, fontSize: 12.5, color: COLOR.inkMuted }}>{sub} <span style={{ fontSize: 10.5 }}>({countForSub(cat, sub)} tx)</span></span>
-                        )}
-                        <button onClick={() => { setEditingSub({ cat, sub }); setEditingSubValue(sub); }} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={11} /></button>
+                        <span style={{ flex: 1, fontSize: 12.5, color: COLOR.inkMuted }}>{sub} <span style={{ fontSize: 10.5 }}>({countForSub(cat, sub)} tx)</span></span>
+                        <button onClick={() => setSubSheet({ cat, mode: "rename", oldName: sub })} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={11} /></button>
                         <button onClick={() => { setDeleteTarget({ kind: "sub", cat, sub }); setMergeInto(""); }} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={11} /></button>
                       </div>
                     ))}
-                    {newSubcatFor === cat ? (
-                      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                        <input autoFocus style={{ ...inputStyle, flex: 1, fontSize: 12.5 }} placeholder="Nom de la sous-catégorie" value={newSubcatName}
-                          onChange={(e) => setNewSubcatName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addSubcategory(cat); if (e.key === "Escape") setNewSubcatFor(null); }} />
-                        <button onClick={() => addSubcategory(cat)} style={{ background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}>Ajouter</button>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setNewSubcatFor(cat); setNewSubcatName(""); }} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 11.5, padding: "4px 0", width: "fit-content" }}>
-                        <Plus size={11} /> Ajouter une sous-catégorie
-                      </button>
-                    )}
-                    {!subs.length && !newSubcatFor && <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Aucune sous-catégorie.</div>}
+                    <button onClick={() => setSubSheet({ cat, mode: "new" })} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 11.5, padding: "4px 0", width: "fit-content" }}>
+                      <Plus size={11} /> Ajouter une sous-catégorie
+                    </button>
+                    {!subs.length && <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Aucune sous-catégorie.</div>}
                   </div>
                 )}
               </div>
@@ -2548,6 +2568,27 @@ function CategoryManagementTab({
           {!categories.length && <EmptyState text="Aucune catégorie." />}
         </div>
       </PanelWithHelp>
+
+      <CategoryNameSheet
+        open={!!catSheet}
+        title={catSheet?.mode === "new" ? "Nouvelle catégorie" : "Renommer la catégorie"}
+        subtitle={typeView}
+        initialValue={catSheet?.mode === "rename" ? catSheet.oldName || "" : ""}
+        confirmLabel={catSheet?.mode === "new" ? "Créer" : "Renommer"}
+        accentColor={accentColor}
+        onClose={() => setCatSheet(null)}
+        onSave={(value) => { if (catSheet?.mode === "new") addCategory(value); else if (catSheet?.oldName) renameCategory(catSheet.oldName, value); }}
+      />
+      <CategoryNameSheet
+        open={!!subSheet}
+        title={subSheet?.mode === "new" ? "Nouvelle sous-catégorie" : "Renommer la sous-catégorie"}
+        subtitle={subSheet ? `Dans « ${subSheet.cat} »` : undefined}
+        initialValue={subSheet?.mode === "rename" ? subSheet.oldName || "" : ""}
+        confirmLabel={subSheet?.mode === "new" ? "Créer" : "Renommer"}
+        accentColor={accentColor}
+        onClose={() => setSubSheet(null)}
+        onSave={(value) => { if (!subSheet) return; if (subSheet.mode === "new") addSubcategory(subSheet.cat, value); else if (subSheet.oldName) renameSubcategory(subSheet.cat, subSheet.oldName, value); }}
+      />
 
       <ConfirmDialog
         open={!!deleteTarget && deleteCount === 0}
@@ -2583,6 +2624,7 @@ function CategoryManagementTab({
     </div>
   );
 }
+
 
 function CategoriesTab({ filtered, categoryGroups, resolvedGroups, setCategoryGroups }: {
   filtered: any[]; categoryGroups: Record<string, Group>; resolvedGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
