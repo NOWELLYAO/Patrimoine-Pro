@@ -729,23 +729,24 @@ interface Filters { from: string; to: string; type: string; group: string; categ
 function FilterBar({ filters, setFilters, allMonths, allCategories, onReset }: {
   filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; onReset: () => void;
 }) {
-  // Empêche une plage inversée (Du mois postérieur à Au mois) qui cassait tous les
-  // calculs en aval (revenu à 0, chiffres délirants) — échange les deux valeurs plutôt
-  // que de laisser une plage impossible s'installer.
-  const patch = (p: Partial<Filters>) => {
-    const next = { ...filters, ...p };
-    if (monthSortKey(next.from) > monthSortKey(next.to)) {
-      const tmp = next.from; next.from = next.to; next.to = tmp;
-    }
-    setFilters(next);
+  // "Du mois" cale automatiquement "Au mois" sur la même valeur (l'utilisateur élargit
+  // ensuite lui-même si besoin) — sur demande explicite de l'utilisateur, plutôt que de
+  // laisser "Au mois" sur une ancienne valeur qui semblait ne "rien faire" visuellement.
+  const setFrom = (v: string) => setFilters({ ...filters, from: v, to: v });
+  // "Au mois" reste protégé contre une inversion (Au postérieur... même principe, dans
+  // l'autre sens) — échange si besoin plutôt que de laisser une plage impossible.
+  const setTo = (v: string) => {
+    if (monthSortKey(v) < monthSortKey(filters.from)) setFilters({ ...filters, from: v, to: filters.from });
+    else setFilters({ ...filters, to: v });
   };
+  const patch = (p: Partial<Filters>) => setFilters({ ...filters, ...p });
   return (
     <div className="gl-noprint" style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "16px 20px", display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLOR.gold, fontSize: 11.5, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.08em" }}>
         <Filter size={13} /> Filtres
       </div>
-      <Select label="Du mois" value={filters.from} onChange={(v) => patch({ from: v })} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(filters.to)).map((m) => ({ value: m, label: monthLabel(m) }))} />
-      <Select label="Au mois" value={filters.to} onChange={(v) => patch({ to: v })} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(filters.from)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+      <Select label="Du mois" value={filters.from} onChange={setFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+      <Select label="Au mois" value={filters.to} onChange={setTo} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(filters.from)).map((m) => ({ value: m, label: monthLabel(m) }))} />
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
