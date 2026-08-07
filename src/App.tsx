@@ -397,6 +397,21 @@ function monthSortKey(m: string) {
   const [y, mm] = m.split("_");
   return parseInt(y, 10) * 12 + parseInt(mm, 10);
 }
+// Montant applicable pour un mois donné d'après un historique de segments (loyer qui a
+// changé plusieurs fois par exemple) — null si aucun segment ne couvre ce mois.
+function scheduleAmountFor(schedule: ChargeScheduleEntry[], mk: string): number | null {
+  const entry = schedule.find((e) => monthSortKey(mk) >= monthSortKey(e.from) && (e.to === null || monthSortKey(mk) <= monthSortKey(e.to)));
+  return entry ? entry.amount : null;
+}
+// Montant "actuel" d'un historique : le segment qui couvre aujourd'hui, sinon le plus
+// récent (le plus probable pour représenter l'engagement mensuel en cours).
+function currentScheduleAmount(schedule: ChargeScheduleEntry[]): number {
+  const todayMk = dateToMonthKey(todayISO());
+  const covering = scheduleAmountFor(schedule, todayMk);
+  if (covering !== null) return covering;
+  const sorted = [...schedule].sort((a, b) => monthSortKey(b.from) - monthSortKey(a.from));
+  return sorted[0]?.amount ?? 0;
+}
 const fmt = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
 // Les PDF utilisent les polices standard de jsPDF (Helvetica), qui ne supportent
 // que l'encodage WinAnsi/Latin-1 — l'espace fine insécable utilisée par fmt() pour
@@ -649,13 +664,13 @@ function PanelWithHelp({ title, subtitle, explain, right, children, style = {}, 
   );
 }
 
-function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint }: {
-  label: string; value: string; suffix?: string; tone?: string; icon?: any; hint?: string;
+function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint, onDetailClick }: {
+  label: string; value: string; suffix?: string; tone?: string; icon?: any; hint?: string; onDetailClick?: () => void;
 }) {
   return (
     <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "16px 18px", flex: 1, minWidth: 190 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLOR.inkMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 10 }}>
-        {Icon && <Icon size={12.5} />} {label}
+        {Icon && <Icon size={12.5} />} {label}{onDetailClick && <CalcDetailIcon onClick={onDetailClick} />}
       </div>
       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, fontWeight: 600, color: tone }}>
         {value}<span style={{ fontSize: 11.5, color: COLOR.inkMuted, marginLeft: 6 }}>{suffix}</span>
@@ -1370,7 +1385,11 @@ function daysInMonthOf(mk: string): number {
 // l'utilisateur peut surcharger le mode/montant pour chaque poste.
 // ============================================================
 type ChargeMode = "fixe" | "variable" | "occasionnelle" | "exclu";
-interface ChargeOverride { mode: ChargeMode | "auto"; amount?: number; }
+// Un segment d'historique de montant : valable du mois "from" au mois "to" inclus
+// (to: null = toujours en cours). Permet de représenter un loyer qui a changé plusieurs
+// fois dans le temps plutôt qu'un montant fixe unique pour toute l'historique.
+interface ChargeScheduleEntry { from: string; to: string | null; amount: number; }
+interface ChargeOverride { mode: ChargeMode | "auto"; amount?: number; schedule?: ChargeScheduleEntry[]; }
 interface SettingsLogEntry { at: string; text: string; }
 // Catégories éclatées par sous-catégorie plutôt qu'agrégées — nécessaire pour
 // distinguer par exemple GRUNDFOS·Carburant (fixe) de GRUNDFOS·Électricité (variable).
@@ -1491,7 +1510,11 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     let amount: number;
     if (override && override.mode !== "auto") {
       mode = override.mode;
-      amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : (present >= 3 ? (meanV || meanPresent) : meanAllTime);
+      if (override.mode === "fixe" && override.schedule && override.schedule.length) {
+        amount = currentScheduleAmount(override.schedule);
+      } else {
+        amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : (present >= 3 ? (meanV || meanPresent) : meanAllTime);
+      }
     } else if (presentRatio >= fixedRatio && cv !== null && cv < 20) {
       mode = "fixe"; amount = meanV;
     } else if (presentRatio >= variableRatio) {
@@ -5650,6 +5673,8 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
     return byPosteMonth;
   }, [transactions, includeGrundfosVoiture, result.lookback]);
   const [calcDetailPoste, setCalcDetailPoste] = useState<string | null>(null);
+  const [kpiDetailKey, setKpiDetailKey] = useState<"revenu" | "fixe" | "variable" | "reste" | null>(null);
+  const [scheduleSheetPoste, setScheduleSheetPoste] = useState<string | null>(null);
 
   const modeLabel: Record<ChargeMode, string> = { fixe: "Fixe", variable: "Variable régulière", occasionnelle: "Occasionnelle", exclu: "Exclu" };
   const modeColor: Record<ChargeMode, string> = { fixe: COLOR.emeraldSoft, variable: COLOR.goldSoft, occasionnelle: COLOR.inkMuted, exclu: COLOR.claySoft };
@@ -5662,6 +5687,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
   const buildChargeDetail = (poste: string): { title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } | null => {
     const r = result.rows.find((row) => row.poste === poste);
     if (!r) return null;
+    const schedule = chargeOverrides[poste]?.schedule;
     const monthly = posteMonthlyDetail[poste] || {};
     const rows = result.lookback.map((m) => [monthLabel(m), monthly[m] ? fmt(monthly[m]) : "—"]);
     const usesAllTimeFallback = r.overridden && r.present < 3 && !!chargeOverrides[poste] && chargeOverrides[poste].mode === "fixe" && chargeOverrides[poste].amount === undefined;
@@ -5669,26 +5695,78 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
     const blocks: CalcDetailBlock[] = [
       { kind: "kv", rows: [
         { label: "Mode retenu", value: modeLabel[r.mode], strong: true },
-        { label: "Origine", value: r.overridden ? "réglage manuel" : "automatique" },
-        { label: "Mois présents (fenêtre affichée)", value: `${r.present} / ${result.lookback.length}` },
-        { label: "Moyenne (toute la fenêtre affichée, absences comptées comme 0)", value: `${fmt(r.mean)} FCFA` },
-        { label: "Médiane (pour référence)", value: `${fmt(r.median)} FCFA` },
-        ...(usesPresentFallback ? [{ label: "Moyenne (mois présents uniquement)", value: `${fmt(r.meanPresent)} FCFA`, warn: true }] : []),
-        ...(usesAllTimeFallback ? [{ label: "Moyenne (tout l'historique, hors fenêtre)", value: `${fmt(r.meanAllTime)} FCFA`, warn: true }] : []),
-        { label: "Coefficient de variation (CV)", value: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—" },
+        { label: "Origine", value: schedule?.length ? "historique de montants" : r.overridden ? "réglage manuel" : "automatique" },
+        ...(schedule?.length ? [] : [
+          { label: "Mois présents (fenêtre affichée)", value: `${r.present} / ${result.lookback.length}` },
+          { label: "Moyenne (toute la fenêtre affichée, absences comptées comme 0)", value: `${fmt(r.mean)} FCFA` },
+          { label: "Médiane (pour référence)", value: `${fmt(r.median)} FCFA` },
+          ...(usesPresentFallback ? [{ label: "Moyenne (mois présents uniquement)", value: `${fmt(r.meanPresent)} FCFA`, warn: true }] : []),
+          ...(usesAllTimeFallback ? [{ label: "Moyenne (tout l'historique, hors fenêtre)", value: `${fmt(r.meanAllTime)} FCFA`, warn: true }] : []),
+          { label: "Coefficient de variation (CV)", value: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—" },
+        ]),
         { label: "Montant retenu pour les calculs", value: `${fmt(r.amount)} FCFA`, strong: true },
       ] },
+      ...(schedule?.length ? [{ kind: "table" as const, columns: ["Depuis", "Jusqu'à", "Montant (FCFA)"], rows: [...schedule].sort((a, b) => monthSortKey(a.from) - monthSortKey(b.from)).map((s) => [monthLabel(s.from), s.to ? monthLabel(s.to) : "En cours", fmt(s.amount)]) }] : []),
       ...(usesAllTimeFallback ? [{ kind: "note" as const, tone: "warn" as const, text: `Seulement ${r.present} mois avec des données dans la période affichée — trop peu pour une moyenne fiable (un seul mois atypique la définirait entièrement). Le montant retenu s'appuie automatiquement sur la moyenne de TOUT l'historique disponible de ce poste (${fmt(r.meanAllTime)} FCFA), plus stable pour représenter un montant censé être fixe. Tape un montant explicite dans le champ si ce chiffre ne te convient pas.` }] : []),
       ...(usesPresentFallback ? [{ kind: "note" as const, tone: "warn" as const, text: `La moyenne sur toute la fenêtre tombe à 0 FCFA parce que ce poste est absent la plupart des mois (${r.present}/${result.lookback.length} présents) — souvent le signe d'une charge apparue récemment. Le montant retenu utilise automatiquement la moyenne des mois présents (${fmt(r.meanPresent)} FCFA) à la place.` }] : []),
-      { kind: "note", tone: "info", text: "Règle automatique (mode) : \"Fixe\" si présent sur au moins 5/6 de la période avec CV < 20%. \"Variable régulière\" si présent sur au moins 4/6 mais montant qui fluctue davantage. \"Occasionnelle\" sinon. Un réglage manuel prime toujours sur cette règle. Le montant retenu utilise la moyenne sur la période, mois d'absence comptés comme 0 (sauf repli ci-dessus)." },
+      { kind: "note", tone: "info", text: schedule?.length ? "Historique de montants actif : le montant retenu est celui du segment couvrant le mois en cours (ou le plus récent si aucun ne le couvre). Modifiable via le bouton horloge à côté du champ." : "Règle automatique (mode) : \"Fixe\" si présent sur au moins 5/6 de la période avec CV < 20%. \"Variable régulière\" si présent sur au moins 4/6 mais montant qui fluctue davantage. \"Occasionnelle\" sinon. Un réglage manuel prime toujours sur cette règle. Le montant retenu utilise la moyenne sur la période, mois d'absence comptés comme 0 (sauf repli ci-dessus)." },
       { kind: "table", columns: ["Mois", "Montant (FCFA)"], rows },
     ];
     return {
       title: poste.replace("::", " · "), headline: `${fmt(r.amount)} FCFA/mois`,
-      formula: r.overridden ? "Montant fixé manuellement" : `${modeLabel[r.mode]} — moyenne sur ${result.lookback.length} mois`,
+      formula: schedule?.length ? "Historique de montants — segment en cours" : r.overridden ? "Montant fixé manuellement" : `${modeLabel[r.mode]} — moyenne sur ${result.lookback.length} mois`,
       blocks,
     };
   };
+
+  const revByMonthDetail = useMemo(() => {
+    const byMonth: Record<string, number> = {};
+    transactions.forEach((t) => {
+      if (t.type !== "Revenu") return;
+      if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_LINKED_REVENUE.includes(t.category)) return;
+      const tmk = dateToMonthKey(t.date);
+      if (!result.lookback.includes(tmk)) return;
+      byMonth[tmk] = (byMonth[tmk] || 0) + t.amount;
+    });
+    return byMonth;
+  }, [transactions, includeGrundfosVoiture, result.lookback]);
+
+  const buildKpiDetail = (key: "revenu" | "fixe" | "variable" | "reste"): { title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } => {
+    if (key === "revenu") {
+      return {
+        title: "Revenu moyen / mois", headline: `${fmt(result.avgRevenu)} FCFA`,
+        formula: `Somme des revenus (${includeGrundfosVoiture ? "GRUNDFOS inclus" : "Petty Cash exclu, lié à GRUNDFOS"}) / ${result.lookback.length} mois`,
+        blocks: [{ kind: "table", columns: ["Mois", "Revenu (FCFA)"], rows: result.lookback.map((m) => [monthLabel(m), fmt(revByMonthDetail[m] || 0)]) }],
+      };
+    }
+    if (key === "fixe") {
+      const rows = result.rows.filter((r) => r.mode === "fixe").sort((a, b) => b.amount - a.amount);
+      return {
+        title: "Charges fixes / mois", headline: `${fmt(result.totalFixe)} FCFA`,
+        formula: "Somme des postes classés \"Fixe\"",
+        blocks: [{ kind: "table", columns: ["Poste", "Montant/mois (FCFA)", "Origine"], rows: rows.map((r) => [r.poste.replace("::", " · "), fmt(r.amount), r.overridden ? "manuel" : "auto"]) }],
+      };
+    }
+    if (key === "variable") {
+      const rows = result.rows.filter((r) => r.mode === "variable").sort((a, b) => b.amount - a.amount);
+      return {
+        title: "Variables régulières / mois", headline: `${fmt(result.totalVariable)} FCFA`,
+        formula: "Somme des postes classés \"Variable régulière\"",
+        blocks: [{ kind: "table", columns: ["Poste", "Montant/mois (FCFA)", "Origine"], rows: rows.map((r) => [r.poste.replace("::", " · "), fmt(r.amount), r.overridden ? "manuel" : "auto"]) }],
+      };
+    }
+    return {
+      title: "Reste à vivre estimé / mois", headline: `${fmt(result.resteAVivre)} FCFA`,
+      formula: "Revenu moyen − Charges fixes − Variables régulières",
+      blocks: [{ kind: "kv", rows: [
+        { label: "Revenu moyen", value: `${fmt(result.avgRevenu)} FCFA` },
+        { label: "− Charges fixes", value: `${fmt(result.totalFixe)} FCFA` },
+        { label: "− Variables régulières", value: `${fmt(result.totalVariable)} FCFA` },
+        { label: "= Reste à vivre estimé", value: `${fmt(result.resteAVivre)} FCFA`, strong: true, warn: result.resteAVivre < 0 },
+      ] }],
+    };
+  };
+
 
   const exportChargesExcel = async () => {
     setXlsState("loading");
@@ -5778,10 +5856,10 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
       </div>
 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Revenu moyen / mois (6M)" value={fmt(result.avgRevenu)} tone={COLOR.goldSoft} icon={TrendingUp} />
-        <Kpi label="Charges fixes / mois" value={fmt(result.totalFixe)} tone={COLOR.emeraldSoft} icon={CalendarRange} />
-        <Kpi label="Variables régulières / mois" value={fmt(result.totalVariable)} tone={COLOR.goldSoft} icon={Repeat} />
-        <Kpi label="Reste à vivre estimé / mois" value={fmt(result.resteAVivre)} tone={result.resteAVivre >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
+        <Kpi label={`Revenu moyen / mois (${result.lookback.length}M)`} value={fmt(result.avgRevenu)} tone={COLOR.goldSoft} icon={TrendingUp} onDetailClick={() => setKpiDetailKey("revenu")} />
+        <Kpi label="Charges fixes / mois" value={fmt(result.totalFixe)} tone={COLOR.emeraldSoft} icon={CalendarRange} onDetailClick={() => setKpiDetailKey("fixe")} />
+        <Kpi label="Variables régulières / mois" value={fmt(result.totalVariable)} tone={COLOR.goldSoft} icon={Repeat} onDetailClick={() => setKpiDetailKey("variable")} />
+        <Kpi label="Reste à vivre estimé / mois" value={fmt(result.resteAVivre)} tone={result.resteAVivre >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} onDetailClick={() => setKpiDetailKey("reste")} />
       </div>
 
       {onNavigate && (
@@ -5836,12 +5914,26 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
                   <option value="exclu">Exclu</option>
                 </select>
                 {isFixedOverride ? (
-                  <FixedAmountInput
-                    value={override?.amount ?? Math.round(r.mean)}
-                    onSave={(v) => setOverride(r.poste, { amount: v })}
-                    onRecalculate={() => setOverride(r.poste, { amount: Math.round(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime) })}
-                    recalcTitle={`Recalculer (${r.present >= 3 ? `moyenne sur la fenêtre affichée` : `trop peu de mois affichés, moyenne sur tout l'historique`} : ${fmt(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime)} FCFA)`}
-                  />
+                  override?.schedule && override.schedule.length ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: COLOR.ink }}>{fmt(r.amount)} FCFA</span>
+                      <button onClick={() => setScheduleSheetPoste(r.poste)} title="Historique des montants (plusieurs périodes)" style={{ background: "rgba(201,162,39,0.12)", border: `1px solid ${COLOR.gold}`, borderRadius: 5, color: COLOR.goldSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
+                        <Clock size={13} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <FixedAmountInput
+                        value={override?.amount ?? Math.round(r.mean)}
+                        onSave={(v) => setOverride(r.poste, { amount: v })}
+                        onRecalculate={() => setOverride(r.poste, { amount: Math.round(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime) })}
+                        recalcTitle={`Recalculer (${r.present >= 3 ? `moyenne sur la fenêtre affichée` : `trop peu de mois affichés, moyenne sur tout l'historique`} : ${fmt(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime)} FCFA)`}
+                      />
+                      <button onClick={() => setScheduleSheetPoste(r.poste)} title="Ce montant a changé plusieurs fois dans le temps ? Définir un historique" style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
+                        <Clock size={13} />
+                      </button>
+                    </div>
+                  )
                 ) : (
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, textAlign: "right", color: r.mode === "exclu" ? COLOR.inkMuted : COLOR.ink }}>
                     {r.mode === "exclu" ? "—" : `${fmt(r.amount)} FCFA`}
@@ -5858,6 +5950,19 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         const d = buildChargeDetail(calcDetailPoste);
         return d ? <CalcDetailSheet open={!!calcDetailPoste} onClose={() => setCalcDetailPoste(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
       })()}
+      {kpiDetailKey && (() => {
+        const d = buildKpiDetail(kpiDetailKey);
+        return <CalcDetailSheet open={!!kpiDetailKey} onClose={() => setKpiDetailKey(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} />;
+      })()}
+      {scheduleSheetPoste && (
+        <ChargeScheduleSheet
+          open={!!scheduleSheetPoste}
+          onClose={() => setScheduleSheetPoste(null)}
+          poste={scheduleSheetPoste}
+          schedule={chargeOverrides[scheduleSheetPoste]?.schedule || []}
+          onSave={(s) => setOverride(scheduleSheetPoste, { schedule: s.length ? s : undefined })}
+        />
+      )}
     </div>
   );
 }
@@ -6312,6 +6417,84 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
               </div>
             );
           })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+const monthKeyToInputValue = (mk: string) => { const [y, m] = mk.split("_"); return `${y}-${String(m).padStart(2, "0")}`; };
+const inputValueToMonthKey = (v: string) => { const [y, m] = v.split("-"); return `${parseInt(y, 10)}_${parseInt(m, 10)}`; };
+
+// Fiche de gestion de l'historique des montants d'un poste "Fixe" — pour un loyer (ou
+// toute charge) qui a changé plusieurs fois dans le temps plutôt qu'un montant unique
+// valable pour toute l'historique. Le montant retenu pour les calculs (DTI, 4-3-2-1...)
+// utilise toujours le segment couvrant aujourd'hui (ou le plus récent).
+function ChargeScheduleSheet({ open, onClose, poste, schedule, onSave }: {
+  open: boolean; onClose: () => void; poste: string; schedule: ChargeScheduleEntry[]; onSave: (s: ChargeScheduleEntry[]) => void;
+}) {
+  const [rows, setRows] = useState<ChargeScheduleEntry[]>(schedule.length ? schedule : []);
+  useEffect(() => { if (open) setRows(schedule.length ? schedule : []); }, [open, schedule]);
+  if (!open) return null;
+
+  const sorted = [...rows].sort((a, b) => monthSortKey(a.from) - monthSortKey(b.from));
+  const addRow = () => {
+    const lastTo = sorted.length ? sorted[sorted.length - 1].to : null;
+    const nextFrom = lastTo ? nextMonthKey(lastTo) : dateToMonthKey(todayISO());
+    setRows([...rows, { from: nextFrom, to: null, amount: 0 }]);
+  };
+  const updateRow = (i: number, patch: Partial<ChargeScheduleEntry>) => setRows(rows.map((r, ri) => (ri === i ? { ...r, ...patch } : r)));
+  const removeRow = (i: number) => setRows(rows.filter((_, ri) => ri !== i));
+  const save = () => { onSave(rows.filter((r) => r.amount > 0)); onClose(); };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 495, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 560, maxHeight: "85vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          <div>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Historique — {poste.replace("::", " · ")}</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>Montant retenu pour les calculs = le segment couvrant aujourd'hui</div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "18px 22px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {sorted.map((r) => {
+              const i = rows.indexOf(r);
+              return (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={{ fontSize: 10, color: COLOR.inkMuted }}>Depuis</label>
+                    <input type="month" style={{ ...inputStyle, width: 130 }} value={monthKeyToInputValue(r.from)} onChange={(e) => updateRow(i, { from: inputValueToMonthKey(e.target.value) })} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={{ fontSize: 10, color: COLOR.inkMuted }}>Jusqu'à</label>
+                    <input type="month" disabled={r.to === null} style={{ ...inputStyle, width: 130, opacity: r.to === null ? 0.4 : 1 }} value={r.to ? monthKeyToInputValue(r.to) : ""} onChange={(e) => updateRow(i, { to: inputValueToMonthKey(e.target.value) })} />
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: COLOR.inkMuted, paddingBottom: 8 }}>
+                    <input type="checkbox" checked={r.to === null} onChange={(e) => updateRow(i, { to: e.target.checked ? null : dateToMonthKey(todayISO()) })} /> En cours
+                  </label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={{ fontSize: 10, color: COLOR.inkMuted }}>Montant (FCFA)</label>
+                    <input type="number" inputMode="numeric" style={{ ...inputStyle, width: 120, textAlign: "right" }} value={r.amount || ""} onChange={(e) => updateRow(i, { amount: Number(e.target.value) })} />
+                  </div>
+                  <button onClick={() => removeRow(i)} style={{ ...iconBtnStyle(COLOR.claySoft), marginBottom: 4 }}><Trash2 size={13} /></button>
+                </div>
+              );
+            })}
+            {!sorted.length && <EmptyState text="Aucun segment — ajoute la première période." />}
+          </div>
+          <button onClick={addRow} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${COLOR.hairline}`, borderRadius: 8, color: COLOR.slateBlueSoft, padding: "10px 14px", fontSize: 12.5, cursor: "pointer", width: "100%", justifyContent: "center", marginTop: 12 }}>
+            <Plus size={13} /> Ajouter une période
+          </button>
+        </div>
+        <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "16px 22px", display: "flex", gap: 10 }}>
+          <button onClick={() => { onSave([]); onClose(); }} style={{ padding: "12px 16px", borderRadius: 10, border: `1px solid ${COLOR.hairline}`, background: "transparent", color: COLOR.inkMuted, fontSize: 13, cursor: "pointer" }}>Effacer l'historique</button>
+          <button onClick={save} style={{ flex: 1, padding: "12px 0", borderRadius: 10, border: "none", background: COLOR.gold, color: COLOR.bg, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
         </div>
       </div>
     </div>
