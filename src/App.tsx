@@ -1374,7 +1374,10 @@ interface ChargeOverride { mode: ChargeMode | "auto"; amount?: number; }
 interface SettingsLogEntry { at: string; text: string; }
 // Catégories éclatées par sous-catégorie plutôt qu'agrégées — nécessaire pour
 // distinguer par exemple GRUNDFOS·Carburant (fixe) de GRUNDFOS·Électricité (variable).
-const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true, "Logement": true };
+// "Logement" retiré le 07/08/2026 sur demande explicite de l'utilisateur : l'éclatement
+// par sous-catégorie fragmentait ses transactions existantes en plusieurs postes
+// ("Location", "(non précisé)") au lieu d'un seul "Logement" — il veut une seule ligne.
+const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true };
 // La catégorie que l'utilisateur veut pouvoir inclure/exclure en un clic — GRUNDFOS
 // uniquement (précisé le 07/08/2026 : ça n'a rien à voir avec l'activité achat/vente
 // de pompes ECO PUMP AFRIK). "Voiture" reste désormais TOUJOURS incluse dans le budget
@@ -1913,7 +1916,7 @@ function generateFinancialProfileSynthesis(rule4321Narr: NarrativeSection[], tau
 // Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
 // plupart des mois, souvent en fin de mois, et qui ne sont pas encore passées ce
 // mois-ci — pour que le conseiller les anticipe plutôt que de les ignorer.
-function detectRecurringExpenses(transactions: Transaction[], curMonth: string, dayNum: number) {
+function detectRecurringExpenses(transactions: Transaction[], curMonth: string, dayNum: number, chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
   const lookback: string[] = [];
   let mk = prevMonthKey(curMonth);
   for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
@@ -1930,8 +1933,17 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
     byCatMonth[t.category][tmk].day = Math.min(byCatMonth[t.category][tmk].day, day);
   });
 
+  // Ne retient que les catégories réellement classées "Fixe" dans Charges Fixes &
+  // Variables (sur demande explicite de l'utilisateur, 07/08/2026) — la seule régularité
+  // statistique de présence (≥4/6 mois) ne suffit pas : Vêtements, Santé ou Ajustement
+  // reviennent souvent sans être des charges sûres et incompressibles.
+  const windowMonths = monthsSinceInception(transactions);
+  const classified = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
+  const fixedCategories = new Set(classified.rows.filter((r) => r.mode === "fixe").map((r) => r.poste.split("::")[0]));
+
   const results: { category: string; monthsPresent: number; typicalDay: number; typicalAmount: number }[] = [];
   Object.entries(byCatMonth).forEach(([cat, monthsData]) => {
+    if (!fixedCategories.has(cat)) return;
     const presentMonths = Object.keys(monthsData);
     if (presentMonths.length < 4) return; // pas assez régulier pour être qualifié de "périodique"
     const amounts = presentMonths.map((m) => monthsData[m].amount);
@@ -2001,7 +2013,7 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
 
   // Dépenses périodiques probablement encore à venir (loyer, retraite, PEL...) — anticipées
   // avant de calculer un vrai budget quotidien, sans quoi le seuil serait trompeur.
-  const upcoming = detectRecurringExpenses(transactions, curMonth, dayNum);
+  const upcoming = detectRecurringExpenses(transactions, curMonth, dayNum, chargeOverrides || {}, includeGrundfosVoiture);
   const upcomingTotal = upcoming.reduce((a, u) => a + u.typicalAmount, 0);
 
   const hasObjective = monthlyObjective > 0;
@@ -5840,7 +5852,7 @@ function SignauxClesPanel({ transactions, accounts, chargeOverrides, includeGrun
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const dayNum = new Date(today + "T00:00:00").getDate();
-  const upcoming = useMemo(() => detectRecurringExpenses(transactions, curMonth, dayNum), [transactions, curMonth, dayNum]);
+  const upcoming = useMemo(() => detectRecurringExpenses(transactions, curMonth, dayNum, chargeOverrides, includeGrundfosVoiture), [transactions, curMonth, dayNum, chargeOverrides, includeGrundfosVoiture]);
 
   const gradeColor: Record<string, string> = { Excellent: COLOR.emerald, Bon: COLOR.emeraldSoft, Moyen: COLOR.gold, Faible: COLOR.clay };
   const topAlert = advice.insights.find((i) => i.kind === "alerte") || advice.insights[0];
@@ -5881,13 +5893,14 @@ function SignauxClesPanel({ transactions, accounts, chargeOverrides, includeGrun
 // Peut être masquée pour la journée ; réapparaît le lendemain si toujours
 // non résolue.
 // ============================================================
-function GlobalReminderBanner({ transactions, dismissedDate, setDismissedDate }: {
+function GlobalReminderBanner({ transactions, dismissedDate, setDismissedDate, chargeOverrides, includeGrundfosVoiture }: {
   transactions: Transaction[]; dismissedDate: string | null; setDismissedDate: (d: string) => void;
+  chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const dayNum = new Date(today + "T00:00:00").getDate();
-  const upcoming = useMemo(() => detectRecurringExpenses(transactions, curMonth, dayNum), [transactions, curMonth, dayNum]);
+  const upcoming = useMemo(() => detectRecurringExpenses(transactions, curMonth, dayNum, chargeOverrides, includeGrundfosVoiture), [transactions, curMonth, dayNum, chargeOverrides, includeGrundfosVoiture]);
 
   if (!upcoming.length || dismissedDate === today) return null;
   const total = upcoming.reduce((a, u) => a + u.typicalAmount, 0);
@@ -6141,21 +6154,26 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       const autoTable = (autoTableModule as any).default || autoTableModule;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
+      // Les polices standard de jsPDF (Helvetica) ne supportent pas l'espace fine
+      // insécable (U+202F) que produit Intl.NumberFormat("fr-FR") pour les milliers —
+      // elle s'affichait comme "/" (ex: "508/111" au lieu de "508 111"). Toute chaîne
+      // affichée dans ce PDF passe par ce filtre avant écriture.
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
       doc.setFontSize(16); doc.setTextColor(255, 255, 255);
-      doc.text(`Grand Livre — ${title}`, 14, 16);
+      doc.text(ps(`Grand Livre — ${title}`), 14, 16);
       doc.setFontSize(9); doc.setTextColor(200, 210, 225);
-      doc.text(`Généré le ${dateLabelFull(todayISO())}`, 14, 24);
-      doc.text(formula, 14, 29);
+      doc.text(ps(`Généré le ${dateLabelFull(todayISO())}`), 14, 24);
+      doc.text(ps(formula), 14, 29);
 
       doc.setFillColor(201, 162, 39);
       doc.roundedRect(14, 40, pageWidth - 28, 16, 2, 2, "F");
       doc.setFontSize(8); doc.setTextColor(26, 26, 26);
       doc.text("MONTANT", 20, 46);
       doc.setFontSize(13); doc.setFont("helvetica", "bold");
-      doc.text(headline, 20, 53);
+      doc.text(ps(headline), 20, 53);
       doc.setFont("helvetica", "normal");
 
       let y = 66;
@@ -6164,7 +6182,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
         if (b.kind === "kv") {
           autoTable(doc, {
             startY: y,
-            body: b.rows.map((r) => [r.label, r.value]),
+            body: b.rows.map((r) => [ps(r.label), ps(r.value)]),
             theme: "plain",
             styles: { fontSize: 9, cellPadding: { top: 2.5, bottom: 2.5, left: 2, right: 2 } },
             columnStyles: { 1: { halign: "right", fontStyle: "bold" } },
@@ -6178,8 +6196,8 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
         } else if (b.kind === "table") {
           autoTable(doc, {
             startY: y,
-            head: [b.columns],
-            body: b.rows.map((row) => row.map(String)),
+            head: [b.columns.map(ps)],
+            body: b.rows.map((row) => row.map((c) => ps(c))),
             headStyles: { fillColor: [26, 43, 76] },
             styles: { fontSize: 8 },
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
@@ -6190,7 +6208,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
           y = (doc as any).lastAutoTable.finalY + 10;
         } else {
           doc.setFillColor(b.tone === "warn" ? 250 : 250, b.tone === "warn" ? 235 : 245, b.tone === "warn" ? 232 : 220);
-          const lines = doc.splitTextToSize(b.text, pageWidth - 32);
+          const lines = doc.splitTextToSize(ps(b.text), pageWidth - 32);
           const boxH = lines.length * 4.5 + 6;
           if (y + boxH > 275) { doc.addPage(); y = 20; }
           doc.roundedRect(14, y, pageWidth - 28, boxH, 2, 2, "F");
@@ -7153,12 +7171,28 @@ function PayeesTab({ transactions }: { transactions: Transaction[] }) {
 // ============================================================
 // RÉCURRENCES & ÉCHÉANCES
 // ============================================================
-function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions, allCategories, accounts }: {
+function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions, allCategories, accounts, chargeOverrides, includeGrundfosVoiture }: {
   recurring: RecurringTemplate[]; setRecurring: (r: RecurringTemplate[]) => void;
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; accounts: Account[];
+  chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<RecurringTemplate, "id">>({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name });
+
+  // Suggestions tirées de Charges Fixes & Variables : tout poste classé "Fixe" (auto ou
+  // manuel) n'ayant pas encore de modèle récurrent correspondant — pont entre les deux
+  // systèmes, jusqu'ici indépendants l'un de l'autre.
+  const fixedCharges = useMemo(() => {
+    const windowMonths = monthsSinceInception(transactions);
+    const result = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
+    return result.rows.filter((r) => r.mode === "fixe" && r.amount > 0);
+  }, [transactions, chargeOverrides, includeGrundfosVoiture]);
+  const existingRecurringCategories = useMemo(() => new Set(recurring.filter((r) => r.type === "Dépense").map((r) => r.category)), [recurring]);
+  const suggestions = fixedCharges.filter((r) => !existingRecurringCategories.has(r.poste.split("::")[0]));
+
+  const addFromSuggestion = (r: { poste: string; amount: number }) => {
+    setRecurring([...recurring, { category: r.poste.split("::")[0], type: "Dépense", amount: Math.round(r.amount), frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name, id: uid("r") }]);
+  };
 
   const today = todayISO();
   const upcoming = recurring.filter((r) => daysBetween(today, r.nextDate) <= 14).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
@@ -7196,6 +7230,22 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
           {!upcoming.length && <EmptyState text="Aucune échéance dans les 14 prochains jours." />}
         </div>
       </Panel>
+
+      {suggestions.length > 0 && (
+        <Panel title="Suggestions depuis Charges Fixes & Variables" subtitle="Postes déjà classés « Fixe » sans modèle récurrent correspondant — ajoute-les en un clic si tu veux un rappel">
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {suggestions.map((r) => (
+              <div key={r.poste} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: "rgba(201,162,39,0.06)", border: `1px solid ${COLOR.hairline}`, borderRadius: 6 }}>
+                <span style={{ fontSize: 12.5 }}>{r.poste.replace("::", " · ")}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: COLOR.claySoft }}>{fmt(r.amount)}</span>
+                  <button onClick={() => addFromSuggestion(r)} style={{ display: "flex", alignItems: "center", gap: 5, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}><Plus size={12} /> Ajouter</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
 
       <Panel title="Modèles de transactions récurrentes" subtitle="Loyer, salaire, abonnements… tout ce qui revient à intervalle régulier"
         right={
@@ -8971,7 +9021,7 @@ export default function GrandLivre() {
         </header>
 
         <main className="gl-print-full" style={{ maxWidth: 1180, padding: isMobile ? "16px 14px 100px 14px" : "24px 32px 60px 32px" }}>
-          <GlobalReminderBanner transactions={transactions} dismissedDate={dismissedReminderDate} setDismissedDate={setDismissedReminderDate} />
+          <GlobalReminderBanner transactions={transactions} dismissedDate={dismissedReminderDate} setDismissedDate={setDismissedReminderDate} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
           {tab !== "saisie" && (
             <div className="gl-noprint" style={{ marginBottom: 20 }}>
               {isMobile ? (
@@ -9035,7 +9085,7 @@ export default function GrandLivre() {
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
-          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} />}
+          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} accounts={accounts} />}
           {tab === "export" && <ExportTab filtered={filtered} filters={filters} setFilters={setFilters} allMonths={allMonths} />}
           {tab === "sauvegarde" && (
