@@ -1430,14 +1430,24 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   }
 
   const byPosteMonth: Record<string, Record<string, number>> = {};
+  // Repère aussi, indépendamment de la fenêtre filtrée, TOUTES les valeurs historiques
+  // par poste (tout l'historique disponible) — sert uniquement de filet de sécurité pour
+  // les postes forcés "Fixe" sans montant explicite : si la fenêtre filtrée ne contient
+  // qu'1 ou 2 mois de données pour ce poste, sa médiane y est fragile (un seul mois
+  // atypique peut la définir entièrement) ; la médiane sur tout l'historique est plus
+  // stable pour représenter "le montant mensuel typique" qu'un chiffre censé être fixe.
+  const byPosteAllTime: Record<string, number[]> = {};
   transactions.forEach((t) => {
     if (t.type !== "Dépense") return;
     if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
     const tmk = dateToMonthKey(t.date);
-    if (!lookback.includes(tmk)) return;
     const poste = EXPAND_SUBCATS_FOR_CHARGES[t.category] ? `${t.category}::${t.subcategory || "(non précisé)"}` : t.category;
-    byPosteMonth[poste] = byPosteMonth[poste] || {};
-    byPosteMonth[poste][tmk] = (byPosteMonth[poste][tmk] || 0) + t.amount;
+    if (lookback.includes(tmk)) {
+      byPosteMonth[poste] = byPosteMonth[poste] || {};
+      byPosteMonth[poste][tmk] = (byPosteMonth[poste][tmk] || 0) + t.amount;
+    }
+    byPosteAllTime[poste] = byPosteAllTime[poste] || [];
+    byPosteAllTime[poste].push(t.amount);
   });
 
   // Seuils de régularité exprimés en proportion du nombre de mois observés (≈83%
@@ -1462,6 +1472,11 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     // médiane sur les seuls mois présents reflète le vrai montant typique.
     const presentVals = vals.filter((v) => v > 0);
     const medianPresent = presentVals.length ? median(presentVals) : 0;
+    // Filet de sécurité final : médiane sur TOUT l'historique du poste (indépendante de
+    // la fenêtre filtrée), utilisée seulement quand le repli ci-dessus doit s'appuyer
+    // sur trop peu de mois (< 3) dans la fenêtre courante pour être fiable.
+    const allTimeVals = byPosteAllTime[poste] || [];
+    const medianAllTime = allTimeVals.length ? median(allTimeVals) : 0;
     const sd = stdev(vals);
     const cv = meanV > 0 ? (sd / meanV) * 100 : null;
 
@@ -1470,7 +1485,7 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     let amount: number;
     if (override && override.mode !== "auto") {
       mode = override.mode;
-      amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : (medianV || medianPresent);
+      amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : (present >= 3 ? (medianV || medianPresent) : medianAllTime);
     } else if (presentRatio >= fixedRatio && cv !== null && cv < 20) {
       mode = "fixe"; amount = medianV;
     } else if (presentRatio >= variableRatio) {
@@ -1478,7 +1493,7 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     } else {
       mode = "occasionnelle"; amount = medianV || medianPresent;
     }
-    return { poste, present, mean: meanV, median: medianV, medianPresent, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
+    return { poste, present, mean: meanV, median: medianV, medianPresent, medianAllTime, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
   }).sort((a, b) => b.amount - a.amount);
 
   const totalFixe = rows.filter((r) => r.mode === "fixe").reduce((a, r) => a + r.amount, 0);
@@ -5600,18 +5615,22 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
     if (!r) return null;
     const monthly = posteMonthlyDetail[poste] || {};
     const rows = result.lookback.map((m) => [monthLabel(m), monthly[m] ? fmt(monthly[m]) : "—"]);
+    const usesAllTimeFallback = r.overridden && r.present < 3 && !!chargeOverrides[poste] && chargeOverrides[poste].mode === "fixe" && chargeOverrides[poste].amount === undefined;
+    const usesPresentFallback = !usesAllTimeFallback && r.median === 0 && r.medianPresent > 0;
     const blocks: CalcDetailBlock[] = [
       { kind: "kv", rows: [
         { label: "Mode retenu", value: modeLabel[r.mode], strong: true },
         { label: "Origine", value: r.overridden ? "réglage manuel" : "automatique" },
-        { label: "Mois présents", value: `${r.present} / ${result.lookback.length}` },
+        { label: "Mois présents (fenêtre affichée)", value: `${r.present} / ${result.lookback.length}` },
         { label: "Moyenne (mois présents inclus dans le calcul)", value: `${fmt(r.mean)} FCFA` },
-        { label: "Médiane (toute la fenêtre)", value: `${fmt(r.median)} FCFA` },
-        ...(r.median === 0 && r.medianPresent > 0 ? [{ label: "Médiane (mois présents uniquement)", value: `${fmt(r.medianPresent)} FCFA`, warn: true }] : []),
+        { label: "Médiane (toute la fenêtre affichée)", value: `${fmt(r.median)} FCFA` },
+        ...(usesPresentFallback ? [{ label: "Médiane (mois présents uniquement)", value: `${fmt(r.medianPresent)} FCFA`, warn: true }] : []),
+        ...(usesAllTimeFallback ? [{ label: "Médiane (tout l'historique, hors fenêtre)", value: `${fmt(r.medianAllTime)} FCFA`, warn: true }] : []),
         { label: "Coefficient de variation (CV)", value: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—" },
         { label: "Montant retenu pour les calculs", value: `${fmt(r.amount)} FCFA`, strong: true },
       ] },
-      ...(r.median === 0 && r.medianPresent > 0 ? [{ kind: "note" as const, tone: "warn" as const, text: `La médiane sur toute la fenêtre tombe à 0 FCFA parce que ce poste est absent la plupart des mois (${r.present}/${result.lookback.length} présents) — souvent le signe d'une charge apparue récemment. Le montant retenu utilise automatiquement la médiane des mois présents (${fmt(r.medianPresent)} FCFA) à la place.` }] : []),
+      ...(usesAllTimeFallback ? [{ kind: "note" as const, tone: "warn" as const, text: `Seulement ${r.present} mois avec des données dans la période affichée — trop peu pour une médiane fiable (un seul mois atypique la définirait entièrement). Le montant retenu s'appuie automatiquement sur la médiane de TOUT l'historique disponible de ce poste (${fmt(r.medianAllTime)} FCFA), plus stable pour représenter un montant censé être fixe. Tape un montant explicite dans le champ si ce chiffre ne te convient pas.` }] : []),
+      ...(usesPresentFallback ? [{ kind: "note" as const, tone: "warn" as const, text: `La médiane sur toute la fenêtre tombe à 0 FCFA parce que ce poste est absent la plupart des mois (${r.present}/${result.lookback.length} présents) — souvent le signe d'une charge apparue récemment. Le montant retenu utilise automatiquement la médiane des mois présents (${fmt(r.medianPresent)} FCFA) à la place.` }] : []),
       { kind: "note", tone: "info", text: "Règle automatique : \"Fixe\" si présent sur au moins 5/6 de la période avec CV < 20%. \"Variable régulière\" si présent sur au moins 4/6 mais montant qui fluctue davantage. \"Occasionnelle\" sinon. Un réglage manuel prime toujours sur cette règle." },
       { kind: "table", columns: ["Mois", "Montant (FCFA)"], rows },
     ];
@@ -5731,7 +5750,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => {
               const next = { ...chargeOverrides };
-              result.rows.forEach((r) => { if (next[r.poste]?.mode === "fixe") next[r.poste] = { ...next[r.poste], amount: Math.round(r.median || r.medianPresent) }; });
+              result.rows.forEach((r) => { if (next[r.poste]?.mode === "fixe") next[r.poste] = { ...next[r.poste], amount: Math.round(r.present >= 3 ? (r.median || r.medianPresent) : r.medianAllTime) }; });
               setChargeOverrides(next);
             }} style={{
               display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`,
@@ -5771,7 +5790,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right" }} value={override?.amount ?? Math.round(r.median)}
                       onChange={(e) => setOverride(r.poste, { amount: Number(e.target.value) })} />
-                    <button onClick={() => setOverride(r.poste, { amount: Math.round(r.median || r.medianPresent) })} title={`Recalculer sur la médiane actuelle (${fmt(r.median || r.medianPresent)} FCFA, sur ${result.lookback.length} mois)`}
+                    <button onClick={() => setOverride(r.poste, { amount: Math.round(r.present >= 3 ? (r.median || r.medianPresent) : r.medianAllTime) })} title={`Recalculer (${r.present >= 3 ? `médiane sur la fenêtre affichée` : `trop peu de mois affichés, médiane sur tout l'historique`} : ${fmt(r.present >= 3 ? (r.median || r.medianPresent) : r.medianAllTime)} FCFA)`}
                       style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
                       <RotateCcw size={13} />
                     </button>
