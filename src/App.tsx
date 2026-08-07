@@ -1371,15 +1371,16 @@ interface SettingsLogEntry { at: string; text: string; }
 // Catégories éclatées par sous-catégorie plutôt qu'agrégées — nécessaire pour
 // distinguer par exemple GRUNDFOS·Carburant (fixe) de GRUNDFOS·Électricité (variable).
 const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true };
-// Les deux catégories que l'utilisateur veut pouvoir inclure/exclure en un clic
-// (mélange dépenses professionnelles GRUNDFOS et frais de véhicule).
-const GRUNDFOS_VOITURE_CATEGORIES = ["GRUNDFOS", "Voiture"];
-// Revenus directement liés à ces deux catégories de dépense, confirmés par l'utilisateur
-// le 07/08/2026 : "Petty Cash" finance GRUNDFOS, "Revenus Location Mazda" finance
-// l'entretien de la Voiture (Mazda mise en location). Exclure les dépenses sans exclure
-// ces revenus gonflait artificiellement tous les ratios (le "revenu" comptait de l'argent
-// qui ne sert en réalité qu'à payer les dépenses exclues) — désormais symétrique.
-const GRUNDFOS_VOITURE_LINKED_REVENUE = ["Petty Cash", "Revenus Location Mazda"];
+// La catégorie que l'utilisateur veut pouvoir inclure/exclure en un clic — GRUNDFOS
+// uniquement (précisé le 07/08/2026 : ça n'a rien à voir avec l'activité achat/vente
+// de pompes ECO PUMP AFRIK). "Voiture" reste désormais TOUJOURS incluse dans le budget
+// personnel, dans les deux options — elle n'est plus concernée par ce bouton.
+const GRUNDFOS_VOITURE_CATEGORIES = ["GRUNDFOS"];
+// Revenu directement lié à GRUNDFOS, confirmé par l'utilisateur le 07/08/2026 :
+// "Petty Cash" finance GRUNDFOS. Exclure la dépense sans exclure ce revenu gonflait
+// artificiellement tous les ratios (le "revenu" comptait de l'argent qui ne sert en
+// réalité qu'à payer la dépense exclue) — désormais symétrique.
+const GRUNDFOS_VOITURE_LINKED_REVENUE = ["Petty Cash"];
 
 const defaultChargeOverrides: Record<string, ChargeOverride> = {
   "Logement": { mode: "fixe", amount: 650000 },
@@ -5562,7 +5563,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
       ws1.addRow([]);
       addSum("Généré le", dateLabelFull(todayISO()));
       addSum("Fenêtre d'analyse", `${monthLabel(result.lookback[result.lookback.length - 1])} — ${monthLabel(result.lookback[0])}`);
-      addSum("GRUNDFOS & Voiture", includeGrundfosVoiture ? "Inclus" : "Exclus");
+      addSum("GRUNDFOS", includeGrundfosVoiture ? "Inclus" : "Exclus");
       ws1.addRow([]);
       addSum("Revenu moyen mensuel", result.avgRevenu, undefined, true);
       addSum("Total charges fixes / mois", result.totalFixe, EMERALD, true);
@@ -5606,16 +5607,16 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
           <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
             padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
             background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
-          }}>Exclure GRUNDFOS & Voiture</button>
+          }}>Exclure GRUNDFOS</button>
           <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
             padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
             background: includeGrundfosVoiture ? COLOR.gold : "transparent", color: includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
-          }}>Inclure GRUNDFOS & Voiture</button>
+          }}>Inclure GRUNDFOS</button>
         </div>
         <span style={{ fontSize: 11.5, color: COLOR.inkMuted, flex: 1, minWidth: 200 }}>
           {includeGrundfosVoiture
             ? "Les charges GRUNDFOS (carburant, internet, électricité…) et Voiture sont comptées dans le budget personnel."
-            : "GRUNDFOS et Voiture sont exclues — utile si tu veux voir ton budget personnel pur, séparé de l'activité professionnelle."}
+            : "GRUNDFOS est exclue — utile si tu veux voir ton budget personnel pur, séparé de cette activité. \"Voiture\" reste toujours incluse."}
         </span>
       </div>
 
@@ -6072,16 +6073,16 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
           <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
             padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
             background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
-          }}>Exclure GRUNDFOS & Voiture</button>
+          }}>Exclure GRUNDFOS</button>
           <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
             padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
             background: includeGrundfosVoiture ? COLOR.gold : "transparent", color: includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
-          }}>Inclure GRUNDFOS & Voiture</button>
+          }}>Inclure GRUNDFOS</button>
         </div>
         <span style={{ fontSize: 11.5, color: COLOR.inkMuted, flex: 1, minWidth: 220 }}>
           {includeGrundfosVoiture
-            ? "GRUNDFOS/Voiture et les revenus qui les financent (Petty Cash, Revenus Location Mazda) sont inclus dans tous les calculs de cette page."
-            : "Vue \"personnel pur\" : GRUNDFOS/Voiture ET les revenus qui les financent (Petty Cash, Revenus Location Mazda) sont exclus symétriquement de tous les calculs ci-dessous."}
+            ? "GRUNDFOS et le revenu qui la finance (Petty Cash) sont inclus dans tous les calculs de cette page. \"Voiture\" reste toujours incluse, quelle que soit l'option choisie."
+            : "Vue \"personnel pur\" : GRUNDFOS ET le revenu qui la finance (Petty Cash) sont exclus symétriquement de tous les calculs ci-dessous. \"Voiture\" reste toujours incluse."}
         </span>
       </div>
 
@@ -8121,7 +8122,7 @@ export default function GrandLivre() {
     setMonthlyObjective(next);
   };
   const setIncludeGrundfosVoitureLogged = (next: boolean) => {
-    if (next !== includeGrundfosVoiture) logChange(`GRUNDFOS & Voiture dans les charges : ${includeGrundfosVoiture ? "Inclus" : "Exclu"} → ${next ? "Inclus" : "Exclu"}`);
+    if (next !== includeGrundfosVoiture) logChange(`GRUNDFOS dans les charges : ${includeGrundfosVoiture ? "Inclus" : "Exclu"} → ${next ? "Inclus" : "Exclu"}`);
     setIncludeGrundfosVoiture(next);
   };
   const setCategoryScopeLogged = (next: Record<string, Scope>) => {
