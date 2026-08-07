@@ -1398,7 +1398,7 @@ const defaultChargeOverrides: Record<string, ChargeOverride> = {
   "GRUNDFOS::Électricité": { mode: "variable" }, // CV 72% — vraiment variable, pas une charge fixe malgré la régularité
   "GRUNDFOS::Eau": { mode: "occasionnelle" }, // seulement 3/6 mois et montants faibles (<8 000) — ne ressemble pas à une vraie facture mensuelle dans ces données
   // --- Voiture ---
-  "Voiture::Assurance": { mode: "fixe", amount: 23463 }, // 281 555 FCFA payés en une fois (prime annuelle) ÷ 12 — provision mensuelle équivalente
+  "Voiture::Assurance": { mode: "fixe", amount: 23698 }, // Prime annuelle (281 555 + 2 815 = 284 370 FCFA, transaction du 21 avril) ÷ 12 — mise à jour le 07/08/2026
   // --- Abonnements ---
   "Abonnements::Money Coach": { mode: "fixe", amount: 5450 }, // stable à ~5 300-5 600 sur 5 des 6 mois, un seul mois manqué
   "Abonnements::Claude": { mode: "variable" }, // abonnement récent (3/6 mois), montant encore instable — à reclasser en Fixe une fois stabilisé
@@ -5551,6 +5551,22 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
 }) {
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
   const result = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, 6, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, periodRange]);
+  // Détail mois par mois par poste — pas renvoyé par classifyCharges (qui n'expose que les
+  // agrégats), recalculé ici uniquement pour l'affichage de la fiche de détail au clic.
+  const posteMonthlyDetail = useMemo(() => {
+    const byPosteMonth: Record<string, Record<string, number>> = {};
+    transactions.forEach((t) => {
+      if (t.type !== "Dépense") return;
+      if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
+      const tmk = dateToMonthKey(t.date);
+      if (!result.lookback.includes(tmk)) return;
+      const poste = EXPAND_SUBCATS_FOR_CHARGES[t.category] ? `${t.category}::${t.subcategory || "(non précisé)"}` : t.category;
+      byPosteMonth[poste] = byPosteMonth[poste] || {};
+      byPosteMonth[poste][tmk] = (byPosteMonth[poste][tmk] || 0) + t.amount;
+    });
+    return byPosteMonth;
+  }, [transactions, includeGrundfosVoiture, result.lookback]);
+  const [calcDetailPoste, setCalcDetailPoste] = useState<string | null>(null);
 
   const modeLabel: Record<ChargeMode, string> = { fixe: "Fixe", variable: "Variable régulière", occasionnelle: "Occasionnelle", exclu: "Exclu" };
   const modeColor: Record<ChargeMode, string> = { fixe: COLOR.emeraldSoft, variable: COLOR.goldSoft, occasionnelle: COLOR.inkMuted, exclu: COLOR.claySoft };
@@ -5558,6 +5574,31 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
   const setOverride = (poste: string, patch: Partial<ChargeOverride>) => {
     const current = chargeOverrides[poste] || { mode: "auto" as const };
     setChargeOverrides({ ...chargeOverrides, [poste]: { ...current, ...patch } });
+  };
+
+  const buildChargeDetail = (poste: string): { title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } | null => {
+    const r = result.rows.find((row) => row.poste === poste);
+    if (!r) return null;
+    const monthly = posteMonthlyDetail[poste] || {};
+    const rows = result.lookback.map((m) => [monthLabel(m), monthly[m] ? fmt(monthly[m]) : "—"]);
+    const blocks: CalcDetailBlock[] = [
+      { kind: "kv", rows: [
+        { label: "Mode retenu", value: modeLabel[r.mode], strong: true },
+        { label: "Origine", value: r.overridden ? "réglage manuel" : "automatique" },
+        { label: "Mois présents", value: `${r.present} / ${result.lookback.length}` },
+        { label: "Moyenne (mois présents inclus dans le calcul)", value: `${fmt(r.mean)} FCFA` },
+        { label: "Médiane", value: `${fmt(r.median)} FCFA` },
+        { label: "Coefficient de variation (CV)", value: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—" },
+        { label: "Montant retenu pour les calculs", value: `${fmt(r.amount)} FCFA`, strong: true },
+      ] },
+      { kind: "note", tone: "info", text: "Règle automatique : \"Fixe\" si présent sur au moins 5/6 de la période avec CV < 20%. \"Variable régulière\" si présent sur au moins 4/6 mais montant qui fluctue davantage. \"Occasionnelle\" sinon. Un réglage manuel prime toujours sur cette règle." },
+      { kind: "table", columns: ["Mois", "Montant (FCFA)"], rows },
+    ];
+    return {
+      title: poste.replace("::", " · "), headline: `${fmt(r.amount)} FCFA/mois`,
+      formula: r.overridden ? "Montant fixé manuellement" : `${modeLabel[r.mode]} — médiane sur ${result.lookback.length} mois`,
+      blocks,
+    };
   };
 
   const exportChargesExcel = async () => {
@@ -5631,14 +5672,14 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px" }}>
         <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
-          <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
-            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
-            background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
-          }}>Exclure GRUNDFOS</button>
           <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
             padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
             background: includeGrundfosVoiture ? COLOR.gold : "transparent", color: includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
           }}>Inclure GRUNDFOS</button>
+          <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
+            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+            background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
+          }}>Exclure GRUNDFOS</button>
         </div>
         <span style={{ fontSize: 11.5, color: COLOR.inkMuted, flex: 1, minWidth: 200 }}>
           {includeGrundfosVoiture
@@ -5696,7 +5737,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
             const isFixedOverride = override?.mode === "fixe";
             return (
               <div key={r.poste} style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 0.8fr 0.6fr", gap: 8, alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
-                <span style={{ fontSize: 12.5, color: COLOR.ink }}>{r.poste.replace("::", " · ")}</span>
+                <span style={{ fontSize: 12.5, color: COLOR.ink }}>{r.poste.replace("::", " · ")}<CalcDetailIcon onClick={() => setCalcDetailPoste(r.poste)} /></span>
                 <select value={override?.mode || "auto"} onChange={(e) => setOverride(r.poste, { mode: e.target.value as ChargeMode | "auto" })}
                   style={{ background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: modeColor[r.mode], padding: "4px 6px", fontSize: 11 }}>
                   <option value="auto">Auto ({modeLabel[r.mode]})</option>
@@ -5726,6 +5767,10 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
           })}
         </div>
       </PanelWithHelp>
+      {calcDetailPoste && (() => {
+        const d = buildChargeDetail(calcDetailPoste);
+        return d ? <CalcDetailSheet open={!!calcDetailPoste} onClose={() => setCalcDetailPoste(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
+      })()}
     </div>
   );
 }
@@ -6441,14 +6486,14 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
-          <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
-            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
-            background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
-          }}>Exclure GRUNDFOS</button>
           <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
             padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
             background: includeGrundfosVoiture ? COLOR.gold : "transparent", color: includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
           }}>Inclure GRUNDFOS</button>
+          <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
+            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+            background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
+          }}>Exclure GRUNDFOS</button>
         </div>
         <span style={{ fontSize: 11.5, color: COLOR.inkMuted, flex: 1, minWidth: 220 }}>
           {includeGrundfosVoiture
