@@ -5663,17 +5663,29 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         </button>
       )}
 
-      <PanelWithHelp title="Classification des charges" subtitle="Basée sur la régularité (mois présents sur 6) et la variabilité du montant — ajustable poste par poste"
-        explain="Un poste est classé 'Fixe' automatiquement s'il apparaît sur au moins 5 des 6 derniers mois avec un montant peu variable (coefficient de variation < 20%). 'Variable régulière' s'il revient souvent mais avec un montant qui fluctue. 'Occasionnel' sinon. Tu peux forcer le mode et le montant de n'importe quel poste — utile par exemple pour un loyer qui vient de changer, ou une sous-catégorie que tu sais fixe malgré des données historiques bruitées."
+      <PanelWithHelp title="Classification des charges" subtitle={`Basée sur la régularité (mois présents sur ${result.lookback.length}) et la variabilité du montant — ajustable poste par poste`}
+        explain="Un poste est classé 'Fixe' automatiquement s'il apparaît sur au moins 5/6 de la période avec un montant peu variable (coefficient de variation < 20%). 'Variable régulière' s'il revient souvent mais avec un montant qui fluctue. 'Occasionnel' sinon. En pratique, beaucoup de vraies charges fixes (loyer qui augmente, assurance payée par trimestre, factures irrégulières) ont un montant trop variable pour être détectées automatiquement — le réglage manuel existe pour ces cas, pas par défaut de l'algorithme. Le bouton ↻ à côté de chaque montant recalcule sur la médiane actuelle sans perdre le classement 'Fixe' que tu as choisi."
         right={
-          <button onClick={exportChargesExcel} disabled={xlsState === "loading"} style={{
-            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
-            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
-            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
-          }}>
-            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
-            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => {
+              const next = { ...chargeOverrides };
+              result.rows.forEach((r) => { if (next[r.poste]?.mode === "fixe") next[r.poste] = { ...next[r.poste], amount: Math.round(r.median) }; });
+              setChargeOverrides(next);
+            }} style={{
+              display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`,
+              borderRadius: 8, color: COLOR.slateBlueSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer",
+            }}>
+              <RotateCcw size={13} /> Tout recalculer
+            </button>
+            <button onClick={exportChargesExcel} disabled={xlsState === "loading"} style={{
+              display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+              border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+              color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+            }}>
+              {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+              {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+            </button>
+          </div>
         }>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 0.8fr 0.6fr", gap: 8, padding: "6px 0", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -5694,14 +5706,20 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
                   <option value="exclu">Exclu</option>
                 </select>
                 {isFixedOverride ? (
-                  <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right" }} value={override?.amount ?? Math.round(r.median)}
-                    onChange={(e) => setOverride(r.poste, { amount: Number(e.target.value) })} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right" }} value={override?.amount ?? Math.round(r.median)}
+                      onChange={(e) => setOverride(r.poste, { amount: Number(e.target.value) })} />
+                    <button onClick={() => setOverride(r.poste, { amount: Math.round(r.median) })} title={`Recalculer sur la médiane actuelle (${fmt(r.median)} FCFA, sur ${result.lookback.length} mois)`}
+                      style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
+                      <RotateCcw size={13} />
+                    </button>
+                  </div>
                 ) : (
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, textAlign: "right", color: r.mode === "exclu" ? COLOR.inkMuted : COLOR.ink }}>
                     {r.mode === "exclu" ? "—" : `${fmt(r.amount)} FCFA`}
                   </span>
                 )}
-                <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.present}/6</span>
+                <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.present}/{result.lookback.length}</span>
                 <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.cv !== null ? `${r.cv.toFixed(0)}%` : "—"}</span>
               </div>
             );
