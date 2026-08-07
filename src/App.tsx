@@ -245,7 +245,7 @@ const defaultCategoryActivity: Record<string, string> = {
 // avec des sous-catégories différentes.
 const depSubcategories: Record<string, string[]> = {
   "Invitation": ["Femmes", "Triade"],
-  "Logement": ["Location"],
+  "Logement": ["Location", "Résidence principale", "Deuxième logement"],
   "Personnel": ["Coiffure", "Produits de beauté", "Hygiène personnelle"],
   "Plan Éducation": ["PEL"],
   "Santé": ["Médicaments", "VG", "Dentaire", "Vision", "Hôpital", "Assurance"],
@@ -1374,7 +1374,7 @@ interface ChargeOverride { mode: ChargeMode | "auto"; amount?: number; }
 interface SettingsLogEntry { at: string; text: string; }
 // Catégories éclatées par sous-catégorie plutôt qu'agrégées — nécessaire pour
 // distinguer par exemple GRUNDFOS·Carburant (fixe) de GRUNDFOS·Électricité (variable).
-const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true };
+const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman": true, "GRUNDFOS": true, "Voiture": true, "Abonnements": true, "Logement": true };
 // La catégorie que l'utilisateur veut pouvoir inclure/exclure en un clic — GRUNDFOS
 // uniquement (précisé le 07/08/2026 : ça n'a rien à voir avec l'activité achat/vente
 // de pompes ECO PUMP AFRIK). "Voiture" reste désormais TOUJOURS incluse dans le budget
@@ -1387,7 +1387,14 @@ const GRUNDFOS_VOITURE_CATEGORIES = ["GRUNDFOS"];
 const GRUNDFOS_VOITURE_LINKED_REVENUE = ["Petty Cash"];
 
 const defaultChargeOverrides: Record<string, ChargeOverride> = {
-  "Logement": { mode: "fixe", amount: 650000 },
+  // "Logement" éclaté par sous-catégorie le 07/08/2026 : deux logements distincts payés
+  // séparément (résidence principale ~550 000, deuxième logement ~100 000), fusionnés à
+  // tort dans une seule catégorie jusqu'ici. "Logement::Location" reste au montant combiné
+  // (650 000) pour ne pas casser les transactions historiques déjà tagguées ainsi ; les
+  // deux nouvelles sous-catégories ci-dessous sont à utiliser pour toute nouvelle saisie.
+  "Logement::Location": { mode: "fixe", amount: 650000 },
+  "Logement::Résidence principale": { mode: "fixe", amount: 550000 },
+  "Logement::Deuxième logement": { mode: "fixe", amount: 100000 },
   "Enfants & Maman::Maman": { mode: "fixe", amount: 70700 },
   "Enfants & Maman::Nesher": { mode: "variable" },
   "Enfants & Maman::Hemra": { mode: "variable" },
@@ -6098,27 +6105,86 @@ function CalcDetailIcon({ onClick }: { onClick: () => void }) {
 function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
 }) {
+  const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   if (!open) return null;
-  // Export CSV léger de la fiche affichée — pas besoin de charger ExcelJS pour un
-  // seul détail de calcul, un CSV s'ouvre instantanément dans Excel/Sheets.
-  const downloadCsv = () => {
-    const lines: string[] = [`"${title}"`, `"${headline}"`, `"${formula}"`, ""];
-    blocks.forEach((b) => {
-      if (b.kind === "kv") {
-        b.rows.forEach((r) => lines.push(`"${r.label}";"${r.value}"`));
-      } else if (b.kind === "table") {
-        lines.push(b.columns.map((c) => `"${c}"`).join(";"));
-        b.rows.forEach((row) => lines.push(row.map((c) => `"${c}"`).join(";")));
-      } else {
-        lines.push(`"${b.text}"`);
-      }
-      lines.push("");
-    });
-    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `grand-livre_${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}_${todayISO()}.csv`; a.click();
-    URL.revokeObjectURL(url);
+  // PDF structuré (même style que les autres exports de l'app : bandeau navy, encadré
+  // doré pour le résultat, tableaux via autoTable) — remplace le CSV, jugé peu présentable.
+  const downloadPdf = async () => {
+    setPdfState("loading");
+    try {
+      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+        import(/* @vite-ignore */ "jspdf"),
+        import(/* @vite-ignore */ "jspdf-autotable"),
+      ]);
+      const autoTable = (autoTableModule as any).default || autoTableModule;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFillColor(26, 43, 76);
+      doc.rect(0, 0, pageWidth, 34, "F");
+      doc.setFontSize(16); doc.setTextColor(255, 255, 255);
+      doc.text(`Grand Livre — ${title}`, 14, 16);
+      doc.setFontSize(9); doc.setTextColor(200, 210, 225);
+      doc.text(`Généré le ${dateLabelFull(todayISO())}`, 14, 24);
+      doc.text(formula, 14, 29);
+
+      doc.setFillColor(201, 162, 39);
+      doc.roundedRect(14, 40, pageWidth - 28, 16, 2, 2, "F");
+      doc.setFontSize(8); doc.setTextColor(26, 26, 26);
+      doc.text("MONTANT", 20, 46);
+      doc.setFontSize(13); doc.setFont("helvetica", "bold");
+      doc.text(headline, 20, 53);
+      doc.setFont("helvetica", "normal");
+
+      let y = 66;
+      blocks.forEach((b) => {
+        if (y > 260) { doc.addPage(); y = 20; }
+        if (b.kind === "kv") {
+          autoTable(doc, {
+            startY: y,
+            body: b.rows.map((r) => [r.label, r.value]),
+            theme: "plain",
+            styles: { fontSize: 9, cellPadding: { top: 2.5, bottom: 2.5, left: 2, right: 2 } },
+            columnStyles: { 1: { halign: "right", fontStyle: "bold" } },
+            didParseCell: (data: any) => {
+              const row = b.rows[data.row.index];
+              if (row?.warn) data.cell.styles.textColor = [193, 84, 63];
+              else if (row?.strong && data.column.index === 1) data.cell.styles.textColor = [201, 162, 39];
+            },
+          });
+          y = (doc as any).lastAutoTable.finalY + 8;
+        } else if (b.kind === "table") {
+          autoTable(doc, {
+            startY: y,
+            head: [b.columns],
+            body: b.rows.map((row) => row.map(String)),
+            headStyles: { fillColor: [26, 43, 76] },
+            styles: { fontSize: 8 },
+            columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
+            didParseCell: (data: any) => {
+              if (b.warnRows?.includes(data.row.index) && data.section === "body") data.cell.styles.textColor = [193, 84, 63];
+            },
+          });
+          y = (doc as any).lastAutoTable.finalY + 10;
+        } else {
+          doc.setFillColor(b.tone === "warn" ? 250 : 250, b.tone === "warn" ? 235 : 245, b.tone === "warn" ? 232 : 220);
+          const lines = doc.splitTextToSize(b.text, pageWidth - 32);
+          const boxH = lines.length * 4.5 + 6;
+          if (y + boxH > 275) { doc.addPage(); y = 20; }
+          doc.roundedRect(14, y, pageWidth - 28, boxH, 2, 2, "F");
+          doc.setFontSize(8); doc.setTextColor(b.tone === "warn" ? 150 : 120, b.tone === "warn" ? 60 : 100, b.tone === "warn" ? 50 : 40);
+          doc.text(lines, 18, y + 6);
+          doc.setTextColor(0, 0, 0);
+          y += boxH + 8;
+        }
+      });
+
+      doc.save(`grand-livre_${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}_${todayISO()}.pdf`);
+      setPdfState("idle");
+    } catch (e) {
+      console.error(e);
+      setPdfState("error");
+    }
   };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 490, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
@@ -6133,7 +6199,9 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
             <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 4, fontStyle: "italic" }}>{formula}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-            <button onClick={downloadCsv} title="Télécharger cette fiche en CSV" style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", padding: 4 }}><Download size={17} /></button>
+            <button onClick={downloadPdf} disabled={pdfState === "loading"} title="Télécharger cette fiche en PDF" style={{ background: "transparent", border: "none", color: pdfState === "error" ? COLOR.claySoft : COLOR.slateBlueSoft, cursor: pdfState === "loading" ? "default" : "pointer", display: "flex", padding: 4 }}>
+              {pdfState === "loading" ? <Loader2 size={17} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={17} />}
+            </button>
             <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
           </div>
         </div>
