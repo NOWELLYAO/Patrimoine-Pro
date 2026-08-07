@@ -412,6 +412,16 @@ function currentScheduleAmount(schedule: ChargeScheduleEntry[]): number {
   const sorted = [...schedule].sort((a, b) => monthSortKey(b.from) - monthSortKey(a.from));
   return sorted[0]?.amount ?? 0;
 }
+// Montant retenu pour une fenêtre de mois donnée : moyenne pondérée des segments qui la
+// couvrent (ex : 8 mois à 550 000 + 2 mois à 480 000 sur une fenêtre de 10 mois → moyenne
+// pondérée, pas juste la moyenne des deux montants). Les mois non couverts par aucun
+// segment (trous dans l'historique) sont ignorés plutôt que comblés arbitrairement. Si
+// aucun mois de la fenêtre n'est couvert, retombe sur le montant actuel.
+function scheduleAmountForWindow(schedule: ChargeScheduleEntry[], lookback: string[]): number {
+  const covered = lookback.map((m) => scheduleAmountFor(schedule, m)).filter((v): v is number => v !== null);
+  if (!covered.length) return currentScheduleAmount(schedule);
+  return covered.reduce((a, v) => a + v, 0) / covered.length;
+}
 const fmt = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
 // Les PDF utilisent les polices standard de jsPDF (Helvetica), qui ne supportent
 // que l'encodage WinAnsi/Latin-1 — l'espace fine insécable utilisée par fmt() pour
@@ -719,14 +729,23 @@ interface Filters { from: string; to: string; type: string; group: string; categ
 function FilterBar({ filters, setFilters, allMonths, allCategories, onReset }: {
   filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; onReset: () => void;
 }) {
-  const patch = (p: Partial<Filters>) => setFilters({ ...filters, ...p });
+  // Empêche une plage inversée (Du mois postérieur à Au mois) qui cassait tous les
+  // calculs en aval (revenu à 0, chiffres délirants) — échange les deux valeurs plutôt
+  // que de laisser une plage impossible s'installer.
+  const patch = (p: Partial<Filters>) => {
+    const next = { ...filters, ...p };
+    if (monthSortKey(next.from) > monthSortKey(next.to)) {
+      const tmp = next.from; next.from = next.to; next.to = tmp;
+    }
+    setFilters(next);
+  };
   return (
     <div className="gl-noprint" style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "16px 20px", display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLOR.gold, fontSize: 11.5, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.08em" }}>
         <Filter size={13} /> Filtres
       </div>
-      <Select label="Du mois" value={filters.from} onChange={(v) => patch({ from: v })} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-      <Select label="Au mois" value={filters.to} onChange={(v) => patch({ to: v })} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+      <Select label="Du mois" value={filters.from} onChange={(v) => patch({ from: v })} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(filters.to)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+      <Select label="Au mois" value={filters.to} onChange={(v) => patch({ to: v })} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(filters.from)).map((m) => ({ value: m, label: monthLabel(m) }))} />
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
@@ -3629,6 +3648,12 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   const [aTo, setATo] = useState(prevMonth);
   const [bFrom, setBFrom] = useState(lastMonth);
   const [bTo, setBTo] = useState(lastMonth);
+  // Empêche une plage inversée (Du mois postérieur à Au mois) au sein d'une même période —
+  // échange les deux valeurs plutôt que de laisser une plage impossible s'installer.
+  const setAFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(aTo)) { setAFrom(aTo); setATo(v); } else setAFrom(v); };
+  const setAToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(aFrom)) { setATo(aFrom); setAFrom(v); } else setATo(v); };
+  const setBFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(bTo)) { setBFrom(bTo); setBTo(v); } else setBFrom(v); };
+  const setBToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(bFrom)) { setBTo(bFrom); setBFrom(v); } else setBTo(v); };
 
   const allDates = useMemo(() => Array.from(new Set(transactions.map((t) => t.date))).sort(), [transactions]);
   const lastDate = allDates[allDates.length - 1] || todayISO();
@@ -3716,8 +3741,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
             </div>
             {granularity === "mois" ? (
               <div style={{ display: "flex", gap: 10 }}>
-                <Select label="Du mois" value={aFrom} onChange={setAFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-                <Select label="Au mois" value={aTo} onChange={setATo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Du mois" value={aFrom} onChange={setAFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(aTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Au mois" value={aTo} onChange={setAToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(aFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
               </div>
             ) : (
               <div style={{ display: "flex", gap: 10 }}>
@@ -3739,8 +3764,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
             </div>
             {granularity === "mois" ? (
               <div style={{ display: "flex", gap: 10 }}>
-                <Select label="Du mois" value={bFrom} onChange={setBFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-                <Select label="Au mois" value={bTo} onChange={setBTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Du mois" value={bFrom} onChange={setBFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(bTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Au mois" value={bTo} onChange={setBToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(bFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
               </div>
             ) : (
               <div style={{ display: "flex", gap: 10 }}>
@@ -3827,6 +3852,10 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   const [customOpen, setCustomOpen] = useState(false);
   const [customFrom, setCustomFrom] = useState(lastMonth);
   const [customTo, setCustomTo] = useState(lastMonth);
+  // Empêche une plage inversée (Du mois postérieur à Au mois) — échange les deux valeurs
+  // plutôt que de laisser une plage impossible s'installer.
+  const setCustomFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(customTo)) { setCustomFrom(customTo); setCustomTo(v); } else setCustomFrom(v); };
+  const setCustomToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(customFrom)) { setCustomTo(customFrom); setCustomFrom(v); } else setCustomTo(v); };
   const [typeView, setTypeView] = useState<TxType>("Dépense");
   const [expandedCat, setExpandedCat] = useState<string | null>(null);
   const [expandedSub, setExpandedSub] = useState<string | null>(null);
@@ -4012,8 +4041,8 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
 
         {customOpen && (
           <div className="gl-noprint" style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-            <Select label="Du mois" value={customFrom} onChange={setCustomFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-            <Select label="Au mois" value={customTo} onChange={setCustomTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+            <Select label="Du mois" value={customFrom} onChange={setCustomFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(customTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+            <Select label="Au mois" value={customTo} onChange={setCustomToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(customFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
           </div>
         )}
 
@@ -6079,6 +6108,10 @@ function RapprochementTab({ transactions, setTransactions, accounts }: {
   const curMonth = dateToMonthKey(todayISO());
   const [periodFrom, setPeriodFrom] = useState(curMonth);
   const [periodTo, setPeriodTo] = useState(curMonth);
+  // Empêche une plage inversée (Du mois postérieur à Au mois) — échange les deux valeurs
+  // plutôt que de laisser une plage impossible s'installer.
+  const setPeriodFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(periodTo)) { setPeriodFrom(periodTo); setPeriodTo(v); } else setPeriodFrom(v); };
+  const setPeriodToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(periodFrom)) { setPeriodTo(periodFrom); setPeriodFrom(v); } else setPeriodTo(v); };
   const [soldeReel, setSoldeReel] = useState<number | "">("");
 
   const allMonths = useMemo(() => Array.from(new Set(transactions.map((t) => dateToMonthKey(t.date)))).sort((a, b) => monthSortKey(a) - monthSortKey(b)), [transactions]);
@@ -6121,8 +6154,8 @@ function RapprochementTab({ transactions, setTransactions, accounts }: {
               {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
             </select>
           </div>
-          <Select label="Du mois" value={periodFrom} onChange={setPeriodFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-          <Select label="Au mois" value={periodTo} onChange={setPeriodTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+          <Select label="Du mois" value={periodFrom} onChange={setPeriodFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(periodTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+          <Select label="Au mois" value={periodTo} onChange={setPeriodToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(periodFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Solde réel (relevé, fin de période)</label>
             <input type="number" inputMode="numeric" style={{ ...inputStyle, width: 160, textAlign: "right" }} placeholder="Ex : 1 250 000" value={soldeReel}
@@ -7146,6 +7179,10 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
   const lastMonth = allMonths[allMonths.length - 1] || dateToMonthKey(todayISO());
   const [periodFrom, setPeriodFrom] = useState(allMonths[0] || lastMonth);
   const [periodTo, setPeriodTo] = useState(lastMonth);
+  // Empêche une plage inversée (Du postérieur à Au) — échange les deux valeurs plutôt
+  // que de laisser une plage impossible s'installer.
+  const setPeriodFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(periodTo)) { setPeriodFrom(periodTo); setPeriodTo(v); } else setPeriodFrom(v); };
+  const setPeriodToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(periodFrom)) { setPeriodTo(periodFrom); setPeriodFrom(v); } else setPeriodTo(v); };
 
   const applyPreset = (key: string) => {
     if (key === "1m") { setPeriodFrom(lastMonth); setPeriodTo(lastMonth); }
@@ -7180,8 +7217,8 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
             {[["1m", "1M"], ["3m", "3M"], ["6m", "6M"], ["1a", "1A"], ["tout", "Tout"]].map(([key, label]) => (
               <button key={key} onClick={() => applyPreset(key)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted, borderRadius: 6, padding: "6px 10px", fontSize: 11.5, cursor: "pointer" }}>{label}</button>
             ))}
-            <Select label="Du" value={periodFrom} onChange={setPeriodFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
-            <Select label="Au" value={periodTo} onChange={setPeriodTo} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+            <Select label="Du" value={periodFrom} onChange={setPeriodFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(periodTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+            <Select label="Au" value={periodTo} onChange={setPeriodToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(periodFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
           </div>
         }>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
