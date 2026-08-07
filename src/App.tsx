@@ -1388,13 +1388,11 @@ const GRUNDFOS_VOITURE_LINKED_REVENUE = ["Petty Cash"];
 
 const defaultChargeOverrides: Record<string, ChargeOverride> = {
   // "Logement" éclaté par sous-catégorie le 07/08/2026 : deux logements distincts payés
-  // séparément (résidence principale ~550 000, deuxième logement ~100 000), fusionnés à
-  // tort dans une seule catégorie jusqu'ici. "Logement::Location" reste au montant combiné
-  // (650 000) pour ne pas casser les transactions historiques déjà tagguées ainsi ; les
-  // deux nouvelles sous-catégories ci-dessous sont à utiliser pour toute nouvelle saisie.
-  "Logement::Location": { mode: "fixe", amount: 650000 },
-  "Logement::Résidence principale": { mode: "fixe", amount: 550000 },
-  "Logement::Deuxième logement": { mode: "fixe", amount: 100000 },
+  // séparément (résidence principale, deuxième logement), fusionnés à tort dans une
+  // seule catégorie jusqu'ici. Sur demande explicite de l'utilisateur (07/08/2026) :
+  // aucun montant "Fixe" n'est pré-rempli ici pour Logement — c'est à l'utilisateur de
+  // décider si un poste est fixe et à quel montant, l'app se contente de proposer la
+  // médiane calculée automatiquement tant qu'aucun choix n'a été fait.
   "Enfants & Maman::Maman": { mode: "fixe", amount: 70700 },
   "Enfants & Maman::Nesher": { mode: "variable" },
   "Enfants & Maman::Hemra": { mode: "variable" },
