@@ -1450,12 +1450,13 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   }
 
   const byPosteMonth: Record<string, Record<string, number>> = {};
-  // Repère aussi, indépendamment de la fenêtre filtrée, TOUTES les valeurs historiques
-  // par poste (tout l'historique disponible) — sert uniquement de filet de sécurité pour
-  // les postes forcés "Fixe" sans montant explicite : si la fenêtre filtrée ne contient
-  // qu'1 ou 2 mois de données pour ce poste, sa médiane y est fragile (un seul mois
-  // atypique peut la définir entièrement) ; la médiane sur tout l'historique est plus
-  // stable pour représenter "le montant mensuel typique" qu'un chiffre censé être fixe.
+  // Repère aussi TOUTES les valeurs historiques par poste, mois par mois, indépendamment
+  // de la fenêtre filtrée — sert de base à la CLASSIFICATION (Fixe/Variable/Occasionnelle)
+  // ci-dessous, qui doit rester stable quel que soit le filtre "Du mois/Au mois" affiché.
+  // Sans ça, resserrer le filtre sur une courte période peut faire passer par coïncidence
+  // n'importe quelle catégorie pour "régulière" et la classer Fixe automatiquement — ce
+  // n'est pas censé être une décision qui dépend de ce qu'on est juste en train de regarder.
+  const byPosteMonthAllHistory: Record<string, Record<string, number>> = {};
   const byPosteAllTime: Record<string, number[]> = {};
   transactions.forEach((t) => {
     if (t.type !== "Dépense") return;
@@ -1466,44 +1467,51 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
       byPosteMonth[poste] = byPosteMonth[poste] || {};
       byPosteMonth[poste][tmk] = (byPosteMonth[poste][tmk] || 0) + t.amount;
     }
+    byPosteMonthAllHistory[poste] = byPosteMonthAllHistory[poste] || {};
+    byPosteMonthAllHistory[poste][tmk] = (byPosteMonthAllHistory[poste][tmk] || 0) + t.amount;
     byPosteAllTime[poste] = byPosteAllTime[poste] || [];
     byPosteAllTime[poste].push(t.amount);
   });
+
+  // Fenêtre de classification : tout l'historique, du premier mois de transactions au
+  // mois précédant aujourd'hui — toujours la même, jamais celle du filtre affiché.
+  const todayForClass = todayISO();
+  const curMonthForClass = dateToMonthKey(todayForClass);
+  const allMonthKeys = transactions.map((t) => dateToMonthKey(t.date));
+  const firstMonthForClass = allMonthKeys.length ? allMonthKeys.reduce((a, b) => (monthSortKey(b) < monthSortKey(a) ? b : a)) : prevMonthKey(curMonthForClass);
+  const classificationLookback: string[] = [];
+  { let mk = firstMonthForClass; const end = prevMonthKey(curMonthForClass); while (monthSortKey(mk) <= monthSortKey(end)) { classificationLookback.push(mk); mk = nextMonthKey(mk); } }
 
   // Seuils de régularité exprimés en proportion du nombre de mois observés (≈83%
   // et ≈67%, les mêmes ratios qu'avec la fenêtre de 6 mois d'origine) plutôt qu'en
   // nombre de mois fixe — pour rester cohérents quelle que soit la taille de la fenêtre.
   const fixedRatio = 5 / 6, variableRatio = 4 / 6;
-  const rows = Object.entries(byPosteMonth).map(([poste, months]) => {
+  const allPostes = new Set([...Object.keys(byPosteMonth), ...Object.keys(byPosteMonthAllHistory)]);
+  const rows = Array.from(allPostes).map((poste) => {
+    const months = byPosteMonth[poste] || {};
     const vals = lookback.map((m) => months[m] || 0);
     const present = vals.filter((v) => v > 0).length;
-    // Corrigé le 07/08/2026 : divisait par le paramètre "monthsWindow" (souvent une
-    // valeur par défaut comme 6), pas par la vraie taille de la fenêtre analysée —
-    // faussait la classification dès que explicitRange (filtre "Du mois/Au mois")
-    // portait sur une période différente de 6 mois.
-    const presentRatio = present / lookback.length;
     // Sur demande explicite de l'utilisateur (07/08/2026) : la moyenne sur la période
     // (mois d'absence inclus comme des zéros) sert désormais de référence principale
-    // pour "le montant retenu", à la place de la médiane utilisée jusqu'ici.
+    // pour "le montant retenu" AFFICHÉ, à la place de la médiane utilisée jusqu'ici.
     const meanV = mean(vals);
     const medianV = median(vals);
-    // Moyenne calculée uniquement sur les mois où le poste est réellement présent —
-    // utile en repli quand un poste est forcé "Fixe" sans montant explicite mais n'a
-    // des données que sur une petite partie de la fenêtre (ex : un nouvel abonnement
-    // qui n'existe que depuis 3 mois sur une fenêtre de 27) : la moyenne sur toute la
-    // fenêtre (meanV) serait alors très écrasée par les mois d'absence, alors que la
-    // moyenne sur les seuls mois présents reflète le vrai montant typique.
     const presentVals = vals.filter((v) => v > 0);
     const medianPresent = presentVals.length ? median(presentVals) : 0;
     const meanPresent = presentVals.length ? mean(presentVals) : 0;
-    // Filet de sécurité final : moyenne sur TOUT l'historique du poste (indépendante de
-    // la fenêtre filtrée), utilisée seulement quand le repli ci-dessus doit s'appuyer
-    // sur trop peu de mois (< 3) dans la fenêtre courante pour être fiable.
     const allTimeVals = byPosteAllTime[poste] || [];
     const medianAllTime = allTimeVals.length ? median(allTimeVals) : 0;
     const meanAllTime = allTimeVals.length ? mean(allTimeVals) : 0;
-    const sd = stdev(vals);
-    const cv = meanV > 0 ? (sd / meanV) * 100 : null;
+
+    // Stats de CLASSIFICATION (mode Fixe/Variable/Occasionnelle) : toujours sur tout
+    // l'historique (classificationLookback), jamais sur la fenêtre filtrée affichée.
+    const classMonths = byPosteMonthAllHistory[poste] || {};
+    const classVals = classificationLookback.map((m) => classMonths[m] || 0);
+    const classPresent = classVals.filter((v) => v > 0).length;
+    const classPresentRatio = classificationLookback.length ? classPresent / classificationLookback.length : 0;
+    const classMean = mean(classVals);
+    const classSd = stdev(classVals);
+    const cv = classMean > 0 ? (classSd / classMean) * 100 : null;
 
     const override = overrides[poste];
     let mode: ChargeMode;
@@ -1515,14 +1523,14 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
       } else {
         amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : (present >= 3 ? (meanV || meanPresent) : meanAllTime);
       }
-    } else if (presentRatio >= fixedRatio && cv !== null && cv < 20) {
-      mode = "fixe"; amount = meanV;
-    } else if (presentRatio >= variableRatio) {
-      mode = "variable"; amount = meanV;
+    } else if (classPresentRatio >= fixedRatio && cv !== null && cv < 20) {
+      mode = "fixe"; amount = meanV || meanAllTime;
+    } else if (classPresentRatio >= variableRatio) {
+      mode = "variable"; amount = meanV || meanAllTime;
     } else {
-      mode = "occasionnelle"; amount = meanV || meanPresent;
+      mode = "occasionnelle"; amount = meanV || meanPresent || meanAllTime;
     }
-    return { poste, present, mean: meanV, median: medianV, medianPresent, medianAllTime, meanPresent, meanAllTime, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
+    return { poste, present, classPresent, classTotal: classificationLookback.length, mean: meanV, median: medianV, medianPresent, medianAllTime, meanPresent, meanAllTime, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
   }).sort((a, b) => b.amount - a.amount);
 
   const totalFixe = rows.filter((r) => r.mode === "fixe").reduce((a, r) => a + r.amount, 0);
@@ -5697,6 +5705,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         { label: "Mode retenu", value: modeLabel[r.mode], strong: true },
         { label: "Origine", value: schedule?.length ? "historique de montants" : r.overridden ? "réglage manuel" : "automatique" },
         ...(schedule?.length ? [] : [
+          { label: "Mois présents (classification, tout l'historique)", value: `${r.classPresent} / ${r.classTotal}` },
           { label: "Mois présents (fenêtre affichée)", value: `${r.present} / ${result.lookback.length}` },
           { label: "Moyenne (toute la fenêtre affichée, absences comptées comme 0)", value: `${fmt(r.mean)} FCFA` },
           { label: "Médiane (pour référence)", value: `${fmt(r.median)} FCFA` },
@@ -5871,7 +5880,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         </button>
       )}
 
-      <PanelWithHelp title="Classification des charges" subtitle={`Basée sur la régularité (mois présents sur ${result.lookback.length}) et la variabilité du montant — ajustable poste par poste`}
+      <PanelWithHelp title="Classification des charges" subtitle="Basée sur la régularité et la variabilité du montant sur tout l'historique (jamais sur le filtre de période affiché) — ajustable poste par poste"
         explain="Un poste est classé 'Fixe' automatiquement s'il apparaît sur au moins 5/6 de la période avec un montant peu variable (coefficient de variation < 20%). 'Variable régulière' s'il revient souvent mais avec un montant qui fluctue. 'Occasionnel' sinon. En pratique, beaucoup de vraies charges fixes (loyer qui augmente, assurance payée par trimestre, factures irrégulières) ont un montant trop variable pour être détectées automatiquement — le réglage manuel existe pour ces cas, pas par défaut de l'algorithme. Le bouton ↻ à côté de chaque montant recalcule sur la médiane actuelle sans perdre le classement 'Fixe' que tu as choisi."
         right={
           <div style={{ display: "flex", gap: 8 }}>
@@ -5939,7 +5948,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
                     {r.mode === "exclu" ? "—" : `${fmt(r.amount)} FCFA`}
                   </span>
                 )}
-                <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.present}/{result.lookback.length}</span>
+                <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }} title="Sur tout l'historique — la classification Fixe/Variable ne dépend jamais du filtre affiché">{r.classPresent}/{r.classTotal}</span>
                 <span style={{ fontSize: 11.5, color: COLOR.inkMuted, textAlign: "center" }}>{r.cv !== null ? `${r.cv.toFixed(0)}%` : "—"}</span>
               </div>
             );
