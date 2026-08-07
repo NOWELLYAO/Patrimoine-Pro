@@ -3488,9 +3488,19 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
     const value = items.reduce((a, t) => a + t.amount, 0);
     const cats: Record<string, number> = {};
     items.forEach((t) => { cats[t.category] = (cats[t.category] || 0) + t.amount; });
-    const top = Object.entries(cats).sort((a, b) => b[1] - a[1]).slice(0, 4);
-    return { group: g, value, count: items.length, top, pct: totalDep ? (value / totalDep) * 100 : 0 };
+    const allCats = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+    const top = allCats.slice(0, 4);
+    return { group: g, value, count: items.length, top, allCats, pct: totalDep ? (value / totalDep) * 100 : 0 };
   });
+  const [groupDetailKey, setGroupDetailKey] = useState<Group | null>(null);
+  const buildGroupDetail = (g: Group) => {
+    const c = cards.find((x) => x.group === g)!;
+    return {
+      title: g, headline: `${fmt(c.value)} FCFA · ${c.pct.toFixed(1)}%`,
+      formula: `Somme des dépenses classées "${g}" — ${c.count} transactions`,
+      blocks: [{ kind: "table" as const, columns: ["Catégorie", "Montant (FCFA)", "%"], rows: c.allCats.map(([name, val]) => [name, fmt(val), `${(val / c.value * 100).toFixed(1)}%`]) }],
+    };
+  };
 
   const byMonth = useMemo(() => {
     const m: Record<string, { revenus: number; depenses: number }> = {};
@@ -3536,6 +3546,7 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 10, height: 10, borderRadius: "50%", background: groupColor[c.group] }} />
                 <span style={{ fontSize: 14, fontWeight: 500 }}>{c.group}</span>
+                <CalcDetailIcon onClick={() => setGroupDetailKey(c.group)} />
               </div>
               <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{c.count} transactions</span>
             </div>
@@ -3553,6 +3564,10 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
           </div>
         ))}
       </div>
+      {groupDetailKey && (() => {
+        const d = buildGroupDetail(groupDetailKey);
+        return <CalcDetailSheet open={!!groupDetailKey} onClose={() => setGroupDetailKey(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} />;
+      })()}
     </div>
   );
 }
