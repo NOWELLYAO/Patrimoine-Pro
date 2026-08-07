@@ -1352,6 +1352,10 @@ function prevMonthKey(mk: string): string {
   const [y, m] = mk.split("_").map(Number);
   return m === 1 ? `${y - 1}_12` : `${y}_${m - 1}`;
 }
+function nextMonthKey(mk: string): string {
+  const [y, m] = mk.split("_").map(Number);
+  return m === 12 ? `${y + 1}_1` : `${y}_${m + 1}`;
+}
 function daysInMonthOf(mk: string): number {
   const [y, m] = mk.split("_").map(Number);
   return new Date(y, m, 0).getDate();
@@ -1400,12 +1404,23 @@ const defaultChargeOverrides: Record<string, ChargeOverride> = {
   "Abonnements::Claude": { mode: "variable" }, // abonnement récent (3/6 mois), montant encore instable — à reclasser en Fixe une fois stabilisé
 };
 
-function classifyCharges(transactions: Transaction[], overrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, monthsWindow: number = 6) {
-  const today = todayISO();
-  const curMonth = dateToMonthKey(today);
-  const lookback: string[] = [];
-  let mk = prevMonthKey(curMonth);
-  for (let i = 0; i < monthsWindow; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+function classifyCharges(transactions: Transaction[], overrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, monthsWindow: number = 6, explicitRange?: [string, string]) {
+  // explicitRange (format "YYYY_M") permet de faire porter l'analyse sur la période
+  // exacte sélectionnée dans le filtre global "Du mois / Au mois" plutôt que de
+  // toujours recalculer une fenêtre glissante depuis aujourd'hui — pour que ce filtre
+  // ait un effet réel sur Diagnostic Financier / Charges Fixes & Variables.
+  let lookback: string[];
+  if (explicitRange) {
+    lookback = [];
+    let mk = explicitRange[0];
+    while (monthSortKey(mk) <= monthSortKey(explicitRange[1])) { lookback.push(mk); mk = nextMonthKey(mk); }
+  } else {
+    const today = todayISO();
+    const curMonth = dateToMonthKey(today);
+    lookback = [];
+    let mk = prevMonthKey(curMonth);
+    for (let i = 0; i < monthsWindow; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+  }
 
   const byPosteMonth: Record<string, Record<string, number>> = {};
   transactions.forEach((t) => {
@@ -1486,12 +1501,12 @@ type RatioVerdict = "sain" | "vigilance" | "risque";
 interface RatioResult { key: string; label: string; value: number; unit: "%" | "mois" | "FCFA"; verdict: RatioVerdict; benchmark: string; explain: string; }
 
 function computeFinancialRatios(
-  transactions: Transaction[], accounts: Account[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean
+  transactions: Transaction[], accounts: Account[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, explicitRange?: [string, string]
 ) {
-  // Sur suggestion explicite de l'utilisateur (06/08/2026) : toute la page Diagnostic
-  // Financier porte désormais sur l'historique complet plutôt qu'une fenêtre de 6 mois.
+  // Respecte le filtre global "Du mois / Au mois" quand il est fourni ; sinon, tout
+  // l'historique depuis la première transaction (sur suggestion de l'utilisateur, 06/08/2026).
   const windowMonths = monthsSinceInception(transactions);
-  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
+  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, explicitRange);
   const netWorth = totalAccountsBalance(accounts, transactions);
   const essentialMonthly = charges.totalFixe + charges.totalVariable;
 
@@ -1560,7 +1575,7 @@ function computeFinancialRatios(
     key: "concentration", label: "Concentration des revenus", value: topShare, unit: "%",
     verdict: topShare < 50 ? "sain" : topShare <= 75 ? "vigilance" : "risque",
     benchmark: "< 50% diversifié · 50-75% concentré · > 75% forte dépendance à une seule source",
-    explain: `Part du revenu total (historique complet, ${windowMonths} mois) apportée par la plus grosse source ("${topSource}") — plus c'est élevé, plus un choc sur cette seule source affecterait l'ensemble du budget.`,
+    explain: `Part du revenu total (${charges.lookback.length} mois) apportée par la plus grosse source ("${topSource}") — plus c'est élevé, plus un choc sur cette seule source affecterait l'ensemble du budget.`,
   });
 
   return { ratios, netWorth, essentialMonthly, topSource, topShare };
@@ -1672,13 +1687,13 @@ const KAKEIBO_CATEGORIES = {
   extra: ["Ajustement", "Générales", "General"],
 };
 
-function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
-  // Sur suggestion explicite de l'utilisateur (06/08/2026) : ces indicateurs portent
-  // sur tout l'historique depuis la toute première transaction, pas sur une fenêtre
-  // glissante de 6 mois — plus représentatif pour des ratios censés refléter un
-  // comportement de fond plutôt qu'un instantané récent.
+function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, explicitRange?: [string, string]) {
+  // Respecte le filtre global "Du mois / Au mois" quand il est fourni ; sinon, tout
+  // l'historique depuis la toute première transaction (sur suggestion de l'utilisateur,
+  // 06/08/2026) — plus représentatif pour des ratios censés refléter un comportement
+  // de fond plutôt qu'un instantané récent.
   const windowMonths = monthsSinceInception(transactions);
-  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
+  const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, explicitRange);
   const lookback = charges.lookback;
   const avgRevenu = charges.avgRevenu;
 
@@ -5518,12 +5533,12 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 // CHARGES FIXES vs VARIABLES — pilote classifyCharges, laisse l'utilisateur
 // ajuster chaque poste, exporte un rapport, et donne un "reste à vivre" estimé.
 // ============================================================
-function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate }: {
+function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange }: {
   transactions: Transaction[]; chargeOverrides: Record<string, ChargeOverride>; setChargeOverrides: (o: Record<string, ChargeOverride>) => void;
-  includeGrundfosVoiture: boolean; setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void;
+  includeGrundfosVoiture: boolean; setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
 }) {
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
-  const result = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+  const result = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, 6, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, periodRange]);
 
   const modeLabel: Record<ChargeMode, string> = { fixe: "Fixe", variable: "Variable régulière", occasionnelle: "Occasionnelle", exclu: "Exclu" };
   const modeColor: Record<ChargeMode, string> = { fixe: COLOR.emeraldSoft, variable: COLOR.goldSoft, occasionnelle: COLOR.inkMuted, exclu: COLOR.claySoft };
@@ -6035,9 +6050,9 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
   );
 }
 
-function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate }: {
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
-  setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void;
+  setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
@@ -6045,12 +6060,15 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
   const [ratiosNarrativeOpen, setRatiosNarrativeOpen] = useState(false);
 
   const { ratios, netWorth, essentialMonthly } = useMemo(
-    () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture),
-    [transactions, accounts, chargeOverrides, includeGrundfosVoiture]
+    () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange),
+    [transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange]
   );
   const windowMonths = useMemo(() => monthsSinceInception(transactions), [transactions]);
-  const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths), [transactions, chargeOverrides, includeGrundfosVoiture, windowMonths]);
-  const asian = useMemo(() => computeAsianIndicators(transactions, chargeOverrides, includeGrundfosVoiture), [transactions, chargeOverrides, includeGrundfosVoiture]);
+  const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange]);
+  const asian = useMemo(() => computeAsianIndicators(transactions, chargeOverrides, includeGrundfosVoiture, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, periodRange]);
+  // Nombre réel de mois couverts par l'analyse ci-dessous (respecte le filtre global
+  // "Du mois / Au mois" quand il restreint la période, sinon = tout l'historique).
+  const effectiveMonths = charges.lookback.length;
 
   const verdictStyle: Record<RatioVerdict, { color: string; bg: string; label: string; icon: any }> = {
     sain: { color: COLOR.emeraldSoft, bg: "rgba(63,156,122,0.1)", label: "Sain", icon: Check },
@@ -6093,7 +6111,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
             Diagnostic global : {verdictStyle[overallVerdict].label}
           </div>
           <div style={{ fontSize: 12, color: COLOR.inkMuted, marginTop: 2 }}>
-            Basé sur 5 ratios utilisés par les banques, régulateurs financiers et cabinets de conseil en gestion de patrimoine — appliqués à tout ton historique ({windowMonths} mois, depuis ta première transaction).
+            Basé sur 5 ratios utilisés par les banques, régulateurs financiers et cabinets de conseil en gestion de patrimoine — appliqués à la période sélectionnée ({effectiveMonths} mois{effectiveMonths === windowMonths ? ", tout ton historique" : ""}).
           </div>
         </div>
         <button onClick={() => setRatiosNarrativeOpen(true)} style={{
@@ -6241,7 +6259,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
           <div style={{ borderTop: `1px solid ${COLOR.hairline}`, paddingTop: 20 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, marginBottom: 4 }}>Répartition Kakeibo (méthode japonaise)</div>
-            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Chaque dépense classée en 4 questions plutôt qu'un simple total — moyenne mensuelle sur tout l'historique ({windowMonths} mois)</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12 }}>Chaque dépense classée en 4 questions plutôt qu'un simple total — moyenne mensuelle sur la période sélectionnée ({effectiveMonths} mois)</div>
             <div style={{ display: "flex", height: 10, borderRadius: 5, overflow: "hidden", marginBottom: 10 }}>
               {asian.kakeibo.map((k, i) => (
                 <div key={k.key} style={{ width: `${k.pct}%`, background: [COLOR.slateBlue, COLOR.clay, COLOR.gold, COLOR.emerald][i] }} title={`${k.label} : ${k.pct.toFixed(0)}%`} />
@@ -8469,8 +8487,8 @@ export default function GrandLivre() {
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} />}
-          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} />}
-          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} />}
+          {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
