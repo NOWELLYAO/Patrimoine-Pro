@@ -1374,6 +1374,12 @@ const EXPAND_SUBCATS_FOR_CHARGES: Record<string, boolean> = { "Enfants & Maman":
 // Les deux catégories que l'utilisateur veut pouvoir inclure/exclure en un clic
 // (mélange dépenses professionnelles GRUNDFOS et frais de véhicule).
 const GRUNDFOS_VOITURE_CATEGORIES = ["GRUNDFOS", "Voiture"];
+// Revenus directement liés à ces deux catégories de dépense, confirmés par l'utilisateur
+// le 07/08/2026 : "Petty Cash" finance GRUNDFOS, "Revenus Location Mazda" finance
+// l'entretien de la Voiture (Mazda mise en location). Exclure les dépenses sans exclure
+// ces revenus gonflait artificiellement tous les ratios (le "revenu" comptait de l'argent
+// qui ne sert en réalité qu'à payer les dépenses exclues) — désormais symétrique.
+const GRUNDFOS_VOITURE_LINKED_REVENUE = ["Petty Cash", "Revenus Location Mazda"];
 
 const defaultChargeOverrides: Record<string, ChargeOverride> = {
   "Logement": { mode: "fixe", amount: 650000 },
@@ -1445,7 +1451,12 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   const totalOccasionnelle = rows.filter((r) => r.mode === "occasionnelle").reduce((a, r) => a + r.amount, 0);
 
   const revByMonth: Record<string, number> = {};
-  transactions.forEach((t) => { if (t.type === "Revenu") { const tmk = dateToMonthKey(t.date); if (lookback.includes(tmk)) revByMonth[tmk] = (revByMonth[tmk] || 0) + t.amount; } });
+  transactions.forEach((t) => {
+    if (t.type !== "Revenu") return;
+    if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_LINKED_REVENUE.includes(t.category)) return;
+    const tmk = dateToMonthKey(t.date);
+    if (lookback.includes(tmk)) revByMonth[tmk] = (revByMonth[tmk] || 0) + t.amount;
+  });
   const avgRevenu = mean(lookback.map((m) => revByMonth[m] || 0));
   const resteAVivre = avgRevenu - totalFixe - totalVariable;
 
@@ -1536,7 +1547,11 @@ function computeFinancialRatios(
   // dominante = fragilité en cas de choc sur cette source.
   const lookback = charges.lookback;
   const revByCat: Record<string, number> = {};
-  transactions.forEach((t) => { if (t.type === "Revenu" && lookback.includes(dateToMonthKey(t.date))) revByCat[t.category] = (revByCat[t.category] || 0) + t.amount; });
+  transactions.forEach((t) => {
+    if (t.type !== "Revenu" || !lookback.includes(dateToMonthKey(t.date))) return;
+    if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_LINKED_REVENUE.includes(t.category)) return;
+    revByCat[t.category] = (revByCat[t.category] || 0) + t.amount;
+  });
   const totalRevSix = Object.values(revByCat).reduce((a, v) => a + v, 0);
   const topShare = totalRevSix > 0 ? (Math.max(0, ...Object.values(revByCat)) / totalRevSix) * 100 : 0;
   const topSource = Object.entries(revByCat).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
@@ -6019,9 +6034,9 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
   );
 }
 
-function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, onNavigate }: {
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
-  onNavigate?: (tab: Tab, data?: any) => void;
+  setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void;
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
@@ -6052,6 +6067,24 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
+          <button onClick={() => setIncludeGrundfosVoiture(false)} style={{
+            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+            background: !includeGrundfosVoiture ? COLOR.gold : "transparent", color: !includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
+          }}>Exclure GRUNDFOS & Voiture</button>
+          <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
+            padding: "6px 14px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none",
+            background: includeGrundfosVoiture ? COLOR.gold : "transparent", color: includeGrundfosVoiture ? COLOR.bg : COLOR.inkMuted,
+          }}>Inclure GRUNDFOS & Voiture</button>
+        </div>
+        <span style={{ fontSize: 11.5, color: COLOR.inkMuted, flex: 1, minWidth: 220 }}>
+          {includeGrundfosVoiture
+            ? "GRUNDFOS/Voiture et les revenus qui les financent (Petty Cash, Revenus Location Mazda) sont inclus dans tous les calculs de cette page."
+            : "Vue \"personnel pur\" : GRUNDFOS/Voiture ET les revenus qui les financent (Petty Cash, Revenus Location Mazda) sont exclus symétriquement de tous les calculs ci-dessous."}
+        </span>
+      </div>
+
       <div style={{ display: "flex", alignItems: "center", gap: 14, background: `linear-gradient(135deg, ${verdictStyle[overallVerdict].bg} 0%, ${COLOR.surfaceRaised} 70%)`, border: `1px solid ${verdictStyle[overallVerdict].color}`, borderRadius: 14, padding: "16px 20px", flexWrap: "wrap" }}>
         <Gauge size={22} color={verdictStyle[overallVerdict].color} />
         <div style={{ flex: 1, minWidth: 200 }}>
@@ -8436,7 +8469,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} />}
-          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} onNavigate={navigateTo} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
