@@ -3648,12 +3648,21 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   const [aTo, setATo] = useState(prevMonth);
   const [bFrom, setBFrom] = useState(lastMonth);
   const [bTo, setBTo] = useState(lastMonth);
-  // Empêche une plage inversée (Du mois postérieur à Au mois) au sein d'une même période —
-  // échange les deux valeurs plutôt que de laisser une plage impossible s'installer.
+  // Période A : totalement libre (tous les mois proposés), juste protégée contre une
+  // inversion interne (Du postérieur à Au). Période B : se cale automatiquement à partir
+  // de la fin de la période A dès qu'elle change — sur demande explicite de l'utilisateur,
+  // pour comparer "A puis ce qui vient après" sans avoir à retoucher B à chaque fois.
   const setAFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(aTo)) { setAFrom(aTo); setATo(v); } else setAFrom(v); };
   const setAToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(aFrom)) { setATo(aFrom); setAFrom(v); } else setATo(v); };
   const setBFromSafe = (v: string) => { if (monthSortKey(v) > monthSortKey(bTo)) { setBFrom(bTo); setBTo(v); } else setBFrom(v); };
   const setBToSafe = (v: string) => { if (monthSortKey(v) < monthSortKey(bFrom)) { setBTo(bFrom); setBFrom(v); } else setBTo(v); };
+  useEffect(() => {
+    if (monthSortKey(bFrom) < monthSortKey(aTo)) {
+      setBFrom(aTo);
+      if (monthSortKey(bTo) < monthSortKey(aTo)) setBTo(aTo);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aTo]);
 
   const allDates = useMemo(() => Array.from(new Set(transactions.map((t) => t.date))).sort(), [transactions]);
   const lastDate = allDates[allDates.length - 1] || todayISO();
@@ -3741,8 +3750,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
             </div>
             {granularity === "mois" ? (
               <div style={{ display: "flex", gap: 10 }}>
-                <Select label="Du mois" value={aFrom} onChange={setAFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(aTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
-                <Select label="Au mois" value={aTo} onChange={setAToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(aFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Du mois" value={aFrom} onChange={setAFromSafe} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Au mois" value={aTo} onChange={setAToSafe} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
               </div>
             ) : (
               <div style={{ display: "flex", gap: 10 }}>
@@ -3764,7 +3773,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
             </div>
             {granularity === "mois" ? (
               <div style={{ display: "flex", gap: 10 }}>
-                <Select label="Du mois" value={bFrom} onChange={setBFromSafe} options={allMonths.filter((m) => monthSortKey(m) <= monthSortKey(bTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+                <Select label="Du mois" value={bFrom} onChange={setBFromSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(aTo) && monthSortKey(m) <= monthSortKey(bTo)).map((m) => ({ value: m, label: monthLabel(m) }))} />
                 <Select label="Au mois" value={bTo} onChange={setBToSafe} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(bFrom)).map((m) => ({ value: m, label: monthLabel(m) }))} />
               </div>
             ) : (
