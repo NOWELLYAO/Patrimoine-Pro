@@ -1440,9 +1440,21 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   const rows = Object.entries(byPosteMonth).map(([poste, months]) => {
     const vals = lookback.map((m) => months[m] || 0);
     const present = vals.filter((v) => v > 0).length;
-    const presentRatio = present / monthsWindow;
+    // Corrigé le 07/08/2026 : divisait par le paramètre "monthsWindow" (souvent une
+    // valeur par défaut comme 6), pas par la vraie taille de la fenêtre analysée —
+    // faussait la classification dès que explicitRange (filtre "Du mois/Au mois")
+    // portait sur une période différente de 6 mois.
+    const presentRatio = present / lookback.length;
     const meanV = mean(vals);
     const medianV = median(vals);
+    // Médiane calculée uniquement sur les mois où le poste est réellement présent —
+    // utile en repli quand un poste est forcé "Fixe" sans montant explicite mais n'a
+    // des données que sur une petite partie de la fenêtre (ex : un nouvel abonnement
+    // qui n'existe que depuis 3 mois sur une fenêtre de 27) : la médiane sur toute la
+    // fenêtre (medianV) s'écraserait à 0 à cause des mois d'absence, alors que la
+    // médiane sur les seuls mois présents reflète le vrai montant typique.
+    const presentVals = vals.filter((v) => v > 0);
+    const medianPresent = presentVals.length ? median(presentVals) : 0;
     const sd = stdev(vals);
     const cv = meanV > 0 ? (sd / meanV) * 100 : null;
 
@@ -1451,15 +1463,15 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
     let amount: number;
     if (override && override.mode !== "auto") {
       mode = override.mode;
-      amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : medianV;
+      amount = override.mode === "fixe" && override.amount !== undefined ? override.amount : (medianV || medianPresent);
     } else if (presentRatio >= fixedRatio && cv !== null && cv < 20) {
       mode = "fixe"; amount = medianV;
     } else if (presentRatio >= variableRatio) {
       mode = "variable"; amount = medianV;
     } else {
-      mode = "occasionnelle"; amount = medianV;
+      mode = "occasionnelle"; amount = medianV || medianPresent;
     }
-    return { poste, present, mean: meanV, median: medianV, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
+    return { poste, present, mean: meanV, median: medianV, medianPresent, cv, mode, amount, overridden: !!(override && override.mode !== "auto") };
   }).sort((a, b) => b.amount - a.amount);
 
   const totalFixe = rows.filter((r) => r.mode === "fixe").reduce((a, r) => a + r.amount, 0);
@@ -2733,7 +2745,7 @@ function FluxTab({ filtered }: { filtered: any[] }) {
 // ============================================================
 function MensuelTab({ filtered }: { filtered: any[] }) {
   const [sortKey, setSortKey] = useState<"mois" | "revenus" | "depenses" | "solde" | "nonProd">("mois");
-  const [sortDir, setSortDir] = useState<1 | -1>(1);
+  const [sortDir, setSortDir] = useState<1 | -1>(-1);
 
   const rows = useMemo(() => {
     const m: Record<string, { revenus: number; depenses: number; nonProd: number }> = {};
@@ -5587,10 +5599,12 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         { label: "Origine", value: r.overridden ? "réglage manuel" : "automatique" },
         { label: "Mois présents", value: `${r.present} / ${result.lookback.length}` },
         { label: "Moyenne (mois présents inclus dans le calcul)", value: `${fmt(r.mean)} FCFA` },
-        { label: "Médiane", value: `${fmt(r.median)} FCFA` },
+        { label: "Médiane (toute la fenêtre)", value: `${fmt(r.median)} FCFA` },
+        ...(r.median === 0 && r.medianPresent > 0 ? [{ label: "Médiane (mois présents uniquement)", value: `${fmt(r.medianPresent)} FCFA`, warn: true }] : []),
         { label: "Coefficient de variation (CV)", value: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—" },
         { label: "Montant retenu pour les calculs", value: `${fmt(r.amount)} FCFA`, strong: true },
       ] },
+      ...(r.median === 0 && r.medianPresent > 0 ? [{ kind: "note" as const, tone: "warn" as const, text: `La médiane sur toute la fenêtre tombe à 0 FCFA parce que ce poste est absent la plupart des mois (${r.present}/${result.lookback.length} présents) — souvent le signe d'une charge apparue récemment. Le montant retenu utilise automatiquement la médiane des mois présents (${fmt(r.medianPresent)} FCFA) à la place.` }] : []),
       { kind: "note", tone: "info", text: "Règle automatique : \"Fixe\" si présent sur au moins 5/6 de la période avec CV < 20%. \"Variable régulière\" si présent sur au moins 4/6 mais montant qui fluctue davantage. \"Occasionnelle\" sinon. Un réglage manuel prime toujours sur cette règle." },
       { kind: "table", columns: ["Mois", "Montant (FCFA)"], rows },
     ];
@@ -5630,7 +5644,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
       };
       ws1.addRow([]);
       addSum("Généré le", dateLabelFull(todayISO()));
-      addSum("Fenêtre d'analyse", `${monthLabel(result.lookback[result.lookback.length - 1])} — ${monthLabel(result.lookback[0])}`);
+      addSum("Fenêtre d'analyse", `${monthLabel(result.lookback[0])} — ${monthLabel(result.lookback[result.lookback.length - 1])}`);
       addSum("GRUNDFOS", includeGrundfosVoiture ? "Inclus" : "Exclus");
       ws1.addRow([]);
       addSum("Revenu moyen mensuel", result.avgRevenu, undefined, true);
@@ -5641,15 +5655,15 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
       const ws2 = wb.addWorksheet("Détail par poste");
       ws2.columns = [
         { header: "Poste", key: "poste", width: 30 }, { header: "Mode", key: "mode", width: 18 },
-        { header: "Montant retenu (FCFA)", key: "amount", width: 20 }, { header: "Moyenne 6 mois", key: "mean", width: 18 },
-        { header: "Médiane 6 mois", key: "median", width: 18 }, { header: "Mois présents /6", key: "present", width: 16 },
+        { header: "Montant retenu (FCFA)", key: "amount", width: 20 }, { header: "Moyenne (période)", key: "mean", width: 18 },
+        { header: "Médiane (période)", key: "median", width: 18 }, { header: "Mois présents", key: "present", width: 16 },
         { header: "CV", key: "cv", width: 10 }, { header: "Ajusté manuellement", key: "overridden", width: 18 },
       ];
       styleHeaderRow(ws2.getRow(1));
       result.rows.forEach((r) => {
         const row = ws2.addRow({
           poste: r.poste.replace("::", " · "), mode: modeLabel[r.mode], amount: r.amount, mean: Math.round(r.mean), median: Math.round(r.median),
-          present: `${r.present}/6`, cv: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—", overridden: r.overridden ? "Oui" : "",
+          present: `${r.present}/${result.lookback.length}`, cv: r.cv !== null ? `${r.cv.toFixed(0)}%` : "—", overridden: r.overridden ? "Oui" : "",
         });
         row.getCell("mode").font = { bold: true, color: { argb: r.mode === "fixe" ? EMERALD : r.mode === "variable" ? GOLD : r.mode === "exclu" ? CLAY : MUTED } };
         ["amount", "mean", "median"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
@@ -5710,7 +5724,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => {
               const next = { ...chargeOverrides };
-              result.rows.forEach((r) => { if (next[r.poste]?.mode === "fixe") next[r.poste] = { ...next[r.poste], amount: Math.round(r.median) }; });
+              result.rows.forEach((r) => { if (next[r.poste]?.mode === "fixe") next[r.poste] = { ...next[r.poste], amount: Math.round(r.median || r.medianPresent) }; });
               setChargeOverrides(next);
             }} style={{
               display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`,
@@ -5750,7 +5764,7 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right" }} value={override?.amount ?? Math.round(r.median)}
                       onChange={(e) => setOverride(r.poste, { amount: Number(e.target.value) })} />
-                    <button onClick={() => setOverride(r.poste, { amount: Math.round(r.median) })} title={`Recalculer sur la médiane actuelle (${fmt(r.median)} FCFA, sur ${result.lookback.length} mois)`}
+                    <button onClick={() => setOverride(r.poste, { amount: Math.round(r.median || r.medianPresent) })} title={`Recalculer sur la médiane actuelle (${fmt(r.median || r.medianPresent)} FCFA, sur ${result.lookback.length} mois)`}
                       style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
                       <RotateCcw size={13} />
                     </button>
@@ -6085,6 +6099,27 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
 }) {
   if (!open) return null;
+  // Export CSV léger de la fiche affichée — pas besoin de charger ExcelJS pour un
+  // seul détail de calcul, un CSV s'ouvre instantanément dans Excel/Sheets.
+  const downloadCsv = () => {
+    const lines: string[] = [`"${title}"`, `"${headline}"`, `"${formula}"`, ""];
+    blocks.forEach((b) => {
+      if (b.kind === "kv") {
+        b.rows.forEach((r) => lines.push(`"${r.label}";"${r.value}"`));
+      } else if (b.kind === "table") {
+        lines.push(b.columns.map((c) => `"${c}"`).join(";"));
+        b.rows.forEach((row) => lines.push(row.map((c) => `"${c}"`).join(";")));
+      } else {
+        lines.push(`"${b.text}"`);
+      }
+      lines.push("");
+    });
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `grand-livre_${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}_${todayISO()}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 490, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={(e) => e.stopPropagation()} style={{
@@ -6097,7 +6132,10 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, color: COLOR.goldSoft, marginTop: 4 }}>{headline}</div>
             <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 4, fontStyle: "italic" }}>{formula}</div>
           </div>
-          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            <button onClick={downloadCsv} title="Télécharger cette fiche en CSV" style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", padding: 4 }}><Download size={17} /></button>
+            <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
+          </div>
         </div>
         <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "18px 22px", WebkitOverflowScrolling: "touch" }}>
           {blocks.map((b, i) => {
