@@ -5594,6 +5594,40 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 // CHARGES FIXES vs VARIABLES — pilote classifyCharges, laisse l'utilisateur
 // ajuster chaque poste, exporte un rapport, et donne un "reste à vivre" estimé.
 // ============================================================
+// Champ de saisie du montant "Fixe" avec enregistrement explicite : la frappe met à jour
+// un brouillon local seulement, rien n'est enregistré tant que l'utilisateur ne clique
+// pas ✓ (ou n'appuie pas sur Entrée) — évite l'ambiguïté de savoir si une valeur tapée a
+// bien été prise en compte, avec une confirmation visuelle claire au moment où ça l'est.
+function FixedAmountInput({ value, onSave, onRecalculate, recalcTitle }: {
+  value: number; onSave: (v: number) => void; onRecalculate: () => void; recalcTitle: string;
+}) {
+  const [draft, setDraft] = useState(String(Math.round(value)));
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { setDraft(String(Math.round(value))); }, [value]);
+  const dirty = Number(draft) !== Math.round(value);
+  const commit = () => {
+    if (!dirty || draft === "") return;
+    onSave(Number(draft));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1200);
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+      <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right", borderColor: dirty ? COLOR.gold : COLOR.hairline }}
+        value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
+      <button onClick={commit} disabled={!dirty} title={dirty ? "Enregistrer ce montant" : saved ? "Enregistré" : "Aucun changement à enregistrer"} style={{
+        background: saved ? "rgba(63,156,122,0.18)" : "transparent", border: "none", cursor: dirty ? "pointer" : "default",
+        color: saved ? COLOR.emeraldSoft : dirty ? COLOR.goldSoft : COLOR.inkMuted, display: "flex", flexShrink: 0, padding: 4, borderRadius: 4, opacity: dirty || saved ? 1 : 0.4,
+      }}>
+        <Check size={13} />
+      </button>
+      <button onClick={onRecalculate} title={recalcTitle} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
+        <RotateCcw size={13} />
+      </button>
+    </div>
+  );
+}
+
 function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange }: {
   transactions: Transaction[]; chargeOverrides: Record<string, ChargeOverride>; setChargeOverrides: (o: Record<string, ChargeOverride>) => void;
   includeGrundfosVoiture: boolean; setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
@@ -5802,14 +5836,12 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
                   <option value="exclu">Exclu</option>
                 </select>
                 {isFixedOverride ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <input type="number" inputMode="numeric" style={{ ...inputStyle, textAlign: "right" }} value={override?.amount ?? Math.round(r.median)}
-                      onChange={(e) => setOverride(r.poste, { amount: Number(e.target.value) })} />
-                    <button onClick={() => setOverride(r.poste, { amount: Math.round(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime) })} title={`Recalculer (${r.present >= 3 ? `moyenne sur la fenêtre affichée` : `trop peu de mois affichés, moyenne sur tout l'historique`} : ${fmt(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime)} FCFA)`}
-                      style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "flex", flexShrink: 0, padding: 4 }}>
-                      <RotateCcw size={13} />
-                    </button>
-                  </div>
+                  <FixedAmountInput
+                    value={override?.amount ?? Math.round(r.mean)}
+                    onSave={(v) => setOverride(r.poste, { amount: v })}
+                    onRecalculate={() => setOverride(r.poste, { amount: Math.round(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime) })}
+                    recalcTitle={`Recalculer (${r.present >= 3 ? `moyenne sur la fenêtre affichée` : `trop peu de mois affichés, moyenne sur tout l'historique`} : ${fmt(r.present >= 3 ? (r.mean || r.meanPresent) : r.meanAllTime)} FCFA)`}
+                  />
                 ) : (
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, textAlign: "right", color: r.mode === "exclu" ? COLOR.inkMuted : COLOR.ink }}>
                     {r.mode === "exclu" ? "—" : `${fmt(r.amount)} FCFA`}
