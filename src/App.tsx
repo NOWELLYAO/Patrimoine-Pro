@@ -1749,7 +1749,19 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
     { label: "Extra (imprévus)", key: "extra", value: sumFor(KAKEIBO_CATEGORIES.extra) },
   ].map((k) => ({ ...k, pct: (k.value / kakeiboTotal) * 100 }));
 
-  return { rule4321, tauxEpargne, kakeibo, avgRevenu, hasDeficit, windowMonths };
+  const sumForDetail = (cats: string[]) => {
+    const byCat: Record<string, number> = {};
+    transactions.forEach((t) => {
+      if (t.type === "Dépense" && cats.includes(t.category) && lookback.includes(dateToMonthKey(t.date))) {
+        byCat[t.category] = (byCat[t.category] || 0) + t.amount;
+      }
+    });
+    return Object.entries(byCat).map(([category, total]) => ({ category, monthly: total / lookback.length })).sort((a, b) => b.monthly - a.monthly);
+  };
+  const investDetail = sumForDetail(CN_4321_CATEGORIES.investissement);
+  const protectionDetail = sumForDetail(CN_4321_CATEGORIES.protection);
+
+  return { rule4321, tauxEpargne, kakeibo, avgRevenu, hasDeficit, windowMonths, totalDepensesMonthly, investMonthly, protectionMonthly, vieCouranteMonthly, liquideMonthly, investDetail, protectionDetail, lookback };
 }
 
 // ============================================================
@@ -5987,6 +5999,85 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 }
 
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
+type CalcDetailBlock =
+  | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[] }
+  | { kind: "note"; text: string; tone?: "warn" | "info" };
+
+// Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
+// ouvre CalcDetailSheet avec le détail exact (formule + composants) de ce chiffre-là,
+// pour que chaque taux affiché soit vérifiable en un clic plutôt qu'à prendre pour acquis.
+function CalcDetailIcon({ onClick }: { onClick: () => void }) {
+  return (
+    <button onClick={(e) => { e.stopPropagation(); onClick(); }} title="Voir le détail du calcul" style={{
+      background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "inline-flex",
+      padding: 2, marginLeft: 4, verticalAlign: "middle", opacity: 0.7,
+    }}>
+      <Info size={13} />
+    </button>
+  );
+}
+
+function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
+  open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
+}) {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 490, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 620, maxHeight: "85vh", background: COLOR.surface, borderRadius: "20px 20px 0 0",
+        display: "flex", flexDirection: "column", border: `1px solid ${COLOR.hairline}`, borderBottom: "none",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+          <div>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>{title}</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, color: COLOR.goldSoft, marginTop: 4 }}>{headline}</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 4, fontStyle: "italic" }}>{formula}</div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+        </div>
+        <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "18px 22px", WebkitOverflowScrolling: "touch" }}>
+          {blocks.map((b, i) => {
+            if (b.kind === "kv") return (
+              <div key={i} style={{ marginBottom: 16 }}>
+                {b.rows.map((r, j) => (
+                  <div key={j} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: j < b.rows.length - 1 ? `1px solid ${COLOR.hairline}` : "none" }}>
+                    <span style={{ fontSize: 12.5, color: r.strong ? COLOR.ink : COLOR.inkMuted, fontWeight: r.strong ? 600 : 400 }}>{r.label}</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: r.warn ? COLOR.claySoft : r.strong ? COLOR.goldSoft : COLOR.ink, fontWeight: r.strong ? 700 : 500 }}>{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            );
+            if (b.kind === "table") return (
+              <div key={i} style={{ marginBottom: 16, overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 8px", color: COLOR.inkMuted, fontWeight: 600, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}>{c}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {b.rows.map((row, ri) => (
+                      <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
+                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 8px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}` }}>{cell}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+            return (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", background: b.tone === "warn" ? "rgba(193,84,63,0.1)" : "rgba(201,162,39,0.08)", border: `1px solid ${b.tone === "warn" ? COLOR.clay : COLOR.hairline}`, borderRadius: 8, padding: "10px 12px", marginBottom: 16 }}>
+                <AlertTriangle size={14} color={b.tone === "warn" ? COLOR.claySoft : COLOR.goldSoft} style={{ flexShrink: 0, marginTop: 1 }} />
+                <div style={{ fontSize: 12, color: b.tone === "warn" ? COLOR.claySoft : COLOR.inkMuted, lineHeight: 1.5 }}>{b.text}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClose: () => void; ratios: RatioResult[] }) {
   if (!open) return null;
   const report = generateRatiosNarrative(ratios);
@@ -6058,6 +6149,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
   const [duration, setDuration] = useState(6);
   const [narrativeOpen, setNarrativeOpen] = useState(false);
   const [ratiosNarrativeOpen, setRatiosNarrativeOpen] = useState(false);
+  const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
 
   const { ratios, netWorth, essentialMonthly } = useMemo(
     () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange),
@@ -6069,6 +6161,249 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
   // Nombre réel de mois couverts par l'analyse ci-dessous (respecte le filtre global
   // "Du mois / Au mois" quand il restreint la période, sinon = tout l'historique).
   const effectiveMonths = charges.lookback.length;
+
+  const accountBalances = useMemo(() => accounts.map((a) => ({ name: a.name, balance: accountBalance(a, transactions) })), [accounts, transactions]);
+  const revByCatDetail = useMemo(() => {
+    const byCat: Record<string, number> = {};
+    transactions.forEach((t) => {
+      if (t.type !== "Revenu") return;
+      if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_LINKED_REVENUE.includes(t.category)) return;
+      if (!charges.lookback.includes(dateToMonthKey(t.date))) return;
+      byCat[t.category] = (byCat[t.category] || 0) + t.amount;
+    });
+    return Object.entries(byCat).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total);
+  }, [transactions, includeGrundfosVoiture, charges.lookback]);
+  const fixedRows = useMemo(() => charges.rows.filter((r) => r.mode === "fixe").sort((a, b) => b.amount - a.amount), [charges.rows]);
+
+  const [calcDetailKey, setCalcDetailKey] = useState<string | null>(null);
+  // Construit le contenu de la fiche de détail pour chaque chiffre affiché sur cette page —
+  // même logique que le rapport chat déjà donné à l'utilisateur, rejouée dynamiquement
+  // pour toujours refléter le réglage GRUNDFOS et la période sélectionnée en cours.
+  const buildCalcDetail = (key: string): { title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } | null => {
+    const totalRev = revByCatDetail.reduce((a, r) => a + r.total, 0);
+    switch (key) {
+      case "epargne_precaution":
+        return {
+          title: "Épargne de précaution (règle 4-3-2-1)", headline: `${fmt(asian.liquideMonthly)} FCFA · ${(asian.liquideMonthly / asian.avgRevenu * 100).toFixed(1)}%`,
+          formula: "Revenu moyen − Dépenses totales moyennes",
+          blocks: [{ kind: "kv", rows: [
+            { label: `Revenu moyen (${effectiveMonths} mois)`, value: `${fmt(asian.avgRevenu)} FCFA` },
+            { label: `Dépenses totales moyennes (${includeGrundfosVoiture ? "GRUNDFOS inclus" : "GRUNDFOS exclu"})`, value: `${fmt(asian.totalDepensesMonthly)} FCFA` },
+            { label: "= Épargne de précaution", value: `${fmt(asian.liquideMonthly)} FCFA → ${(asian.liquideMonthly / asian.avgRevenu * 100).toFixed(1)}%`, strong: true, warn: asian.liquideMonthly < 0 },
+          ] }],
+        };
+      case "investissement":
+        return {
+          title: "Investissement (règle 4-3-2-1)", headline: `${fmt(asian.investMonthly)} FCFA · ${(asian.investMonthly / asian.avgRevenu * 100).toFixed(1)}%`,
+          formula: "Somme des catégories d'investissement / mois",
+          blocks: [{ kind: "table", columns: ["Catégorie", "Montant/mois (FCFA)"], rows: asian.investDetail.map((d) => [d.category, fmt(d.monthly)]) }],
+        };
+      case "vie_courante":
+        return {
+          title: "Vie courante (règle 4-3-2-1)", headline: `${fmt(asian.vieCouranteMonthly)} FCFA · ${(asian.vieCouranteMonthly / asian.avgRevenu * 100).toFixed(1)}%`,
+          formula: "Dépenses totales − Investissement − Protection",
+          blocks: [{ kind: "kv", rows: [
+            { label: "Dépenses totales", value: `${fmt(asian.totalDepensesMonthly)} FCFA` },
+            { label: "− Investissement", value: `${fmt(asian.investMonthly)} FCFA` },
+            { label: "− Protection", value: `${fmt(asian.protectionMonthly)} FCFA` },
+            { label: "= Vie courante", value: `${fmt(asian.vieCouranteMonthly)} FCFA`, strong: true },
+          ] }],
+        };
+      case "protection":
+        return {
+          title: "Protection / assurance (règle 4-3-2-1)", headline: `${fmt(asian.protectionMonthly)} FCFA · ${(asian.protectionMonthly / asian.avgRevenu * 100).toFixed(1)}%`,
+          formula: "Somme des catégories de protection / mois",
+          blocks: [{ kind: "table", columns: ["Catégorie", "Montant/mois (FCFA)"], rows: asian.protectionDetail.map((d) => [d.category, fmt(d.monthly)]) }],
+        };
+      case "taux_epargne":
+        return {
+          title: "Taux d'épargne (référence institutionnelle)", headline: `${asian.tauxEpargne.toFixed(1)}%`,
+          formula: "(Revenu moyen − Charges essentielles) / Revenu moyen",
+          blocks: [{ kind: "kv", rows: [
+            { label: "Revenu moyen", value: `${fmt(charges.avgRevenu)} FCFA` },
+            { label: "Charges fixes", value: `${fmt(charges.totalFixe)} FCFA` },
+            { label: "+ Charges variables", value: `${fmt(charges.totalVariable)} FCFA` },
+            { label: "= Charges essentielles", value: `${fmt(charges.totalFixe + charges.totalVariable)} FCFA` },
+            { label: "Taux d'épargne", value: `${asian.tauxEpargne.toFixed(1)}%`, strong: true },
+          ] }],
+        };
+      case "dti": {
+        const hasZero = fixedRows.some((r) => r.amount === 0);
+        const blocks: CalcDetailBlock[] = [{
+          kind: "table", columns: ["Poste", "Montant/mois (FCFA)", "Origine"],
+          rows: fixedRows.map((r) => [r.poste.replace("::", " · "), fmt(r.amount), r.overridden ? "réglage manuel" : "auto"]),
+          warnRows: fixedRows.map((r, i) => r.amount === 0 ? i : -1).filter((i) => i >= 0),
+        }];
+        if (hasZero) blocks.push({ kind: "note", tone: "warn", text: "Au moins un poste classé \"Fixe\" a un montant de 0 FCFA/mois — soit une erreur de saisie dans Charges Fixes & Variables (montant jamais renseigné), soit volontaire. Ça ne fausse rien numériquement, mais autant vérifier." });
+        return { title: "Charges fixes / Revenu (DTI)", headline: `${(charges.totalFixe / charges.avgRevenu * 100).toFixed(1)}%`, formula: "Total des postes \"Fixe\" / Revenu moyen", blocks };
+      }
+      case "logement": {
+        const logementRow = charges.rows.find((r) => r.poste === "Logement");
+        const amt = logementRow ? logementRow.amount : 0;
+        return {
+          title: "Logement / Revenu", headline: `${(amt / charges.avgRevenu * 100).toFixed(1)}%`, formula: "Logement (montant retenu) / Revenu moyen",
+          blocks: [{ kind: "kv", rows: [
+            { label: "Logement (montant retenu)", value: `${fmt(amt)} FCFA` },
+            { label: "Revenu moyen", value: `${fmt(charges.avgRevenu)} FCFA` },
+            { label: "Logement / Revenu", value: `${(amt / charges.avgRevenu * 100).toFixed(1)}%`, strong: true },
+          ] }],
+        };
+      }
+      case "urgence":
+        return {
+          title: "Fonds d'urgence", headline: `${(netWorth / essentialMonthly).toFixed(1)} mois`, formula: "Valeur nette / Charges essentielles mensuelles",
+          blocks: [
+            { kind: "table", columns: ["Compte", "Solde (FCFA)"], rows: [...accountBalances.map((a) => [a.name, fmt(a.balance)]), ["Total (Valeur nette)", fmt(netWorth)]] },
+            { kind: "kv", rows: [
+              { label: "Valeur nette", value: `${fmt(netWorth)} FCFA` },
+              { label: "Charges essentielles/mois", value: `${fmt(essentialMonthly)} FCFA` },
+              { label: "Fonds d'urgence", value: `${(netWorth / essentialMonthly).toFixed(1)} mois`, strong: true },
+            ] },
+          ],
+        };
+      case "concentration": {
+        const top = revByCatDetail[0];
+        return {
+          title: "Concentration des revenus", headline: `${top ? (top.total / totalRev * 100).toFixed(1) : 0}% (${top?.category || "—"})`,
+          formula: "Plus grosse source / Revenu total de la période",
+          blocks: [{ kind: "table", columns: ["Source", "Montant (FCFA)", "%"], rows: revByCatDetail.map((r) => [r.category, fmt(r.total), `${(r.total / totalRev * 100).toFixed(1)}%`]) }],
+        };
+      }
+      default: return null;
+    }
+  };
+
+  const exportDiagnosticExcel = async () => {
+    setXlsState("loading");
+    try {
+      const ExcelJS: any = await import(/* @vite-ignore */ "exceljs");
+      const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", MUTED = "FF8A9A8E", WHITE = "FFFFFFFF";
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Grand Livre"; wb.created = new Date();
+      const styleHeaderRow = (row: any) => {
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; c.alignment = { vertical: "middle" }; });
+        row.height = 22;
+      };
+      const totalRev = revByCatDetail.reduce((a, r) => a + r.total, 0);
+
+      // ===== Feuille 1 : Synthèse =====
+      const ws1 = wb.addWorksheet("Synthèse");
+      ws1.columns = [{ width: 34 }, { width: 22 }, { width: 40 }];
+      ws1.mergeCells("A1:C1");
+      const title = ws1.getCell("A1");
+      title.value = "Grand Livre — Diagnostic Financier, rapport détaillé";
+      title.font = { bold: true, size: 15, color: { argb: WHITE } };
+      title.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+      title.alignment = { vertical: "middle", indent: 1 };
+      ws1.getRow(1).height = 30;
+      const addSum = (label: string, value: any, color?: string, isAmount?: boolean) => {
+        const r = ws1.addRow([label, value]);
+        r.getCell(1).font = { color: { argb: MUTED } };
+        r.getCell(2).font = { bold: true, size: 12, color: { argb: color || NAVY } };
+        if (isAmount) r.getCell(2).numFmt = "#,##0 \"FCFA\"";
+        r.getCell(2).alignment = { horizontal: "right" };
+      };
+      ws1.addRow([]);
+      addSum("Généré le", dateLabelFull(todayISO()));
+      addSum("Période", `${monthLabel(charges.lookback[0])} — ${monthLabel(charges.lookback[charges.lookback.length - 1])} (${effectiveMonths} mois)`);
+      addSum("GRUNDFOS", includeGrundfosVoiture ? "Inclus" : "Exclu (Petty Cash exclu symétriquement)");
+      ws1.addRow([]);
+
+      const section = (text: string, color = NAVY) => {
+        const r = ws1.addRow([text]);
+        ws1.mergeCells(`A${r.number}:C${r.number}`);
+        r.getCell(1).font = { bold: true, color: { argb: WHITE } };
+        r.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: color } };
+        r.getCell(1).alignment = { vertical: "middle", indent: 1 };
+        r.height = 20;
+      };
+
+      section("ÉPARGNE DE PRÉCAUTION (RÈGLE 4-3-2-1)", CLAY);
+      addSum("Revenu moyen", asian.avgRevenu, undefined, true);
+      addSum("Dépenses totales moyennes", asian.totalDepensesMonthly, undefined, true);
+      addSum("= Épargne de précaution", asian.liquideMonthly, asian.liquideMonthly >= 0 ? EMERALD : CLAY, true);
+      addSum("  en % du revenu", `${(asian.liquideMonthly / asian.avgRevenu * 100).toFixed(1)}%`, asian.liquideMonthly >= 0 ? EMERALD : CLAY);
+      ws1.addRow([]);
+
+      section("RÈGLE 4-3-2-1 — LES 4 POSTES", CLAY);
+      addSum("Investissement (cible 40%)", `${fmt(asian.investMonthly)} FCFA · ${(asian.investMonthly / asian.avgRevenu * 100).toFixed(1)}%`);
+      addSum("Vie courante (cible 30%)", `${fmt(asian.vieCouranteMonthly)} FCFA · ${(asian.vieCouranteMonthly / asian.avgRevenu * 100).toFixed(1)}%`);
+      addSum("Protection (cible 20%)", `${fmt(asian.protectionMonthly)} FCFA · ${(asian.protectionMonthly / asian.avgRevenu * 100).toFixed(1)}%`);
+      addSum("Épargne précaution (cible 10%)", `${fmt(asian.liquideMonthly)} FCFA · ${(asian.liquideMonthly / asian.avgRevenu * 100).toFixed(1)}%`);
+      ws1.addRow([]);
+
+      section("LES 5 RATIOS INSTITUTIONNELS", GOLD);
+      ratios.forEach((r) => {
+        const val = r.unit === "mois" ? `${r.value.toFixed(1)} mois` : `${r.value.toFixed(1)}%`;
+        addSum(r.label, val, r.verdict === "sain" ? EMERALD : r.verdict === "vigilance" ? GOLD : CLAY);
+      });
+      ws1.addRow([]);
+      addSum("Taux d'épargne : formule", "(Revenu moyen − Charges essentielles) / Revenu moyen");
+      addSum("  Charges essentielles", `${fmt(charges.totalFixe)} (fixe) + ${fmt(charges.totalVariable)} (variable) = ${fmt(charges.totalFixe + charges.totalVariable)}`);
+      addSum("DTI : formule", "Total postes \"Fixe\" / Revenu moyen");
+      addSum("Logement/Revenu : formule", "Logement (montant retenu) / Revenu moyen");
+      addSum("Fonds d'urgence : formule", "Valeur nette / Charges essentielles mensuelles");
+      addSum("Concentration : formule", "Plus grosse source de revenu / Revenu total de la période");
+
+      // ===== Feuille 2 : Détail 4-3-2-1 =====
+      const ws2 = wb.addWorksheet("Détail 4-3-2-1");
+      ws2.columns = [{ header: "Poste", key: "poste", width: 20 }, { header: "Catégorie", key: "cat", width: 30 }, { header: "Montant/mois (FCFA)", key: "amt", width: 20 }];
+      styleHeaderRow(ws2.getRow(1));
+      asian.investDetail.forEach((d) => { const row = ws2.addRow({ poste: "Investissement", cat: d.category, amt: Math.round(d.monthly) }); row.getCell("amt").numFmt = "#,##0"; row.getCell("amt").alignment = { horizontal: "right" }; });
+      asian.protectionDetail.forEach((d) => { const row = ws2.addRow({ poste: "Protection", cat: d.category, amt: Math.round(d.monthly) }); row.getCell("amt").numFmt = "#,##0"; row.getCell("amt").alignment = { horizontal: "right" }; });
+      const vcRow = ws2.addRow({ poste: "Vie courante", cat: "= Dépenses totales − Investissement − Protection", amt: Math.round(asian.vieCouranteMonthly) });
+      vcRow.getCell("amt").numFmt = "#,##0"; vcRow.getCell("amt").alignment = { horizontal: "right" }; vcRow.getCell("amt").font = { bold: true };
+      const epRow = ws2.addRow({ poste: "Épargne précaution", cat: "= Revenu moyen − Dépenses totales", amt: Math.round(asian.liquideMonthly) });
+      epRow.getCell("amt").numFmt = "#,##0"; epRow.getCell("amt").alignment = { horizontal: "right" }; epRow.getCell("amt").font = { bold: true, color: { argb: asian.liquideMonthly >= 0 ? EMERALD : CLAY } };
+
+      // ===== Feuille 3 : Détail DTI (postes fixes) =====
+      const ws3 = wb.addWorksheet("Détail DTI (charges fixes)");
+      ws3.columns = [{ header: "Poste", key: "poste", width: 32 }, { header: "Montant/mois (FCFA)", key: "amt", width: 20 }, { header: "Origine", key: "src", width: 18 }];
+      styleHeaderRow(ws3.getRow(1));
+      fixedRows.forEach((r) => {
+        const row = ws3.addRow({ poste: r.poste.replace("::", " · "), amt: Math.round(r.amount), src: r.overridden ? "réglage manuel" : "auto" });
+        row.getCell("amt").numFmt = "#,##0"; row.getCell("amt").alignment = { horizontal: "right" };
+        if (r.amount === 0) row.eachCell((c: any) => { c.font = { color: { argb: CLAY } }; });
+      });
+      const totalFixeRow = ws3.addRow({ poste: "TOTAL", amt: Math.round(charges.totalFixe), src: `${(charges.totalFixe / charges.avgRevenu * 100).toFixed(1)}% du revenu` });
+      totalFixeRow.eachCell((c: any) => { c.font = { bold: true }; }); totalFixeRow.getCell("amt").numFmt = "#,##0"; totalFixeRow.getCell("amt").alignment = { horizontal: "right" };
+
+      // ===== Feuille 4 : Fonds d'urgence (comptes) =====
+      const ws4 = wb.addWorksheet("Fonds d'urgence");
+      ws4.columns = [{ header: "Compte", key: "acc", width: 24 }, { header: "Solde (FCFA)", key: "bal", width: 20 }];
+      styleHeaderRow(ws4.getRow(1));
+      accountBalances.forEach((a) => { const row = ws4.addRow({ acc: a.name, bal: Math.round(a.balance) }); row.getCell("bal").numFmt = "#,##0"; row.getCell("bal").alignment = { horizontal: "right" }; if (a.balance < 0) row.getCell("bal").font = { color: { argb: CLAY } }; });
+      const vnRow = ws4.addRow({ acc: "TOTAL (Valeur nette)", bal: Math.round(netWorth) });
+      vnRow.eachCell((c: any) => { c.font = { bold: true }; }); vnRow.getCell("bal").numFmt = "#,##0"; vnRow.getCell("bal").alignment = { horizontal: "right" };
+      ws4.addRow([]);
+      const eRow = ws4.addRow({ acc: "Charges essentielles/mois", bal: Math.round(essentialMonthly) });
+      eRow.getCell("bal").numFmt = "#,##0"; eRow.getCell("bal").alignment = { horizontal: "right" };
+      const fuRow = ws4.addRow({ acc: "Fonds d'urgence (mois)", bal: `${(netWorth / essentialMonthly).toFixed(1)} mois` as any });
+      fuRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; });
+
+      // ===== Feuille 5 : Concentration des revenus =====
+      const ws5 = wb.addWorksheet("Concentration revenus");
+      ws5.columns = [{ header: "Source", key: "src", width: 28 }, { header: "Montant (FCFA)", key: "amt", width: 20 }, { header: "%", key: "pct", width: 12 }];
+      styleHeaderRow(ws5.getRow(1));
+      revByCatDetail.forEach((r) => {
+        const row = ws5.addRow({ src: r.category, amt: Math.round(r.total), pct: `${(r.total / totalRev * 100).toFixed(1)}%` });
+        row.getCell("amt").numFmt = "#,##0"; row.getCell("amt").alignment = { horizontal: "right" }; row.getCell("pct").alignment = { horizontal: "right" };
+      });
+      const totalRevRow = ws5.addRow({ src: "TOTAL", amt: Math.round(totalRev), pct: "100%" });
+      totalRevRow.eachCell((c: any) => { c.font = { bold: true }; });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `grand-livre_diagnostic-financier-detaille_${todayISO()}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      setXlsState("idle");
+    } catch (e) {
+      console.error(e);
+      setXlsState("error");
+    }
+  };
 
   const verdictStyle: Record<RatioVerdict, { color: string; bg: string; label: string; icon: any }> = {
     sain: { color: COLOR.emeraldSoft, bg: "rgba(63,156,122,0.1)", label: "Sain", icon: Check },
@@ -6102,6 +6437,12 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
             ? "GRUNDFOS et le revenu qui la finance (Petty Cash) sont inclus dans tous les calculs de cette page. \"Voiture\" reste toujours incluse, quelle que soit l'option choisie."
             : "Vue \"personnel pur\" : GRUNDFOS ET le revenu qui la finance (Petty Cash) sont exclus symétriquement de tous les calculs ci-dessous. \"Voiture\" reste toujours incluse."}
         </span>
+        <button onClick={exportDiagnosticExcel} disabled={xlsState === "loading"} style={{
+          display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)", border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`,
+          borderRadius: 8, color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "8px 14px", fontSize: 12, cursor: xlsState === "loading" ? "default" : "pointer", flexShrink: 0,
+        }}>
+          {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />} {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel complet"}
+        </button>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 14, background: `linear-gradient(135deg, ${verdictStyle[overallVerdict].bg} 0%, ${COLOR.surfaceRaised} 70%)`, border: `1px solid ${verdictStyle[overallVerdict].color}`, borderRadius: 14, padding: "16px 20px", flexWrap: "wrap" }}>
@@ -6129,7 +6470,12 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
           return (
             <div key={r.key} style={{ background: COLOR.surfaceRaised, border: `1px solid ${s.color}`, borderRadius: 12, padding: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                <span style={{ fontSize: 12.5, color: COLOR.inkMuted, fontWeight: 600 }}>{r.label}</span>
+                <span style={{ fontSize: 12.5, color: COLOR.inkMuted, fontWeight: 600 }}>
+                  {r.label}
+                  {["epargne", "dti", "logement", "urgence", "concentration"].includes(r.key) && (
+                    <CalcDetailIcon onClick={() => setCalcDetailKey(r.key === "epargne" ? "taux_epargne" : r.key)} />
+                  )}
+                </span>
                 <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: s.color, background: s.bg, borderRadius: 20, padding: "2px 8px" }}>
                   <Icon size={11} /> {s.label}
                 </span>
@@ -6229,10 +6575,11 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
                 const diff = r.value - r.target;
                 const aligned = Math.abs(diff) <= 5;
                 const color = r.value < 0 ? COLOR.claySoft : aligned ? COLOR.emeraldSoft : Math.abs(diff) <= 15 ? COLOR.goldSoft : COLOR.claySoft;
+                const detailKey = r.label === "Investissement" ? "investissement" : r.label === "Vie courante" ? "vie_courante" : r.label === "Protection / assurance" ? "protection" : "epargne_precaution";
                 return (
                   <div key={r.label}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 12.5 }}>
-                      <span style={{ color: COLOR.ink }}>{r.label}</span>
+                      <span style={{ color: COLOR.ink }}>{r.label}<CalcDetailIcon onClick={() => setCalcDetailKey(detailKey)} /></span>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", color }}>{r.value.toFixed(0)}% <span style={{ color: COLOR.inkMuted }}>(cible {r.target}%)</span></span>
                     </div>
                     <div style={{ position: "relative", height: 8, background: COLOR.hairline, borderRadius: 4, overflow: "hidden" }}>
@@ -6286,6 +6633,10 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
         kakeibo={asian.kakeibo}
       />
       <RatiosNarrativeSheet open={ratiosNarrativeOpen} onClose={() => setRatiosNarrativeOpen(false)} ratios={ratios} />
+      {calcDetailKey && (() => {
+        const d = buildCalcDetail(calcDetailKey);
+        return d ? <CalcDetailSheet open={!!calcDetailKey} onClose={() => setCalcDetailKey(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
+      })()}
     </div>
   );
 }
