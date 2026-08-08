@@ -5905,7 +5905,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const periodLabel = periodRange ? `${monthLabel(periodRange[0])} — ${monthLabel(periodRange[1])}` : "Tout l'historique";
-      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ");
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
@@ -6899,7 +6899,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       // insécable (U+202F) que produit Intl.NumberFormat("fr-FR") pour les milliers —
       // elle s'affichait comme "/" (ex: "508/111" au lieu de "508 111"). Toute chaîne
       // affichée dans ce PDF passe par ce filtre avant écriture.
-      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ");
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
@@ -7888,7 +7888,7 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const periodLabel = `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`;
-      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ");
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
