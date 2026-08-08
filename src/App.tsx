@@ -5268,6 +5268,9 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
         ["nw", "delta", "rev", "dep"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
         row.getCell("expl").alignment = { wrapText: true };
       });
+      const totalRowNW = ws1.addRow({ month: "TOTAL (somme sur la période)", nw: "", delta: report.rows.reduce((a, r) => a + r.delta, 0), rev: report.rows.reduce((a, r) => a + r.revenu, 0), dep: report.rows.reduce((a, r) => a + r.depense, 0), topdep: "", toprev: "", expl: "" });
+      totalRowNW.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      ["delta", "rev", "dep"].forEach((k) => { totalRowNW.getCell(k).numFmt = "#,##0"; totalRowNW.getCell(k).alignment = { horizontal: "right" }; });
 
       const ws2 = wb.addWorksheet("Plus grosses dépenses");
       ws2.columns = [{ header: "Date", key: "date", width: 12 }, { header: "Catégorie", key: "cat", width: 24 }, { header: "Sous-catégorie", key: "sub", width: 20 }, { header: "Montant (FCFA)", key: "amount", width: 18 }];
@@ -5276,6 +5279,9 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
         const row = ws2.addRow({ date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", amount: t.amount });
         row.getCell("amount").font = { color: { argb: CLAY }, bold: true }; row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
       });
+      const totalRow2 = ws2.addRow({ date: `Total des ${report.depTx.length} éléments affichés`, cat: "", sub: "", amount: report.depTx.reduce((a, t) => a + t.amount, 0) });
+      totalRow2.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      totalRow2.getCell("amount").numFmt = "#,##0"; totalRow2.getCell("amount").alignment = { horizontal: "right" };
 
       const ws3 = wb.addWorksheet("Plus gros revenus");
       ws3.columns = [{ header: "Date", key: "date", width: 12 }, { header: "Catégorie", key: "cat", width: 24 }, { header: "Sous-catégorie", key: "sub", width: 20 }, { header: "Montant (FCFA)", key: "amount", width: 18 }];
@@ -5284,6 +5290,9 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
         const row = ws3.addRow({ date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", amount: t.amount });
         row.getCell("amount").font = { color: { argb: EMERALD }, bold: true }; row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
       });
+      const totalRow3nw = ws3.addRow({ date: `Total des ${report.revTx.length} éléments affichés`, cat: "", sub: "", amount: report.revTx.reduce((a, t) => a + t.amount, 0) });
+      totalRow3nw.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      totalRow3nw.getCell("amount").numFmt = "#,##0"; totalRow3nw.getCell("amount").alignment = { horizontal: "right" };
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -5541,7 +5550,15 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
         const dep = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
         return { cat: c, scope: categoryScope[c] || "Personnel", rev, dep, solde: rev - dep, count: tx.length };
       }).filter((r) => r.count > 0).sort((a, b) => (a.scope === b.scope ? b.rev + b.dep - (a.rev + a.dep) : a.scope === "Business" ? -1 : 1));
-      byCat.forEach((r) => {
+      byCat.forEach((r, i) => {
+        const prevScope = i > 0 ? byCat[i - 1].scope : null;
+        if (prevScope !== null && r.scope !== prevScope) {
+          const same = byCat.filter((x) => x.scope === prevScope);
+          const subRow = ws2.addRow({ cat: `Sous-total ${prevScope}`, scope: "", rev: same.reduce((a, x) => a + x.rev, 0), dep: same.reduce((a, x) => a + x.dep, 0), solde: same.reduce((a, x) => a + x.solde, 0), count: same.reduce((a, x) => a + x.count, 0) });
+          subRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
+          ["rev", "dep", "solde"].forEach((k) => { subRow.getCell(k).numFmt = "#,##0"; subRow.getCell(k).alignment = { horizontal: "right" }; });
+          subRow.getCell("count").alignment = { horizontal: "center" };
+        }
         const row = ws2.addRow(r);
         row.getCell("scope").font = { bold: true, color: { argb: r.scope === "Business" ? VIOLET : MUTED } };
         row.getCell("rev").font = { color: { argb: EMERALD } };
@@ -5550,6 +5567,18 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
         ["rev", "dep", "solde"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
         row.getCell("count").alignment = { horizontal: "center" };
       });
+      if (byCat.length) {
+        const lastScope = byCat[byCat.length - 1].scope;
+        const same = byCat.filter((x) => x.scope === lastScope);
+        const subRow = ws2.addRow({ cat: `Sous-total ${lastScope}`, scope: "", rev: same.reduce((a, x) => a + x.rev, 0), dep: same.reduce((a, x) => a + x.dep, 0), solde: same.reduce((a, x) => a + x.solde, 0), count: same.reduce((a, x) => a + x.count, 0) });
+        subRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
+        ["rev", "dep", "solde"].forEach((k) => { subRow.getCell(k).numFmt = "#,##0"; subRow.getCell(k).alignment = { horizontal: "right" }; });
+        subRow.getCell("count").alignment = { horizontal: "center" };
+      }
+      const grandTotal2 = ws2.addRow({ cat: "TOTAL GÉNÉRAL", scope: "", rev: byCat.reduce((a, x) => a + x.rev, 0), dep: byCat.reduce((a, x) => a + x.dep, 0), solde: byCat.reduce((a, x) => a + x.solde, 0), count: byCat.reduce((a, x) => a + x.count, 0) });
+      grandTotal2.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      ["rev", "dep", "solde"].forEach((k) => { grandTotal2.getCell(k).numFmt = "#,##0"; grandTotal2.getCell(k).alignment = { horizontal: "right" }; });
+      grandTotal2.getCell("count").alignment = { horizontal: "center" };
 
       // ===== Feuille 3 : Justificatif ligne par ligne — uniquement les transactions Business =====
       const ws3 = wb.addWorksheet("Justificatif — Transactions Business");
@@ -5853,17 +5882,24 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       const ws3 = wb.addWorksheet("Évolution mensuelle");
       titleBanner(ws3, "Marge mensuelle par activité (soldes)");
       const allMonthsUnion = Array.from(new Set(stats.flatMap((s) => Object.keys(s.byMonth)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
-      const headerRow3 = ws3.addRow(["Mois", ...stats.filter((s) => s.count > 0).map((s) => s.act)]);
+      const activeStatsE = stats.filter((s) => s.count > 0);
+      const headerRow3 = ws3.addRow(["Mois", ...activeStatsE.map((s) => s.act), "Total mois"]);
       styleHeaderRow(headerRow3);
-      ws3.columns = [{ width: 14 }, ...stats.filter((s) => s.count > 0).map(() => ({ width: 18 }))];
+      ws3.columns = [{ width: 14 }, ...activeStatsE.map(() => ({ width: 18 })), { width: 18 }];
       allMonthsUnion.forEach((m) => {
-        const row = ws3.addRow([monthLabel(m), ...stats.filter((s) => s.count > 0).map((s) => s.byMonth[m] || 0)]);
-        for (let i = 2; i <= stats.filter((s) => s.count > 0).length + 1; i++) {
+        const vals = activeStatsE.map((s) => s.byMonth[m] || 0);
+        const row = ws3.addRow([monthLabel(m), ...vals, vals.reduce((a, v) => a + v, 0)]);
+        for (let i = 2; i <= activeStatsE.length + 2; i++) {
           const cell = row.getCell(i);
           cell.numFmt = "#,##0"; cell.alignment = { horizontal: "right" };
-          if (typeof cell.value === "number") cell.font = { color: { argb: cell.value >= 0 ? EMERALD : CLAY } };
+          if (typeof cell.value === "number") cell.font = { color: { argb: cell.value >= 0 ? EMERALD : CLAY }, bold: i === activeStatsE.length + 2 };
         }
       });
+      const colTotals = activeStatsE.map((s) => allMonthsUnion.reduce((a, m) => a + (s.byMonth[m] || 0), 0));
+      const grandTotalE = colTotals.reduce((a, v) => a + v, 0);
+      const totalRow3 = ws3.addRow(["TOTAL", ...colTotals, grandTotalE]);
+      totalRow3.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      for (let i = 2; i <= activeStatsE.length + 2; i++) { totalRow3.getCell(i).numFmt = "#,##0"; totalRow3.getCell(i).alignment = { horizontal: "right" }; }
 
       // ===== Feuille 4 : Justificatif — quelle catégorie va dans quelle activité (période) =====
       const ws4 = wb.addWorksheet("Justificatif — Catégories");
@@ -5877,14 +5913,34 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         const dep = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
         return { cat: c, act: activityFor(c), rev, dep, count: tx.length };
       }).filter((rr) => rr.count > 0).sort((a, b) => a.act.localeCompare(b.act) || (b.rev + b.dep) - (a.rev + a.dep));
-      byCatRows.forEach((rr) => {
+      byCatRows.forEach((rr, i) => {
+        const prevAct = i > 0 ? byCatRows[i - 1].act : null;
+        if (prevAct !== null && rr.act !== prevAct) {
+          const sameAct = byCatRows.filter((x) => x.act === prevAct);
+          const subRow = ws4.addRow([`Sous-total ${prevAct}`, "", sameAct.reduce((a, x) => a + x.rev, 0), sameAct.reduce((a, x) => a + x.dep, 0), sameAct.reduce((a, x) => a + x.count, 0)]);
+          subRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF232F27" } }; });
+          [3, 4].forEach((k) => { subRow.getCell(k).numFmt = "#,##0"; subRow.getCell(k).alignment = { horizontal: "right" }; });
+          subRow.getCell(5).alignment = { horizontal: "center" };
+        }
         const row = ws4.addRow([rr.cat, rr.act, rr.rev, rr.dep, rr.count]);
         row.getCell(2).font = { bold: true, color: { argb: rr.act === "Personnel" ? MUTED : GOLD } };
         row.getCell(3).font = { color: { argb: EMERALD } };
         row.getCell(4).font = { color: { argb: CLAY } };
-        [3, 4].forEach((i) => { row.getCell(i).numFmt = "#,##0"; row.getCell(i).alignment = { horizontal: "right" }; });
+        [3, 4].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
         row.getCell(5).alignment = { horizontal: "center" };
       });
+      if (byCatRows.length) {
+        const lastAct = byCatRows[byCatRows.length - 1].act;
+        const sameAct = byCatRows.filter((x) => x.act === lastAct);
+        const subRow = ws4.addRow([`Sous-total ${lastAct}`, "", sameAct.reduce((a, x) => a + x.rev, 0), sameAct.reduce((a, x) => a + x.dep, 0), sameAct.reduce((a, x) => a + x.count, 0)]);
+        subRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF232F27" } }; });
+        [3, 4].forEach((k) => { subRow.getCell(k).numFmt = "#,##0"; subRow.getCell(k).alignment = { horizontal: "right" }; });
+        subRow.getCell(5).alignment = { horizontal: "center" };
+      }
+      const grandTotalRow4b = ws4.addRow(["TOTAL GÉNÉRAL", "", byCatRows.reduce((a, x) => a + x.rev, 0), byCatRows.reduce((a, x) => a + x.dep, 0), byCatRows.reduce((a, x) => a + x.count, 0)]);
+      grandTotalRow4b.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      [3, 4].forEach((k) => { grandTotalRow4b.getCell(k).numFmt = "#,##0"; grandTotalRow4b.getCell(k).alignment = { horizontal: "right" }; });
+      grandTotalRow4b.getCell(5).alignment = { horizontal: "center" };
 
       // ===== Feuille 5 : Justificatif ligne par ligne (période filtrée) =====
       const ws5 = wb.addWorksheet("Justificatif — Transactions");
@@ -6458,6 +6514,18 @@ function ChargesTab({ transactions, chargeOverrides, setChargeOverrides, include
         ["amount", "mean", "median"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
         ["present", "cv", "overridden"].forEach((k) => { row.getCell(k).alignment = { horizontal: "center" }; });
       });
+      ws2.addRow([]);
+      (["fixe", "variable", "occasionnelle", "exclu"] as ChargeMode[]).forEach((mode) => {
+        const rowsForMode = result.rows.filter((r) => r.mode === mode);
+        if (!rowsForMode.length) return;
+        const sub = ws2.addRow({ poste: `Total "${modeLabel[mode]}"`, mode: "", amount: rowsForMode.reduce((a, r) => a + r.amount, 0), mean: "", median: "", present: `${rowsForMode.length} poste(s)`, cv: "", overridden: "" });
+        sub.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF232F27" } }; });
+        sub.getCell("amount").numFmt = "#,##0"; sub.getCell("amount").alignment = { horizontal: "right" };
+        sub.getCell("present").alignment = { horizontal: "center" };
+      });
+      const grandTotal2c = ws2.addRow({ poste: "TOTAL GÉNÉRAL (Fixe + Variable)", mode: "", amount: result.totalFixe + result.totalVariable, mean: "", median: "", present: "", cv: "", overridden: "" });
+      grandTotal2c.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      grandTotal2c.getCell("amount").numFmt = "#,##0"; grandTotal2c.getCell("amount").alignment = { horizontal: "right" };
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -7414,11 +7482,24 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
       ws2.columns = [{ header: "Poste", key: "poste", width: 20 }, { header: "Catégorie", key: "cat", width: 30 }, { header: "Montant/mois (FCFA)", key: "amt", width: 20 }];
       styleHeaderRow(ws2.getRow(1));
       asian.investDetail.forEach((d) => { const row = ws2.addRow({ poste: "Investissement", cat: d.category, amt: Math.round(d.monthly) }); row.getCell("amt").numFmt = "#,##0"; row.getCell("amt").alignment = { horizontal: "right" }; });
+      if (asian.investDetail.length) {
+        const subI = ws2.addRow({ poste: "Sous-total Investissement", cat: "", amt: Math.round(asian.investMonthly) });
+        subI.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF232F27" } }; });
+        subI.getCell("amt").numFmt = "#,##0"; subI.getCell("amt").alignment = { horizontal: "right" };
+      }
       asian.protectionDetail.forEach((d) => { const row = ws2.addRow({ poste: "Protection", cat: d.category, amt: Math.round(d.monthly) }); row.getCell("amt").numFmt = "#,##0"; row.getCell("amt").alignment = { horizontal: "right" }; });
+      if (asian.protectionDetail.length) {
+        const subP = ws2.addRow({ poste: "Sous-total Protection", cat: "", amt: Math.round(asian.protectionMonthly) });
+        subP.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF232F27" } }; });
+        subP.getCell("amt").numFmt = "#,##0"; subP.getCell("amt").alignment = { horizontal: "right" };
+      }
       const vcRow = ws2.addRow({ poste: "Vie courante", cat: "= Dépenses totales − Investissement − Protection", amt: Math.round(asian.vieCouranteMonthly) });
       vcRow.getCell("amt").numFmt = "#,##0"; vcRow.getCell("amt").alignment = { horizontal: "right" }; vcRow.getCell("amt").font = { bold: true };
       const epRow = ws2.addRow({ poste: "Épargne précaution", cat: "= Revenu moyen − Dépenses totales", amt: Math.round(asian.liquideMonthly) });
       epRow.getCell("amt").numFmt = "#,##0"; epRow.getCell("amt").alignment = { horizontal: "right" }; epRow.getCell("amt").font = { bold: true, color: { argb: asian.liquideMonthly >= 0 ? EMERALD : CLAY } };
+      const grandTotal2d = ws2.addRow({ poste: "TOTAL GÉNÉRAL (= Revenu moyen)", cat: "", amt: Math.round(asian.investMonthly + asian.protectionMonthly + asian.vieCouranteMonthly + asian.liquideMonthly) });
+      grandTotal2d.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      grandTotal2d.getCell("amt").numFmt = "#,##0"; grandTotal2d.getCell("amt").alignment = { horizontal: "right" };
 
       // ===== Feuille 3 : Détail DTI (postes fixes) =====
       const ws3 = wb.addWorksheet("Détail DTI (charges fixes)");
@@ -7873,17 +7954,23 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
       titleBanner(ws3, "Mouvement net mensuel par compte");
       const activeAccounts = consoParAccount.filter((c) => c.count > 0);
       const allMonthsUnion = Array.from(new Set(activeAccounts.flatMap((c) => Object.keys(c.byMonth)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
-      const headerRow3 = ws3.addRow(["Mois", ...activeAccounts.map((c) => c.account.name)]);
+      const headerRow3 = ws3.addRow(["Mois", ...activeAccounts.map((c) => c.account.name), "Total mois"]);
       styleHeaderRow(headerRow3);
-      ws3.columns = [{ width: 14 }, ...activeAccounts.map(() => ({ width: 18 }))];
+      ws3.columns = [{ width: 14 }, ...activeAccounts.map(() => ({ width: 18 })), { width: 18 }];
       allMonthsUnion.forEach((m) => {
-        const row = ws3.addRow([monthLabel(m), ...activeAccounts.map((c) => c.byMonth[m] || 0)]);
-        for (let i = 2; i <= activeAccounts.length + 1; i++) {
+        const vals = activeAccounts.map((c) => c.byMonth[m] || 0);
+        const row = ws3.addRow([monthLabel(m), ...vals, vals.reduce((a, v) => a + v, 0)]);
+        for (let i = 2; i <= activeAccounts.length + 2; i++) {
           const cell = row.getCell(i);
           cell.numFmt = "#,##0"; cell.alignment = { horizontal: "right" };
-          if (typeof cell.value === "number") cell.font = { color: { argb: cell.value >= 0 ? EMERALD : CLAY } };
+          if (typeof cell.value === "number") cell.font = { color: { argb: cell.value >= 0 ? EMERALD : CLAY }, bold: i === activeAccounts.length + 2 };
         }
       });
+      const colTotalsC = activeAccounts.map((c) => allMonthsUnion.reduce((a, m) => a + (c.byMonth[m] || 0), 0));
+      const grandTotalC = colTotalsC.reduce((a, v) => a + v, 0);
+      const totalRow3c = ws3.addRow(["TOTAL", ...colTotalsC, grandTotalC]);
+      totalRow3c.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      for (let i = 2; i <= activeAccounts.length + 2; i++) { totalRow3c.getCell(i).numFmt = "#,##0"; totalRow3c.getCell(i).alignment = { horizontal: "right" }; }
 
       // ===== Feuille 4 : Détail transactions (période filtrée) =====
       const ws4 = wb.addWorksheet("Détail transactions");
@@ -9061,6 +9148,9 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       const s = byMonthXl[k].revenus - byMonthXl[k].depenses;
       r.getCell("solde").font = { bold: true, color: { argb: s >= 0 ? EMERALD : CLAY } }; r.getCell("solde").numFmt = "#,##0";
     });
+    const totalRowMonth = wsMonth.addRow({ mois: "TOTAL", rev: totalRevenus, dep: totalDepenses, solde: solde });
+    totalRowMonth.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+    ["rev", "dep", "solde"].forEach((k) => { totalRowMonth.getCell(k).numFmt = "#,##0"; });
 
     // ===== Feuille Par catégorie, groupée avec sous-total par groupe =====
     const wsCat = wb.addWorksheet("Par catégorie");
@@ -9083,6 +9173,9 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       styleSubtotalRow(subRow);
       subRow.getCell("total").numFmt = "#,##0";
     });
+    const grandTotalCatRow = wsCat.addRow({ cat: "TOTAL GÉNÉRAL DÉPENSES (hors Revenu)", total: totalDepenses });
+    grandTotalCatRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+    grandTotalCatRow.getCell("total").numFmt = "#,##0";
 
     const buffer = await wb.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: "application/octet-stream" });
