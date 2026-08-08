@@ -5739,15 +5739,21 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 
   // Catégories qui composent un groupe (Nécessaire/Productif/Non-productif) au sein d'une activité donnée.
   const catsForGroup = (act: string, group: Group) => {
+    // Corrigé le 08/08/2026 : filtrait sur "transactions" (tout l'historique) au lieu de
+    // la fenêtre respectant le filtre "Du mois/Au mois" — les montants du détail ne
+    // correspondaient plus au total affiché juste au-dessus dès que le filtre était resserré.
+    const inRange = (t: Transaction) => !periodRange || (monthSortKey(dateToMonthKey(t.date)) >= monthSortKey(periodRange[0]) && monthSortKey(dateToMonthKey(t.date)) <= monthSortKey(periodRange[1]));
     const rows: Record<string, number> = {};
-    transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && groupFor(t, categoryGroups) === group)
+    transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && groupFor(t, categoryGroups) === group && inRange(t))
       .forEach((t) => { rows[t.category] = (rows[t.category] || 0) + t.amount; });
     const total = Object.values(rows).reduce((a, v) => a + v, 0) || 1;
     return Object.entries(rows).map(([name, value]) => ({ name, value, pct: (value / total) * 100 })).sort((a, b) => b.value - a.value);
   };
-  const txForGroupCat = (act: string, group: Group, cat: string) =>
-    transactions.filter((t) => t.type === "Dépense" && t.category === cat && activityFor(t.category) === act && groupFor(t, categoryGroups) === group)
+  const txForGroupCat = (act: string, group: Group, cat: string) => {
+    const inRange = (t: Transaction) => !periodRange || (monthSortKey(dateToMonthKey(t.date)) >= monthSortKey(periodRange[0]) && monthSortKey(dateToMonthKey(t.date)) <= monthSortKey(periodRange[1]));
+    return transactions.filter((t) => t.type === "Dépense" && t.category === cat && activityFor(t.category) === act && groupFor(t, categoryGroups) === group && inRange(t))
       .sort((a, b) => b.date.localeCompare(a.date));
+  };
 
   const startEdit = (t: Transaction) => setEditingTx(t);
   const saveEdit = (t: Transaction) => setTransactions(transactions.map((x) => (x.id === t.id ? t : x)));
@@ -5761,6 +5767,9 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       const wb = new ExcelJS.Workbook();
       wb.creator = "Grand Livre"; wb.created = new Date();
 
+      const inRange = (t: Transaction) => !periodRange || (monthSortKey(dateToMonthKey(t.date)) >= monthSortKey(periodRange[0]) && monthSortKey(dateToMonthKey(t.date)) <= monthSortKey(periodRange[1]));
+      const periodLabel = periodRange ? `${monthLabel(periodRange[0])} — ${monthLabel(periodRange[1])}` : "Tout l'historique";
+
       const styleHeaderRow = (row: any) => {
         row.eachCell((c: any) => {
           c.font = { bold: true, color: { argb: WHITE } };
@@ -5769,88 +5778,140 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         });
         row.height = 22;
       };
+      const titleBanner = (ws: any, title: string) => {
+        ws.mergeCells("A1:F1");
+        const t = ws.getCell("A1");
+        t.value = `Grand Livre — ${title}`;
+        t.font = { bold: true, size: 14, color: { argb: WHITE } };
+        t.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+        t.alignment = { vertical: "middle", indent: 1 };
+        ws.getRow(1).height = 28;
+        ws.mergeCells("A2:F2");
+        const s = ws.getCell("A2");
+        s.value = `Période : ${periodLabel} · Généré le ${dateLabelFull(todayISO())}`;
+        s.font = { italic: true, color: { argb: MUTED } };
+        ws.addRow([]);
+      };
 
-      // ===== Feuille 1 : Résumé par activité (le calcul affiché à l'écran) =====
-      const ws1 = wb.addWorksheet("Résumé par activité");
-      ws1.columns = [
-        { header: "Activité", key: "act", width: 22 }, { header: "Transactions", key: "count", width: 14 },
-        { header: "Revenus (FCFA)", key: "revenus", width: 18 }, { header: "Dépenses (FCFA)", key: "depenses", width: 18 },
-        { header: "Marge (FCFA)", key: "marge", width: 18 }, { header: "Marge/mois moy. (FCFA)", key: "avgMonthly", width: 22 },
-        { header: "Dont Nécessaire (FCFA)", key: "necessaire", width: 20 }, { header: "Dont Productif (FCFA)", key: "productif", width: 20 },
-        { header: "Dont Non-productif (FCFA)", key: "nonproductif", width: 22 },
-        { header: "Capital investi (FCFA)", key: "capital", width: 20 }, { header: "ROI (%)", key: "roi", width: 12 },
-        { header: "Reste à rembourser (FCFA)", key: "remaining", width: 24 }, { header: "Mois estimés restants", key: "monthsLeft", width: 20 },
-      ];
-      styleHeaderRow(ws1.getRow(1));
+      // ===== Feuille 1 : Synthèse (respecte la période filtrée) =====
+      const ws1 = wb.addWorksheet("Synthèse");
+      titleBanner(ws1, "Rentabilité par activité");
+      const headerRow1 = ws1.addRow(["Activité", "Transactions", "Revenus (FCFA)", "Dépenses (FCFA)", "Marge période (FCFA)", "Marge/mois moy.", "Solde cumulé (tout l'historique)"]);
+      styleHeaderRow(headerRow1);
+      ws1.columns = [{ width: 22 }, { width: 14 }, { width: 18 }, { width: 18 }, { width: 20 }, { width: 20 }, { width: 26 }];
       const SLATE = "FF6E7FA8";
       stats.forEach((s) => {
-        const gv = (g: Group) => s.groups.find((x) => x.group === g)?.value || 0;
-        const row = ws1.addRow({
-          act: s.act, count: s.count, revenus: s.revenus, depenses: s.depenses, marge: s.marge, avgMonthly: s.avgMonthly,
-          necessaire: gv("Nécessaire") || "", productif: gv("Productif") || "", nonproductif: gv("Non-productif") || "",
-          capital: s.capital || "", roi: s.roiPct !== null ? Math.round(s.roiPct) : "", remaining: s.capital > 0 ? s.remaining : "",
-          monthsLeft: s.monthsLeft ?? (s.paidOff ? "Remboursé" : ""),
-        });
-        row.getCell("revenus").font = { color: { argb: EMERALD } };
-        row.getCell("depenses").font = { color: { argb: CLAY } };
-        row.getCell("marge").font = { bold: true, color: { argb: s.marge >= 0 ? EMERALD : CLAY } };
-        row.getCell("avgMonthly").font = { color: { argb: s.avgMonthly >= 0 ? EMERALD : CLAY } };
-        row.getCell("necessaire").font = { color: { argb: SLATE } };
-        row.getCell("productif").font = { color: { argb: EMERALD } };
-        row.getCell("nonproductif").font = { color: { argb: CLAY } };
-        ["revenus", "depenses", "marge", "avgMonthly", "necessaire", "productif", "nonproductif", "capital", "remaining"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
-        row.getCell("count").alignment = { horizontal: "center" };
-        row.getCell("roi").alignment = { horizontal: "center" };
-        row.getCell("monthsLeft").alignment = { horizontal: "center" };
+        const row = ws1.addRow([s.act, s.count, s.revenus, s.depenses, s.marge, s.avgMonthly, s.margeAllTime]);
+        row.getCell(3).font = { color: { argb: EMERALD } };
+        row.getCell(4).font = { color: { argb: CLAY } };
+        row.getCell(5).font = { bold: true, color: { argb: s.marge >= 0 ? EMERALD : CLAY } };
+        row.getCell(6).font = { color: { argb: s.avgMonthly >= 0 ? EMERALD : CLAY } };
+        row.getCell(7).font = { color: { argb: s.margeAllTime >= 0 ? EMERALD : CLAY } };
+        [3, 4, 5, 6, 7].forEach((i) => { row.getCell(i).numFmt = "#,##0"; row.getCell(i).alignment = { horizontal: "right" }; });
+        row.getCell(2).alignment = { horizontal: "center" };
+      });
+      ws1.addRow([]);
+      const totRev = stats.reduce((a, s) => a + s.revenus, 0), totDep = stats.reduce((a, s) => a + s.depenses, 0);
+      const totRow = ws1.addRow(["TOTAL", stats.reduce((a, s) => a + s.count, 0), totRev, totDep, totRev - totDep, "", ""]);
+      totRow.eachCell((c: any) => { c.font = { bold: true }; });
+      [3, 4, 5].forEach((i) => { totRow.getCell(i).numFmt = "#,##0"; totRow.getCell(i).alignment = { horizontal: "right" }; });
+
+      // ===== Feuille 2 : Narratif — analyse personnalisée par activité =====
+      const ws2 = wb.addWorksheet("Narratif");
+      titleBanner(ws2, "Analyse narrative par activité");
+      ws2.columns = [{ width: 100 }];
+      let r = 4;
+      const writeParagraph = (text: string, opts: { bold?: boolean; color?: string; size?: number } = {}) => {
+        const cell = ws2.getCell(`A${r}`);
+        cell.value = text;
+        cell.font = { bold: !!opts.bold, size: opts.size || 10.5, color: { argb: opts.color || "FF1A1A1A" } };
+        cell.alignment = { wrapText: true, vertical: "top" };
+        ws2.getRow(r).height = Math.max(18, Math.ceil(text.length / 110) * 15);
+        r++;
+      };
+      stats.filter((s) => s.count > 0).forEach((s) => {
+        writeParagraph(`━━ ${s.act} ━━`, { bold: true, size: 13, color: NAVY.replace("FF", "FF") });
+        r++;
+        const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+        if (months.length >= 2) {
+          const values = months.map((m) => s.byMonth[m]);
+          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+          const half = Math.floor(months.length / 2);
+          const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
+          writeParagraph(`Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses, soit une marge de ${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA (${fmt(s.avgMonthly)} FCFA/mois en moyenne).`);
+          writeParagraph(`La tendance entre la première et la seconde moitié de la période est de ${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%.`);
+          writeParagraph(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
+        } else {
+          writeParagraph(`Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses, soit une marge de ${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA.`);
+        }
+        if (s.capital > 0) {
+          writeParagraph(`Capital investi : ${fmt(s.capital)} FCFA (suivi sur tout l'historique). ${s.paidOff ? "Investissement entièrement remboursé." : `Il reste ${fmt(s.remaining)} FCFA à rembourser${s.monthsLeft ? `, soit environ ${s.monthsLeft} mois au rythme actuel` : ""}.`} ROI à date : ${s.roiPct?.toFixed(1)}%.`);
+        }
+        const topGroup = [...s.groups].sort((a, b) => b.value - a.value)[0];
+        if (topGroup) writeParagraph(`Nature des dépenses sur la période : "${topGroup.group}" domine avec ${topGroup.pct.toFixed(0)}% (${fmt(topGroup.value)} FCFA).`);
+        r++;
       });
 
-      // ===== Feuille 2 : Justificatif — quelle catégorie va dans quelle activité =====
-      const ws2 = wb.addWorksheet("Justificatif — Catégories");
-      ws2.columns = [
-        { header: "Catégorie", key: "cat", width: 26 }, { header: "Activité assignée", key: "act", width: 20 },
-        { header: "Revenus (FCFA)", key: "rev", width: 18 }, { header: "Dépenses (FCFA)", key: "dep", width: 18 }, { header: "Nb transactions", key: "count", width: 16 },
-      ];
-      styleHeaderRow(ws2.getRow(1));
+      // ===== Feuille 3 : Évolution mensuelle (les soldes, mois par mois) =====
+      const ws3 = wb.addWorksheet("Évolution mensuelle");
+      titleBanner(ws3, "Marge mensuelle par activité (soldes)");
+      const allMonthsUnion = Array.from(new Set(stats.flatMap((s) => Object.keys(s.byMonth)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+      const headerRow3 = ws3.addRow(["Mois", ...stats.filter((s) => s.count > 0).map((s) => s.act)]);
+      styleHeaderRow(headerRow3);
+      ws3.columns = [{ width: 14 }, ...stats.filter((s) => s.count > 0).map(() => ({ width: 18 }))];
+      allMonthsUnion.forEach((m) => {
+        const row = ws3.addRow([monthLabel(m), ...stats.filter((s) => s.count > 0).map((s) => s.byMonth[m] || 0)]);
+        for (let i = 2; i <= stats.filter((s) => s.count > 0).length + 1; i++) {
+          const cell = row.getCell(i);
+          cell.numFmt = "#,##0"; cell.alignment = { horizontal: "right" };
+          if (typeof cell.value === "number") cell.font = { color: { argb: cell.value >= 0 ? EMERALD : CLAY } };
+        }
+      });
+
+      // ===== Feuille 4 : Justificatif — quelle catégorie va dans quelle activité (période) =====
+      const ws4 = wb.addWorksheet("Justificatif — Catégories");
+      titleBanner(ws4, "Détail par catégorie");
+      const headerRow4 = ws4.addRow(["Catégorie", "Activité assignée", "Revenus (FCFA)", "Dépenses (FCFA)", "Nb transactions"]);
+      styleHeaderRow(headerRow4);
+      ws4.columns = [{ width: 26 }, { width: 20 }, { width: 18 }, { width: 18 }, { width: 16 }];
       const byCatRows = allCategories.map((c) => {
-        const tx = transactions.filter((t) => t.category === c);
+        const tx = transactions.filter((t) => t.category === c && inRange(t));
         const rev = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
         const dep = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
         return { cat: c, act: activityFor(c), rev, dep, count: tx.length };
-      }).filter((r) => r.count > 0).sort((a, b) => a.act.localeCompare(b.act) || (b.rev + b.dep) - (a.rev + a.dep));
-      byCatRows.forEach((r) => {
-        const row = ws2.addRow(r);
-        row.getCell("act").font = { bold: true, color: { argb: r.act === "Personnel" ? MUTED : GOLD } };
-        row.getCell("rev").font = { color: { argb: EMERALD } };
-        row.getCell("dep").font = { color: { argb: CLAY } };
-        ["rev", "dep"].forEach((k) => { row.getCell(k).numFmt = "#,##0"; row.getCell(k).alignment = { horizontal: "right" }; });
-        row.getCell("count").alignment = { horizontal: "center" };
+      }).filter((rr) => rr.count > 0).sort((a, b) => a.act.localeCompare(b.act) || (b.rev + b.dep) - (a.rev + a.dep));
+      byCatRows.forEach((rr) => {
+        const row = ws4.addRow([rr.cat, rr.act, rr.rev, rr.dep, rr.count]);
+        row.getCell(2).font = { bold: true, color: { argb: rr.act === "Personnel" ? MUTED : GOLD } };
+        row.getCell(3).font = { color: { argb: EMERALD } };
+        row.getCell(4).font = { color: { argb: CLAY } };
+        [3, 4].forEach((i) => { row.getCell(i).numFmt = "#,##0"; row.getCell(i).alignment = { horizontal: "right" }; });
+        row.getCell(5).alignment = { horizontal: "center" };
       });
 
-      // ===== Feuille 3 : Justificatif ligne par ligne — chaque transaction, regroupée par activité =====
-      const ws3 = wb.addWorksheet("Justificatif — Transactions");
-      ws3.columns = [
-        { header: "Activité", key: "act", width: 18 }, { header: "Date", key: "date", width: 12 },
-        { header: "Catégorie", key: "cat", width: 22 }, { header: "Sous-catégorie", key: "sub", width: 20 },
-        { header: "Type", key: "type", width: 10 }, { header: "Compte", key: "account", width: 16 }, { header: "Montant (FCFA)", key: "amount", width: 16 },
-      ];
-      styleHeaderRow(ws3.getRow(1));
-      const sortedTx = transactions.slice().sort((a, b) => activityFor(a.category).localeCompare(activityFor(b.category)) || a.date.localeCompare(b.date));
+      // ===== Feuille 5 : Justificatif ligne par ligne (période filtrée) =====
+      const ws5 = wb.addWorksheet("Justificatif — Transactions");
+      titleBanner(ws5, "Détail transaction par transaction");
+      const headerRow5 = ws5.addRow(["Activité", "Date", "Catégorie", "Sous-catégorie", "Type", "Compte", "Montant (FCFA)"]);
+      styleHeaderRow(headerRow5);
+      ws5.columns = [{ width: 18 }, { width: 12 }, { width: 22 }, { width: 20 }, { width: 10 }, { width: 16 }, { width: 16 }];
+      const sortedTx = transactions.filter(inRange).slice().sort((a, b) => activityFor(a.category).localeCompare(activityFor(b.category)) || a.date.localeCompare(b.date));
       let curAct: string | null = null, actRev = 0, actDep = 0;
       const flushActSubtotal = () => {
         if (curAct === null) return;
-        const row = ws3.addRow({ act: `Sous-total ${curAct}`, date: "", cat: "", sub: "", type: "", account: "", amount: actRev - actDep });
+        const row = ws5.addRow([`Sous-total ${curAct}`, "", "", "", "", "", actRev - actDep]);
         row.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
-        row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
-        ws3.addRow([]);
+        row.getCell(7).numFmt = "#,##0"; row.getCell(7).alignment = { horizontal: "right" };
+        ws5.addRow([]);
       };
       sortedTx.forEach((t) => {
         const act = activityFor(t.category);
         if (act !== curAct) { flushActSubtotal(); curAct = act; actRev = 0; actDep = 0; }
         if (t.type === "Revenu") actRev += t.amount; else actDep += t.amount;
-        const row = ws3.addRow({ act, date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", type: t.type, account: t.account || "", amount: t.amount });
-        row.getCell("type").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
-        row.getCell("amount").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
-        row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
+        const row = ws5.addRow([act, dateLabelFull(t.date), t.category, t.subcategory || "", t.type, t.account || "", t.amount]);
+        row.getCell(5).font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell(7).font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell(7).numFmt = "#,##0"; row.getCell(7).alignment = { horizontal: "right" };
       });
       flushActSubtotal();
 
@@ -5861,7 +5922,8 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       a.href = url; a.download = `grand-livre_rapport-activites_${todayISO()}.xlsx`; a.click();
       URL.revokeObjectURL(url);
       setXlsState("idle");
-    } catch {
+    } catch (e) {
+      console.error(e);
       setXlsState("error");
     }
   };
@@ -7630,6 +7692,7 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
   }, [withMonth, periodFrom, periodTo]);
 
   const [accountNarrativeId, setAccountNarrativeId] = useState<string | null>(null);
+  const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
   const consoParAccount = useMemo(() => accounts.map((a) => {
     const tx = periodTx.filter((t) => t.account === a.name);
     const depenses = tx.filter((t) => t.type === "Dépense").reduce((s, t) => s + t.amount, 0);
@@ -7637,10 +7700,144 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
     const depByCat: Record<string, number> = {};
     const revByCat: Record<string, number> = {};
     tx.forEach((t) => { (t.type === "Dépense" ? depByCat : revByCat)[t.category] = ((t.type === "Dépense" ? depByCat : revByCat)[t.category] || 0) + t.amount; });
-    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length, depByCat, revByCat };
-  }).sort((x, y) => y.depenses - x.depenses), [accounts, periodTx]);
+    // Solde réel du compte (pas juste le mouvement net de la période) : ce qu'il y avait
+    // avant le début de la période, et ce qu'il y a à la fin — pour voir l'évolution du
+    // solde effectif, pas seulement ce qui a transité pendant la fenêtre choisie.
+    const beforePeriod = withMonth.filter((t) => t.account === a.name && monthSortKey(t.month) < monthSortKey(periodFrom));
+    const uptoEndOfPeriod = withMonth.filter((t) => t.account === a.name && monthSortKey(t.month) <= monthSortKey(periodTo));
+    const soldeDebut = accountBalance(a, beforePeriod);
+    const soldeFin = accountBalance(a, uptoEndOfPeriod);
+    const byMonth: Record<string, number> = {};
+    tx.forEach((t) => { byMonth[t.month] = (byMonth[t.month] || 0) + (t.type === "Revenu" ? t.amount : -t.amount); });
+    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length, depByCat, revByCat, soldeDebut, soldeFin, byMonth };
+  }).sort((x, y) => y.depenses - x.depenses), [accounts, periodTx, withMonth, periodFrom, periodTo]);
 
   const totalConsoDep = consoParAccount.reduce((a, c) => a + c.depenses, 0);
+
+  const exportComptesExcel = async () => {
+    setXlsState("loading");
+    try {
+      const ExcelJS: any = await import(/* @vite-ignore */ "exceljs");
+      const NAVY = "FF1A2B4C", GOLD = "FFC9A227", EMERALD = "FF3F9C7A", CLAY = "FFC1543F", WHITE = "FFFFFFFF", MUTED = "FF8A9A8E";
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Grand Livre"; wb.created = new Date();
+      const periodLabel = `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`;
+
+      const styleHeaderRow = (row: any) => {
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; c.alignment = { vertical: "middle" }; });
+        row.height = 22;
+      };
+      const titleBanner = (ws: any, title: string) => {
+        ws.mergeCells("A1:F1");
+        const t = ws.getCell("A1");
+        t.value = `Grand Livre — ${title}`;
+        t.font = { bold: true, size: 14, color: { argb: WHITE } };
+        t.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } };
+        t.alignment = { vertical: "middle", indent: 1 };
+        ws.getRow(1).height = 28;
+        ws.mergeCells("A2:F2");
+        const s = ws.getCell("A2");
+        s.value = `Période : ${periodLabel} · Généré le ${dateLabelFull(todayISO())}`;
+        s.font = { italic: true, color: { argb: MUTED } };
+        ws.addRow([]);
+      };
+
+      // ===== Feuille 1 : Synthèse — soldes début/fin + mouvement de la période =====
+      const ws1 = wb.addWorksheet("Synthèse");
+      titleBanner(ws1, "Consommation par compte");
+      const headerRow1 = ws1.addRow(["Compte", "Solde début période", "Reçu (période)", "Consommé (période)", "Mouvement net", "Solde fin période", "Transactions"]);
+      styleHeaderRow(headerRow1);
+      ws1.columns = [{ width: 20 }, { width: 20 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 20 }, { width: 14 }];
+      consoParAccount.forEach((c) => {
+        const row = ws1.addRow([c.account.name, c.soldeDebut, c.revenus, c.depenses, c.net, c.soldeFin, c.count]);
+        row.getCell(2).font = { color: { argb: MUTED } };
+        row.getCell(3).font = { color: { argb: EMERALD } };
+        row.getCell(4).font = { color: { argb: CLAY } };
+        row.getCell(5).font = { bold: true, color: { argb: c.net >= 0 ? EMERALD : CLAY } };
+        row.getCell(6).font = { bold: true, color: { argb: c.soldeFin >= 0 ? EMERALD : CLAY } };
+        [2, 3, 4, 5, 6].forEach((i) => { row.getCell(i).numFmt = "#,##0"; row.getCell(i).alignment = { horizontal: "right" }; });
+        row.getCell(7).alignment = { horizontal: "center" };
+      });
+      ws1.addRow([]);
+      const totDebut = consoParAccount.reduce((a, c) => a + c.soldeDebut, 0), totFin = consoParAccount.reduce((a, c) => a + c.soldeFin, 0);
+      const totRowC = ws1.addRow(["TOTAL", totDebut, consoParAccount.reduce((a, c) => a + c.revenus, 0), consoParAccount.reduce((a, c) => a + c.depenses, 0), totFin - totDebut, totFin, ""]);
+      totRowC.eachCell((c: any) => { c.font = { bold: true }; });
+      [2, 3, 4, 5, 6].forEach((i) => { totRowC.getCell(i).numFmt = "#,##0"; totRowC.getCell(i).alignment = { horizontal: "right" }; });
+
+      // ===== Feuille 2 : Narratif personnalisé par compte =====
+      const ws2 = wb.addWorksheet("Narratif");
+      titleBanner(ws2, "Analyse narrative par compte");
+      ws2.columns = [{ width: 100 }];
+      let r = 4;
+      const writeParagraph = (text: string, opts: { bold?: boolean; color?: string; size?: number } = {}) => {
+        const cell = ws2.getCell(`A${r}`);
+        cell.value = text;
+        cell.font = { bold: !!opts.bold, size: opts.size || 10.5, color: { argb: opts.color || "FF1A1A1A" } };
+        cell.alignment = { wrapText: true, vertical: "top" };
+        ws2.getRow(r).height = Math.max(18, Math.ceil(text.length / 110) * 15);
+        r++;
+      };
+      consoParAccount.filter((c) => c.count > 0 || c.soldeDebut !== c.soldeFin).forEach((c) => {
+        writeParagraph(`━━ ${c.account.name} ━━`, { bold: true, size: 13, color: NAVY });
+        r++;
+        const evolPct = c.soldeDebut !== 0 ? ((c.soldeFin - c.soldeDebut) / Math.abs(c.soldeDebut)) * 100 : null;
+        writeParagraph(`Sur ${periodLabel}, le solde de ce compte est passé de ${fmt(c.soldeDebut)} FCFA à ${fmt(c.soldeFin)} FCFA${evolPct !== null ? ` (${evolPct >= 0 ? "+" : ""}${evolPct.toFixed(1)}%)` : ""}.`);
+        writeParagraph(`Ce compte a reçu ${fmt(c.revenus)} FCFA et vu sortir ${fmt(c.depenses)} FCFA sur la période, pour un mouvement net de ${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA, sur ${c.count} transaction(s).`);
+        const topDep = Object.entries(c.depByCat).sort((a, b) => b[1] - a[1])[0];
+        const topRev = Object.entries(c.revByCat).sort((a, b) => b[1] - a[1])[0];
+        if (topDep) writeParagraph(`Principal poste de dépense : "${topDep[0]}" (${fmt(topDep[1])} FCFA, ${((topDep[1] / (c.depenses || 1)) * 100).toFixed(0)}% de la consommation de ce compte).`);
+        if (topRev) writeParagraph(`Principale source de revenu : "${topRev[0]}" (${fmt(topRev[1])} FCFA, ${((topRev[1] / (c.revenus || 1)) * 100).toFixed(0)}% des entrées de ce compte).`);
+        const months = Object.keys(c.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+        if (months.length >= 2) {
+          const values = months.map((m) => c.byMonth[m]);
+          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+          writeParagraph(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de mouvement net). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
+        }
+        r++;
+      });
+
+      // ===== Feuille 3 : Évolution mensuelle du mouvement net par compte =====
+      const ws3 = wb.addWorksheet("Évolution mensuelle");
+      titleBanner(ws3, "Mouvement net mensuel par compte");
+      const activeAccounts = consoParAccount.filter((c) => c.count > 0);
+      const allMonthsUnion = Array.from(new Set(activeAccounts.flatMap((c) => Object.keys(c.byMonth)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+      const headerRow3 = ws3.addRow(["Mois", ...activeAccounts.map((c) => c.account.name)]);
+      styleHeaderRow(headerRow3);
+      ws3.columns = [{ width: 14 }, ...activeAccounts.map(() => ({ width: 18 }))];
+      allMonthsUnion.forEach((m) => {
+        const row = ws3.addRow([monthLabel(m), ...activeAccounts.map((c) => c.byMonth[m] || 0)]);
+        for (let i = 2; i <= activeAccounts.length + 1; i++) {
+          const cell = row.getCell(i);
+          cell.numFmt = "#,##0"; cell.alignment = { horizontal: "right" };
+          if (typeof cell.value === "number") cell.font = { color: { argb: cell.value >= 0 ? EMERALD : CLAY } };
+        }
+      });
+
+      // ===== Feuille 4 : Détail transactions (période filtrée) =====
+      const ws4 = wb.addWorksheet("Détail transactions");
+      titleBanner(ws4, "Transactions de la période");
+      const headerRow4 = ws4.addRow(["Compte", "Date", "Catégorie", "Sous-catégorie", "Type", "Montant (FCFA)"]);
+      styleHeaderRow(headerRow4);
+      ws4.columns = [{ width: 18 }, { width: 12 }, { width: 22 }, { width: 20 }, { width: 10 }, { width: 16 }];
+      periodTx.slice().sort((a, b) => (a.account || "").localeCompare(b.account || "") || a.date.localeCompare(b.date)).forEach((t) => {
+        const row = ws4.addRow([t.account || "—", dateLabelFull(t.date), t.category, t.subcategory || "", t.type, t.amount]);
+        row.getCell(5).font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell(6).font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
+        row.getCell(6).numFmt = "#,##0"; row.getCell(6).alignment = { horizontal: "right" };
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `grand-livre_consommation-comptes_${todayISO()}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      setXlsState("idle");
+    } catch (e) {
+      console.error(e);
+      setXlsState("error");
+    }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -7650,6 +7847,14 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
         explain="Le solde ci-dessus est un instantané à aujourd'hui. Ce panneau, lui, montre ce qui a réellement transité sur chaque compte pendant une période choisie : combien en a été dépensé (consommation), combien y est entré (revenus), et le mouvement net. Utile pour voir, par exemple, à quel point Petty Cash ou SALAIRE ont été sollicités sur les 3 derniers mois."
         right={
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <button onClick={exportComptesExcel} disabled={xlsState === "loading"} style={{
+              display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+              border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 6,
+              color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "6px 12px", fontSize: 11.5, cursor: xlsState === "loading" ? "default" : "pointer",
+            }}>
+              {xlsState === "loading" ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={12} />}
+              {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+            </button>
             {[["1m", "1M"], ["3m", "3M"], ["6m", "6M"], ["1a", "1A"], ["tout", "Tout"]].map(([key, label]) => (
               <button key={key} onClick={() => applyPreset(key)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted, borderRadius: 6, padding: "6px 10px", fontSize: 11.5, cursor: "pointer" }}>{label}</button>
             ))}
@@ -7689,19 +7894,23 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
         if (!c) return null;
         const depRows = Object.entries(c.depByCat).sort((a, b) => b[1] - a[1]);
         const revRows = Object.entries(c.revByCat).sort((a, b) => b[1] - a[1]);
+        const months = Object.keys(c.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
         const blocks: CalcDetailBlock[] = [
           { kind: "kv", rows: [
             { label: `Période`, value: `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}` },
+            { label: "Solde en début de période", value: `${fmt(c.soldeDebut)} FCFA` },
+            { label: "Solde en fin de période", value: `${fmt(c.soldeFin)} FCFA`, strong: true },
             { label: "Reçu (revenus)", value: `${fmt(c.revenus)} FCFA` },
             { label: "Consommé (dépenses)", value: `${fmt(c.depenses)} FCFA` },
-            { label: "Mouvement net", value: `${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA`, strong: true, warn: c.net < 0 },
+            { label: "Mouvement net", value: `${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA`, warn: c.net < 0 },
           ] },
         ];
         if (depRows.length) blocks.push({ kind: "table", columns: ["Catégorie (dépenses)", "Montant (FCFA)"], rows: depRows.map(([cat, v]) => [cat, fmt(v)]) });
         if (revRows.length) blocks.push({ kind: "table", columns: ["Catégorie (revenus)", "Montant (FCFA)"], rows: revRows.map(([cat, v]) => [cat, fmt(v)]) });
+        if (months.length >= 2) blocks.push({ kind: "table", columns: ["Mois", "Mouvement net (FCFA)"], rows: months.map((m) => [monthLabel(m), fmt(c.byMonth[m])]) });
         return <CalcDetailSheet open={!!accountNarrativeId} onClose={() => setAccountNarrativeId(null)}
-          title={c.account.name} headline={`${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA net`}
-          formula="Revenus et dépenses de ce compte sur la période sélectionnée, par catégorie" blocks={blocks} />;
+          title={c.account.name} headline={`${fmt(c.soldeDebut)} → ${fmt(c.soldeFin)} FCFA`}
+          formula="Solde réel du compte en début/fin de période, puis revenus et dépenses par catégorie" blocks={blocks} />;
       })()}
 
       <Panel title="Comptes" subtitle="Le solde de chaque compte se met à jour automatiquement dès qu'une transaction lui est liée"
