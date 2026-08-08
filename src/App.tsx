@@ -5629,11 +5629,11 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // ACTIVITÉS & RENTABILITÉ — suivi par activité réelle (pas par compte, car
 // l'argent circule entre comptes) : marge, ROI et délai de remboursement estimé.
 // ============================================================
-function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups, accounts, onNavigate }: {
+function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups, accounts, onNavigate, periodRange }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; activities: string[]; setActivities: (a: string[]) => void;
   categoryActivity: Record<string, string>; setCategoryActivity: (m: Record<string, string>) => void;
   activityCapital: Record<string, number>; setActivityCapital: (m: Record<string, number>) => void;
-  allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[]; onNavigate?: (tab: Tab, data?: any) => void;
+  allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[]; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
 }) {
   const [newActivity, setNewActivity] = useState("");
   const [confirmDeleteActivity, setConfirmDeleteActivity] = useState<string | null>(null);
@@ -5663,11 +5663,18 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
   };
 
   const stats = useMemo(() => {
+    // Respecte le filtre global "Du mois/Au mois" pour la marge/dépenses/revenus de la
+    // période — mais PAS pour le capital/ROI/remboursement, qui doivent rester cumulés
+    // depuis le début (un remboursement de capital ne "redémarre" pas parce qu'on
+    // resserre la période affichée).
+    const inRange = (t: Transaction) => !periodRange || (monthSortKey(dateToMonthKey(t.date)) >= monthSortKey(periodRange[0]) && monthSortKey(dateToMonthKey(t.date)) <= monthSortKey(periodRange[1]));
     return allActivities.map((act) => {
-      const tx = transactions.filter((t) => activityFor(t.category) === act);
+      const txAllTime = transactions.filter((t) => activityFor(t.category) === act);
+      const tx = txAllTime.filter(inRange);
       const revenus = tx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
       const depenses = tx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
       const marge = revenus - depenses;
+      const margeAllTime = txAllTime.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0) - txAllTime.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
       const capital = activityCapital[act] || 0;
 
       // Moyenne mensuelle de marge sur les mois où l'activité a eu du mouvement, pour estimer un délai de remboursement.
@@ -5676,10 +5683,10 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       const monthlyMargins = Object.values(byMonth);
       const avgMonthly = monthlyMargins.length ? mean(monthlyMargins) : 0;
 
-      const roiPct = capital > 0 ? (marge / capital) * 100 : null;
-      const remaining = capital > 0 ? Math.max(0, capital - marge) : 0;
-      const monthsLeft = capital > 0 && marge < capital && avgMonthly > 0 ? Math.ceil(remaining / avgMonthly) : null;
-      const paidOff = capital > 0 && marge >= capital;
+      const roiPct = capital > 0 ? (margeAllTime / capital) * 100 : null;
+      const remaining = capital > 0 ? Math.max(0, capital - margeAllTime) : 0;
+      const monthsLeft = capital > 0 && margeAllTime < capital && avgMonthly > 0 ? Math.ceil(remaining / avgMonthly) : null;
+      const paidOff = capital > 0 && margeAllTime >= capital;
 
       // Répartition des dépenses par nature (Nécessaire / Productif / Non-productif)
       const groupTotals: Record<Group, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
@@ -5690,7 +5697,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         .filter((g) => g.value > 0);
       if (groupTotals["Non classifié"] > 0) groups.push({ group: "Non classifié", value: groupTotals["Non classifié"], pct: (groupTotals["Non classifié"] / depTotal) * 100 });
 
-      return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length, groups, byMonth };
+      return { act, revenus, depenses, marge, margeAllTime, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length, groups, byMonth };
     }).filter((s) => s.count > 0 || s.capital > 0);
   }, [transactions, categoryActivity, activityCapital, allActivities]);
 
@@ -5909,10 +5916,10 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
               {s.capital > 0 && (
                 <div>
                   <div style={{ height: 8, background: COLOR.hairline, borderRadius: 4, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${Math.min(100, (s.marge / s.capital) * 100).toFixed(1)}%`, background: s.paidOff ? COLOR.emerald : COLOR.gold, transition: "width 0.3s" }} />
+                    <div style={{ height: "100%", width: `${Math.min(100, (s.margeAllTime / s.capital) * 100).toFixed(1)}%`, background: s.paidOff ? COLOR.emerald : COLOR.gold, transition: "width 0.3s" }} />
                   </div>
                   <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 6 }}>
-                    Capital investi : {fmt(s.capital)} FCFA · {s.paidOff
+                    Capital investi : {fmt(s.capital)} FCFA (suivi sur tout l'historique, indépendant du filtre de période) · {s.paidOff
                       ? <span style={{ color: COLOR.emeraldSoft }}>investissement remboursé ✓</span>
                       : s.monthsLeft !== null
                         ? `reste ${fmt(s.remaining)} FCFA — remboursement estimé dans ~${s.monthsLeft} mois au rythme actuel`
@@ -7622,11 +7629,15 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
     return withMonth.filter((t) => { const k = monthSortKey(t.month); return k >= fk && k <= tk; });
   }, [withMonth, periodFrom, periodTo]);
 
+  const [accountNarrativeId, setAccountNarrativeId] = useState<string | null>(null);
   const consoParAccount = useMemo(() => accounts.map((a) => {
     const tx = periodTx.filter((t) => t.account === a.name);
     const depenses = tx.filter((t) => t.type === "Dépense").reduce((s, t) => s + t.amount, 0);
     const revenus = tx.filter((t) => t.type === "Revenu").reduce((s, t) => s + t.amount, 0);
-    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length };
+    const depByCat: Record<string, number> = {};
+    const revByCat: Record<string, number> = {};
+    tx.forEach((t) => { (t.type === "Dépense" ? depByCat : revByCat)[t.category] = ((t.type === "Dépense" ? depByCat : revByCat)[t.category] || 0) + t.amount; });
+    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length, depByCat, revByCat };
   }).sort((x, y) => y.depenses - x.depenses), [accounts, periodTx]);
 
   const totalConsoDep = consoParAccount.reduce((a, c) => a + c.depenses, 0);
@@ -7650,7 +7661,7 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
           {consoParAccount.map((c) => (
             <div key={c.account.id} style={{ padding: "12px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ fontSize: 13 }}>{c.account.name} <span style={{ color: COLOR.inkMuted, fontSize: 11 }}>· {c.count} transaction(s)</span></div>
+                <div style={{ fontSize: 13 }}>{c.account.name}<CalcDetailIcon onClick={() => setAccountNarrativeId(c.account.id)} /> <span style={{ color: COLOR.inkMuted, fontSize: 11 }}>· {c.count} transaction(s)</span></div>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 600, color: c.net >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>
                   {c.net >= 0 ? "+" : ""}{fmt(c.net)} FCFA
                 </div>
@@ -7673,6 +7684,25 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
           {!consoParAccount.length && <EmptyState text="Aucun compte." />}
         </div>
       </PanelWithHelp>
+      {accountNarrativeId && (() => {
+        const c = consoParAccount.find((x) => x.account.id === accountNarrativeId);
+        if (!c) return null;
+        const depRows = Object.entries(c.depByCat).sort((a, b) => b[1] - a[1]);
+        const revRows = Object.entries(c.revByCat).sort((a, b) => b[1] - a[1]);
+        const blocks: CalcDetailBlock[] = [
+          { kind: "kv", rows: [
+            { label: `Période`, value: `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}` },
+            { label: "Reçu (revenus)", value: `${fmt(c.revenus)} FCFA` },
+            { label: "Consommé (dépenses)", value: `${fmt(c.depenses)} FCFA` },
+            { label: "Mouvement net", value: `${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA`, strong: true, warn: c.net < 0 },
+          ] },
+        ];
+        if (depRows.length) blocks.push({ kind: "table", columns: ["Catégorie (dépenses)", "Montant (FCFA)"], rows: depRows.map(([cat, v]) => [cat, fmt(v)]) });
+        if (revRows.length) blocks.push({ kind: "table", columns: ["Catégorie (revenus)", "Montant (FCFA)"], rows: revRows.map(([cat, v]) => [cat, fmt(v)]) });
+        return <CalcDetailSheet open={!!accountNarrativeId} onClose={() => setAccountNarrativeId(null)}
+          title={c.account.name} headline={`${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA net`}
+          formula="Revenus et dépenses de ce compte sur la période sélectionnée, par catégorie" blocks={blocks} />;
+      })()}
 
       <Panel title="Comptes" subtitle="Le solde de chaque compte se met à jour automatiquement dès qu'une transaction lui est liée"
         right={
@@ -9790,7 +9820,7 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
