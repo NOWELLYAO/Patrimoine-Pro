@@ -2126,7 +2126,7 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
   }
 
   // Analyse comportementale par sous-catégorie : ce qui dérape vraiment, nommément.
-  const drift = analyzeSubcategoryDrift(transactions, curMonth, dayNum, daysInMonth);
+  const drift = analyzeSubcategoryDrift(transactions, curMonth, dayNum, daysInMonth, chargeOverrides, includeGrundfosVoiture);
   drift.forEach((d) => {
     insights.push({
       kind: d.diffPct > 0 ? "alerte" : "positif",
@@ -5772,12 +5772,12 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
     const values = months.map((m) => s.byMonth[m]);
     const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
     const bestMonth = months[bestIdx], worstMonth = months[worstIdx];
-    const attrib = (mk: string) => {
-      const byCat: Record<string, number> = {};
-      transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && dateToMonthKey(t.date) === mk)
-        .forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
-      return Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 4);
-    };
+    // Détail transaction par transaction du mois (pas un agrégat par catégorie) — pour
+    // voir exactement ce qui compose le mois, sur demande explicite de l'utilisateur
+    // (08/08/2026) : "je veux des explicatifs qui vont jusqu'au détail des transactions".
+    const topTxForMonth = (mk: string, type: "Dépense" | "Revenu") =>
+      transactions.filter((t) => t.type === type && activityFor(t.category) === act && dateToMonthKey(t.date) === mk)
+        .sort((a, b) => b.amount - a.amount).slice(0, 5);
     const half = Math.floor(months.length / 2);
     const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
     const blocks: CalcDetailBlock[] = [
@@ -5786,8 +5786,12 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         { label: "Marge moyenne/mois", value: `${fmt(s.avgMonthly)} FCFA` },
         { label: "Tendance (1ère moitié → 2e moitié)", value: `${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%`, warn: trendPct < -20 },
       ] },
-      { kind: "note", tone: values[bestIdx] >= 0 ? "info" : "warn", text: `Meilleur mois : ${monthLabel(bestMonth)} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de marge).` },
-      { kind: "note", tone: "warn", text: `Pire mois : ${monthLabel(worstMonth)} (${fmt(values[worstIdx])} FCFA de marge).${attrib(worstMonth).length ? ` Principales dépenses : ${attrib(worstMonth).map(([c, v]) => `${c} (${fmt(v)} FCFA)`).join(", ")}.` : ""}` },
+      { kind: "note", tone: values[bestIdx] >= 0 ? "info" : "warn", text: `Meilleur mois : ${monthLabel(bestMonth)} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de marge). Détail des principales transactions ci-dessous.` },
+      { kind: "table", columns: [`${monthLabel(bestMonth)} — dépenses`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(bestMonth, "Dépense").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) },
+      ...(topTxForMonth(bestMonth, "Revenu").length ? [{ kind: "table" as const, columns: [`${monthLabel(bestMonth)} — revenus`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(bestMonth, "Revenu").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) }] : []),
+      { kind: "note", tone: "warn", text: `Pire mois : ${monthLabel(worstMonth)} (${fmt(values[worstIdx])} FCFA de marge). Détail des principales transactions ci-dessous.` },
+      { kind: "table", columns: [`${monthLabel(worstMonth)} — dépenses`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(worstMonth, "Dépense").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) },
+      ...(topTxForMonth(worstMonth, "Revenu").length ? [{ kind: "table" as const, columns: [`${monthLabel(worstMonth)} — revenus`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(worstMonth, "Revenu").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) }] : []),
     ];
     if (s.capital > 0) {
       blocks.push({ kind: "kv", rows: [
@@ -6031,19 +6035,21 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         const paragraphs: string[] = [
           `Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses.`,
         ];
+        let bestMonth = "", worstMonth = "";
         if (months.length >= 2) {
           const values = months.map((m) => s.byMonth[m]);
           const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+          bestMonth = months[bestIdx]; worstMonth = months[worstIdx];
           const half = Math.floor(months.length / 2);
           const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
           paragraphs.push(`Tendance entre la première et la seconde moitié de la période : ${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%.`);
-          paragraphs.push(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
+          paragraphs.push(`Meilleur mois : ${monthLabel(bestMonth)} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(worstMonth)} (${fmt(values[worstIdx])} FCFA) — détail transaction par transaction ci-dessous.`);
         }
         if (s.capital > 0) {
           paragraphs.push(`Capital investi : ${fmt(s.capital)} FCFA (suivi sur tout l'historique). ${s.paidOff ? "Investissement entièrement remboursé." : `Il reste ${fmt(s.remaining)} FCFA à rembourser${s.monthsLeft ? `, soit environ ${s.monthsLeft} mois au rythme actuel` : ""}.`} ROI à date : ${s.roiPct?.toFixed(1)}%.`);
         }
         const topGroup = [...s.groups].sort((a, b) => b.value - a.value)[0];
-        if (topGroup) paragraphs.push(`Nature des dépenses sur la période : "${topGroup.group}" domine avec ${topGroup.pct.toFixed(0)}% (${fmt(topGroup.value)} FCFA).`);
+        if (topGroup) paragraphs.push(`Nature des dépenses sur la période : "${topGroup.group}" domine avec ${topGroup.pct.toFixed(0)}% (${fmt(topGroup.value)} FCFA) — voir le détail par catégorie ci-dessous.`);
 
         doc.setFontSize(9.5); doc.setTextColor(40, 40, 40);
         paragraphs.forEach((p) => {
@@ -6064,7 +6070,33 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
             columnStyles: { 1: { halign: "right" } },
             margin: { left: 20, right: 14 },
           });
-          y = (doc as any).lastAutoTable.finalY + 12;
+          y = (doc as any).lastAutoTable.finalY + 10;
+
+          // Détail transaction par transaction du meilleur et du pire mois — sur demande
+          // explicite de l'utilisateur (08/08/2026) : les rapports doivent aller jusqu'aux
+          // transactions individuelles, pas s'arrêter à un pourcentage agrégé.
+          const topTxForMonth = (mk: string) =>
+            transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === s.act && dateToMonthKey(t.date) === mk)
+              .sort((a, b) => b.amount - a.amount).slice(0, 6);
+          [[bestMonth, "meilleur"], [worstMonth, "pire"]].forEach(([mk, label]) => {
+            const topTx = topTxForMonth(mk);
+            if (!topTx.length) return;
+            if (y > pageHeight - 30) { doc.addPage(); y = 20; }
+            doc.setFontSize(9); doc.setTextColor(90, 100, 95); doc.setFont("helvetica", "bold");
+            doc.text(ps(`Détail des transactions — ${monthLabel(mk)} (${label} mois)`), 20, y);
+            doc.setFont("helvetica", "normal");
+            y += 5;
+            autoTable(doc, {
+              startY: y,
+              head: [["Catégorie", "Sous-catégorie", "Montant (FCFA)"]],
+              body: topTx.map((t) => [ps(t.category), ps(t.subcategory || "—"), ps(fmt(t.amount))]),
+              headStyles: { fillColor: [201, 162, 39], textColor: [26, 26, 26], fontSize: 8 },
+              styles: { fontSize: 8 },
+              columnStyles: { 2: { halign: "right" } },
+              margin: { left: 20, right: 14 },
+            });
+            y = (doc as any).lastAutoTable.finalY + 10;
+          });
         } else {
           y += 8;
         }
