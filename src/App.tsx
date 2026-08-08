@@ -1972,38 +1972,45 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
   let mk = prevMonthKey(curMonth);
   for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
 
-  const byCatMonth: Record<string, Record<string, { amount: number; day: number }>> = {};
+  // Suivi au niveau "poste" (catégorie::sous-catégorie pour Abonnements, GRUNDFOS...) —
+  // pas juste la catégorie entière. Sur demande explicite de l'utilisateur (08/08/2026) :
+  // regrouper toute la catégorie masquait le fait qu'un abonnement précis (ex: Spotify)
+  // n'était pas encore payé ce mois-ci simplement parce qu'un autre (ex: Money Coach)
+  // l'était déjà — chaque charge fixe doit être suivie et rappelée individuellement.
+  const byPosteMonth: Record<string, Record<string, { amount: number; day: number }>> = {};
   transactions.forEach((t) => {
     if (t.type !== "Dépense") return;
     const tmk = dateToMonthKey(t.date);
     if (!lookback.includes(tmk)) return;
     const day = new Date(t.date + "T00:00:00").getDate();
-    byCatMonth[t.category] = byCatMonth[t.category] || {};
-    if (!byCatMonth[t.category][tmk]) byCatMonth[t.category][tmk] = { amount: 0, day };
-    byCatMonth[t.category][tmk].amount += t.amount;
-    byCatMonth[t.category][tmk].day = Math.min(byCatMonth[t.category][tmk].day, day);
+    const poste = EXPAND_SUBCATS_FOR_CHARGES[t.category] ? `${t.category}::${t.subcategory || "(non précisé)"}` : t.category;
+    byPosteMonth[poste] = byPosteMonth[poste] || {};
+    if (!byPosteMonth[poste][tmk]) byPosteMonth[poste][tmk] = { amount: 0, day };
+    byPosteMonth[poste][tmk].amount += t.amount;
+    byPosteMonth[poste][tmk].day = Math.min(byPosteMonth[poste][tmk].day, day);
   });
 
-  // Ne retient que les catégories réellement classées "Fixe" dans Charges Fixes &
+  // Ne retient que les postes réellement classés "Fixe" dans Charges Fixes &
   // Variables (sur demande explicite de l'utilisateur, 07/08/2026) — la seule régularité
   // statistique de présence (≥4/6 mois) ne suffit pas : Vêtements, Santé ou Ajustement
   // reviennent souvent sans être des charges sûres et incompressibles.
   const windowMonths = monthsSinceInception(transactions);
   const classified = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
-  const fixedCategories = new Set(classified.rows.filter((r) => r.mode === "fixe").map((r) => r.poste.split("::")[0]));
+  const fixedPostes = new Set(classified.rows.filter((r) => r.mode === "fixe").map((r) => r.poste));
 
   const results: { category: string; monthsPresent: number; typicalDay: number; typicalAmount: number }[] = [];
-  Object.entries(byCatMonth).forEach(([cat, monthsData]) => {
-    if (!fixedCategories.has(cat)) return;
+  Object.entries(byPosteMonth).forEach(([poste, monthsData]) => {
+    if (!fixedPostes.has(poste)) return;
     const presentMonths = Object.keys(monthsData);
     if (presentMonths.length < 4) return; // pas assez régulier pour être qualifié de "périodique"
     const amounts = presentMonths.map((m) => monthsData[m].amount);
     const days = presentMonths.map((m) => monthsData[m].day);
     const typicalDay = Math.round(median(days));
     const typicalAmount = median(amounts);
-    const alreadyThisMonth = transactions.some((t) => t.type === "Dépense" && t.category === cat && dateToMonthKey(t.date) === curMonth);
+    const [cat, sub] = poste.split("::");
+    const alreadyThisMonth = transactions.some((t) => t.type === "Dépense" && dateToMonthKey(t.date) === curMonth && t.category === cat && (sub === undefined || (t.subcategory || "(non précisé)") === sub));
     if (!alreadyThisMonth && dayNum >= typicalDay - 4) {
-      results.push({ category: cat, monthsPresent: presentMonths.length, typicalDay, typicalAmount });
+      results.push({ category: poste.replace("::", " · "), monthsPresent: presentMonths.length, typicalDay, typicalAmount });
     }
   });
   return results.sort((a, b) => b.typicalAmount - a.typicalAmount).slice(0, 4);
@@ -2012,17 +2019,31 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
 // Repère, sous-catégorie par sous-catégorie, où le comportement du mois en cours
 // dévie nettement de la moyenne des 3 derniers mois — pour nommer concrètement
 // ce qui dérape (ex: "Divertissement · Alcool") plutôt que de rester générique.
-function analyzeSubcategoryDrift(transactions: Transaction[], curMonth: string, dayNum: number, daysInMonth: number) {
+function analyzeSubcategoryDrift(transactions: Transaction[], curMonth: string, dayNum: number, daysInMonth: number, chargeOverrides?: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean = true) {
   const watched = ["Divertissement", "Cadeaux", "Shopping", "Invitation", "Vêtements", "Abonnements", "Voyage", "Personnel"];
   const lookback: string[] = [];
   let mk = prevMonthKey(curMonth);
   for (let i = 0; i < 3; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
+
+  // Exclut les postes classés "Fixe" dans Charges Fixes & Variables — sur demande
+  // explicite de l'utilisateur (08/08/2026) : projeter une dépense en "rythme
+  // quotidien × jours du mois" n'a aucun sens pour un abonnement payé une seule fois
+  // par mois (Spotify, Claude, GRUNDFOS·Internet...). Ces postes-là sont déjà couverts
+  // par la détection de charges périodiques (upcoming), pas par le dérapage journalier.
+  const fixedPostes = new Set<string>();
+  if (chargeOverrides) {
+    const windowMonths = monthsSinceInception(transactions);
+    const classified = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths);
+    classified.rows.forEach((r) => { if (r.mode === "fixe") fixedPostes.add(r.poste); });
+  }
+  const isFixed = (cat: string, sub: string) => fixedPostes.has(cat) || fixedPostes.has(`${cat}::${sub}`);
 
   const results: { category: string; subcategory: string; thisMonth: number; projected: number; avgPast: number; diffPct: number }[] = [];
   watched.forEach((cat) => {
     const thisMonthTx = transactions.filter((t) => t.type === "Dépense" && t.category === cat && dateToMonthKey(t.date) === curMonth);
     const subs = Array.from(new Set(thisMonthTx.map((t) => t.subcategory || "(non précisé)")));
     subs.forEach((sub) => {
+      if (isFixed(cat, sub)) return;
       const thisAmt = thisMonthTx.filter((t) => (t.subcategory || "(non précisé)") === sub).reduce((a, t) => a + t.amount, 0);
       const pastAmts = lookback.map((m) =>
         transactions.filter((t) => t.type === "Dépense" && t.category === cat && (t.subcategory || "(non précisé)") === sub && dateToMonthKey(t.date) === m).reduce((a, t) => a + t.amount, 0)
