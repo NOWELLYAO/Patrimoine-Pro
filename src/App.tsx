@@ -5816,43 +5816,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       totRow.eachCell((c: any) => { c.font = { bold: true }; });
       [3, 4, 5].forEach((i) => { totRow.getCell(i).numFmt = "#,##0"; totRow.getCell(i).alignment = { horizontal: "right" }; });
 
-      // ===== Feuille 2 : Narratif — analyse personnalisée par activité =====
-      const ws2 = wb.addWorksheet("Narratif");
-      titleBanner(ws2, "Analyse narrative par activité");
-      ws2.columns = [{ width: 100 }];
-      let r = 4;
-      const writeParagraph = (text: string, opts: { bold?: boolean; color?: string; size?: number } = {}) => {
-        const cell = ws2.getCell(`A${r}`);
-        cell.value = text;
-        cell.font = { bold: !!opts.bold, size: opts.size || 10.5, color: { argb: opts.color || "FF1A1A1A" } };
-        cell.alignment = { wrapText: true, vertical: "top" };
-        ws2.getRow(r).height = Math.max(18, Math.ceil(text.length / 110) * 15);
-        r++;
-      };
-      stats.filter((s) => s.count > 0).forEach((s) => {
-        writeParagraph(`━━ ${s.act} ━━`, { bold: true, size: 13, color: NAVY.replace("FF", "FF") });
-        r++;
-        const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
-        if (months.length >= 2) {
-          const values = months.map((m) => s.byMonth[m]);
-          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
-          const half = Math.floor(months.length / 2);
-          const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
-          writeParagraph(`Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses, soit une marge de ${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA (${fmt(s.avgMonthly)} FCFA/mois en moyenne).`);
-          writeParagraph(`La tendance entre la première et la seconde moitié de la période est de ${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%.`);
-          writeParagraph(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
-        } else {
-          writeParagraph(`Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses, soit une marge de ${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA.`);
-        }
-        if (s.capital > 0) {
-          writeParagraph(`Capital investi : ${fmt(s.capital)} FCFA (suivi sur tout l'historique). ${s.paidOff ? "Investissement entièrement remboursé." : `Il reste ${fmt(s.remaining)} FCFA à rembourser${s.monthsLeft ? `, soit environ ${s.monthsLeft} mois au rythme actuel` : ""}.`} ROI à date : ${s.roiPct?.toFixed(1)}%.`);
-        }
-        const topGroup = [...s.groups].sort((a, b) => b.value - a.value)[0];
-        if (topGroup) writeParagraph(`Nature des dépenses sur la période : "${topGroup.group}" domine avec ${topGroup.pct.toFixed(0)}% (${fmt(topGroup.value)} FCFA).`);
-        r++;
-      });
-
-      // ===== Feuille 3 : Évolution mensuelle (les soldes, mois par mois) =====
+      // ===== Feuille 2 : Évolution mensuelle (les soldes, mois par mois) =====
       const ws3 = wb.addWorksheet("Évolution mensuelle");
       titleBanner(ws3, "Marge mensuelle par activité (soldes)");
       const allMonthsUnion = Array.from(new Set(stats.flatMap((s) => Object.keys(s.byMonth)))).sort((a, b) => monthSortKey(a) - monthSortKey(b));
@@ -5928,19 +5892,123 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
     }
   };
 
+  const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
+  const exportActivitiesNarrativePdf = async () => {
+    setPdfState("loading");
+    try {
+      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+        import(/* @vite-ignore */ "jspdf"),
+        import(/* @vite-ignore */ "jspdf-autotable"),
+      ]);
+      const autoTable = (autoTableModule as any).default || autoTableModule;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const periodLabel = periodRange ? `${monthLabel(periodRange[0])} — ${monthLabel(periodRange[1])}` : "Tout l'historique";
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ");
+
+      doc.setFillColor(26, 43, 76);
+      doc.rect(0, 0, pageWidth, 34, "F");
+      doc.setFontSize(17); doc.setTextColor(255, 255, 255);
+      doc.text("Grand Livre — Analyse narrative par activité", 14, 16);
+      doc.setFontSize(9); doc.setTextColor(200, 210, 225);
+      doc.text(ps(`Période : ${periodLabel} · Généré le ${dateLabelFull(todayISO())}`), 14, 24);
+
+      let y = 44;
+      stats.filter((s) => s.count > 0).forEach((s) => {
+        const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+
+        if (y > pageHeight - 60) { doc.addPage(); y = 20; }
+
+        doc.setFillColor(201, 162, 39);
+        doc.rect(14, y, 3, 12, "F");
+        doc.setFontSize(13); doc.setTextColor(26, 43, 76); doc.setFont("helvetica", "bold");
+        doc.text(ps(s.act), 20, y + 8.5);
+        doc.setFont("helvetica", "normal");
+        y += 18;
+
+        doc.setFillColor(245, 247, 245);
+        doc.roundedRect(14, y, pageWidth - 28, 16, 2, 2, "F");
+        doc.setFontSize(8); doc.setTextColor(90, 100, 95);
+        doc.text("MARGE (PÉRIODE)", 20, y + 6);
+        doc.setFontSize(12); doc.setTextColor(26, 26, 26); doc.setFont("helvetica", "bold");
+        doc.text(ps(`${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA  (${fmt(s.avgMonthly)} FCFA/mois en moyenne)`), 20, y + 12.5);
+        doc.setFont("helvetica", "normal");
+        y += 22;
+
+        const paragraphs: string[] = [
+          `Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses.`,
+        ];
+        if (months.length >= 2) {
+          const values = months.map((m) => s.byMonth[m]);
+          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+          const half = Math.floor(months.length / 2);
+          const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
+          paragraphs.push(`Tendance entre la première et la seconde moitié de la période : ${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%.`);
+          paragraphs.push(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
+        }
+        if (s.capital > 0) {
+          paragraphs.push(`Capital investi : ${fmt(s.capital)} FCFA (suivi sur tout l'historique). ${s.paidOff ? "Investissement entièrement remboursé." : `Il reste ${fmt(s.remaining)} FCFA à rembourser${s.monthsLeft ? `, soit environ ${s.monthsLeft} mois au rythme actuel` : ""}.`} ROI à date : ${s.roiPct?.toFixed(1)}%.`);
+        }
+        const topGroup = [...s.groups].sort((a, b) => b.value - a.value)[0];
+        if (topGroup) paragraphs.push(`Nature des dépenses sur la période : "${topGroup.group}" domine avec ${topGroup.pct.toFixed(0)}% (${fmt(topGroup.value)} FCFA).`);
+
+        doc.setFontSize(9.5); doc.setTextColor(40, 40, 40);
+        paragraphs.forEach((p) => {
+          const lines = doc.splitTextToSize(ps(p), pageWidth - 34);
+          if (y + lines.length * 5 > pageHeight - 16) { doc.addPage(); y = 20; }
+          doc.text(lines, 20, y);
+          y += lines.length * 5 + 4;
+        });
+
+        if (months.length >= 2) {
+          if (y > pageHeight - 40) { doc.addPage(); y = 20; }
+          autoTable(doc, {
+            startY: y,
+            head: [["Mois", "Marge (FCFA)"]],
+            body: months.map((m) => [monthLabel(m), ps(fmt(s.byMonth[m]))]),
+            headStyles: { fillColor: [26, 43, 76], fontSize: 8 },
+            styles: { fontSize: 8 },
+            columnStyles: { 1: { halign: "right" } },
+            margin: { left: 20, right: 14 },
+          });
+          y = (doc as any).lastAutoTable.finalY + 12;
+        } else {
+          y += 8;
+        }
+      });
+
+      doc.save(`grand-livre_narratif-activites_${todayISO()}.pdf`);
+      setPdfState("idle");
+    } catch (e) {
+      console.error(e);
+      setPdfState("error");
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <PanelWithHelp title="Rentabilité par activité" subtitle="Basée sur la catégorie de chaque transaction, pas sur le compte — l'argent circule souvent entre comptes"
         explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé."
         right={
-          <button onClick={exportActivitiesExcel} disabled={xlsState === "loading"} style={{
-            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
-            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
-            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
-          }}>
-            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
-            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={exportActivitiesExcel} disabled={xlsState === "loading"} style={{
+              display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+              border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+              color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+            }}>
+              {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+              {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+            </button>
+            <button onClick={exportActivitiesNarrativePdf} disabled={pdfState === "loading"} style={{
+              display: "flex", alignItems: "center", gap: 6, background: pdfState === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)",
+              border: `1px solid ${pdfState === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8,
+              color: pdfState === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: pdfState === "loading" ? "default" : "pointer",
+            }}>
+              {pdfState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <BookOpen size={13} />}
+              {pdfState === "loading" ? "Génération…" : pdfState === "error" ? "Réessayer" : "Rapport narratif PDF"}
+            </button>
+          </div>
         }>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {stats.map((s) => (
@@ -7764,39 +7832,7 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
       totRowC.eachCell((c: any) => { c.font = { bold: true }; });
       [2, 3, 4, 5, 6].forEach((i) => { totRowC.getCell(i).numFmt = "#,##0"; totRowC.getCell(i).alignment = { horizontal: "right" }; });
 
-      // ===== Feuille 2 : Narratif personnalisé par compte =====
-      const ws2 = wb.addWorksheet("Narratif");
-      titleBanner(ws2, "Analyse narrative par compte");
-      ws2.columns = [{ width: 100 }];
-      let r = 4;
-      const writeParagraph = (text: string, opts: { bold?: boolean; color?: string; size?: number } = {}) => {
-        const cell = ws2.getCell(`A${r}`);
-        cell.value = text;
-        cell.font = { bold: !!opts.bold, size: opts.size || 10.5, color: { argb: opts.color || "FF1A1A1A" } };
-        cell.alignment = { wrapText: true, vertical: "top" };
-        ws2.getRow(r).height = Math.max(18, Math.ceil(text.length / 110) * 15);
-        r++;
-      };
-      consoParAccount.filter((c) => c.count > 0 || c.soldeDebut !== c.soldeFin).forEach((c) => {
-        writeParagraph(`━━ ${c.account.name} ━━`, { bold: true, size: 13, color: NAVY });
-        r++;
-        const evolPct = c.soldeDebut !== 0 ? ((c.soldeFin - c.soldeDebut) / Math.abs(c.soldeDebut)) * 100 : null;
-        writeParagraph(`Sur ${periodLabel}, le solde de ce compte est passé de ${fmt(c.soldeDebut)} FCFA à ${fmt(c.soldeFin)} FCFA${evolPct !== null ? ` (${evolPct >= 0 ? "+" : ""}${evolPct.toFixed(1)}%)` : ""}.`);
-        writeParagraph(`Ce compte a reçu ${fmt(c.revenus)} FCFA et vu sortir ${fmt(c.depenses)} FCFA sur la période, pour un mouvement net de ${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA, sur ${c.count} transaction(s).`);
-        const topDep = Object.entries(c.depByCat).sort((a, b) => b[1] - a[1])[0];
-        const topRev = Object.entries(c.revByCat).sort((a, b) => b[1] - a[1])[0];
-        if (topDep) writeParagraph(`Principal poste de dépense : "${topDep[0]}" (${fmt(topDep[1])} FCFA, ${((topDep[1] / (c.depenses || 1)) * 100).toFixed(0)}% de la consommation de ce compte).`);
-        if (topRev) writeParagraph(`Principale source de revenu : "${topRev[0]}" (${fmt(topRev[1])} FCFA, ${((topRev[1] / (c.revenus || 1)) * 100).toFixed(0)}% des entrées de ce compte).`);
-        const months = Object.keys(c.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
-        if (months.length >= 2) {
-          const values = months.map((m) => c.byMonth[m]);
-          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
-          writeParagraph(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de mouvement net). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
-        }
-        r++;
-      });
-
-      // ===== Feuille 3 : Évolution mensuelle du mouvement net par compte =====
+      // ===== Feuille 2 : Évolution mensuelle du mouvement net par compte =====
       const ws3 = wb.addWorksheet("Évolution mensuelle");
       titleBanner(ws3, "Mouvement net mensuel par compte");
       const activeAccounts = consoParAccount.filter((c) => c.count > 0);
@@ -7839,6 +7875,98 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
     }
   };
 
+  const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
+  const exportComptesNarrativePdf = async () => {
+    setPdfState("loading");
+    try {
+      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+        import(/* @vite-ignore */ "jspdf"),
+        import(/* @vite-ignore */ "jspdf-autotable"),
+      ]);
+      const autoTable = (autoTableModule as any).default || autoTableModule;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const periodLabel = `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`;
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ");
+
+      doc.setFillColor(26, 43, 76);
+      doc.rect(0, 0, pageWidth, 34, "F");
+      doc.setFontSize(17); doc.setTextColor(255, 255, 255);
+      doc.text("Grand Livre — Analyse narrative par compte", 14, 16);
+      doc.setFontSize(9); doc.setTextColor(200, 210, 225);
+      doc.text(ps(`Période : ${periodLabel} · Généré le ${dateLabelFull(todayISO())}`), 14, 24);
+
+      let y = 44;
+      const active = consoParAccount.filter((c) => c.count > 0 || c.soldeDebut !== c.soldeFin);
+      active.forEach((c) => {
+        const evolPct = c.soldeDebut !== 0 ? ((c.soldeFin - c.soldeDebut) / Math.abs(c.soldeDebut)) * 100 : null;
+        const topDep = Object.entries(c.depByCat).sort((a, b) => b[1] - a[1])[0];
+        const topRev = Object.entries(c.revByCat).sort((a, b) => b[1] - a[1])[0];
+        const months = Object.keys(c.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+
+        if (y > pageHeight - 60) { doc.addPage(); y = 20; }
+
+        doc.setFillColor(201, 162, 39);
+        doc.rect(14, y, 3, 12, "F");
+        doc.setFontSize(13); doc.setTextColor(26, 43, 76); doc.setFont("helvetica", "bold");
+        doc.text(ps(c.account.name), 20, y + 8.5);
+        doc.setFont("helvetica", "normal");
+        y += 18;
+
+        doc.setFillColor(245, 247, 245);
+        doc.roundedRect(14, y, pageWidth - 28, 16, 2, 2, "F");
+        doc.setFontSize(8); doc.setTextColor(90, 100, 95);
+        doc.text("SOLDE", 20, y + 6);
+        doc.setFontSize(12); doc.setTextColor(26, 26, 26); doc.setFont("helvetica", "bold");
+        doc.text(ps(`${fmt(c.soldeDebut)} → ${fmt(c.soldeFin)} FCFA${evolPct !== null ? `  (${evolPct >= 0 ? "+" : ""}${evolPct.toFixed(1)}%)` : ""}`), 20, y + 12.5);
+        doc.setFont("helvetica", "normal");
+        y += 22;
+
+        const paragraphs: string[] = [
+          `Ce compte a reçu ${fmt(c.revenus)} FCFA et vu sortir ${fmt(c.depenses)} FCFA sur la période, pour un mouvement net de ${c.net >= 0 ? "+" : ""}${fmt(c.net)} FCFA, sur ${c.count} transaction(s).`,
+        ];
+        if (topDep) paragraphs.push(`Principal poste de dépense : "${topDep[0]}" (${fmt(topDep[1])} FCFA, ${((topDep[1] / (c.depenses || 1)) * 100).toFixed(0)}% de la consommation de ce compte).`);
+        if (topRev) paragraphs.push(`Principale source de revenu : "${topRev[0]}" (${fmt(topRev[1])} FCFA, ${((topRev[1] / (c.revenus || 1)) * 100).toFixed(0)}% des entrées de ce compte).`);
+        if (months.length >= 2) {
+          const values = months.map((m) => c.byMonth[m]);
+          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+          paragraphs.push(`Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de mouvement net). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).`);
+        }
+
+        doc.setFontSize(9.5); doc.setTextColor(40, 40, 40);
+        paragraphs.forEach((p) => {
+          const lines = doc.splitTextToSize(ps(p), pageWidth - 34);
+          if (y + lines.length * 5 > pageHeight - 16) { doc.addPage(); y = 20; }
+          doc.text(lines, 20, y);
+          y += lines.length * 5 + 4;
+        });
+
+        if (months.length >= 2) {
+          if (y > pageHeight - 40) { doc.addPage(); y = 20; }
+          autoTable(doc, {
+            startY: y,
+            head: [["Mois", "Mouvement net (FCFA)"]],
+            body: months.map((m) => [monthLabel(m), ps(fmt(c.byMonth[m]))]),
+            headStyles: { fillColor: [26, 43, 76], fontSize: 8 },
+            styles: { fontSize: 8 },
+            columnStyles: { 1: { halign: "right" } },
+            margin: { left: 20, right: 14 },
+          });
+          y = (doc as any).lastAutoTable.finalY + 12;
+        } else {
+          y += 8;
+        }
+      });
+
+      doc.save(`grand-livre_narratif-comptes_${todayISO()}.pdf`);
+      setPdfState("idle");
+    } catch (e) {
+      console.error(e);
+      setPdfState("error");
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Kpi label="Total des comptes (temps réel)" value={fmt(total)} tone={COLOR.goldSoft} icon={Wallet} />
@@ -7854,6 +7982,14 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
             }}>
               {xlsState === "loading" ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={12} />}
               {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+            </button>
+            <button onClick={exportComptesNarrativePdf} disabled={pdfState === "loading"} style={{
+              display: "flex", alignItems: "center", gap: 6, background: pdfState === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)",
+              border: `1px solid ${pdfState === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 6,
+              color: pdfState === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "6px 12px", fontSize: 11.5, cursor: pdfState === "loading" ? "default" : "pointer",
+            }}>
+              {pdfState === "loading" ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <BookOpen size={12} />}
+              {pdfState === "loading" ? "Génération…" : pdfState === "error" ? "Réessayer" : "Rapport narratif PDF"}
             </button>
             {[["1m", "1M"], ["3m", "3M"], ["6m", "6M"], ["1a", "1A"], ["tout", "Tout"]].map(([key, label]) => (
               <button key={key} onClick={() => applyPreset(key)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted, borderRadius: 6, padding: "6px 10px", fontSize: 11.5, cursor: "pointer" }}>{label}</button>
