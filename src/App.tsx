@@ -5539,15 +5539,27 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
       ];
       styleHeaderRow(ws3.getRow(1));
       const bizTx = withScope.filter((t) => t.scope === "Business").sort((a, b) => a.date.localeCompare(b.date));
+      let curBizMonth: string | null = null, bizMonthRev = 0, bizMonthDep = 0;
+      const flushBizMonthSubtotal = () => {
+        if (curBizMonth === null) return;
+        const row = ws3.addRow({ date: `Sous-total ${monthLabel(curBizMonth)}`, cat: "", sub: "", type: "", account: "", amount: bizMonthRev - bizMonthDep });
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
+        row.getCell("amount").numFmt = "#,##0"; row.getCell("amount").alignment = { horizontal: "right" };
+      };
       bizTx.forEach((t) => {
+        const tMonth = dateToMonthKey(t.date);
+        if (curBizMonth !== null && tMonth !== curBizMonth) { flushBizMonthSubtotal(); bizMonthRev = 0; bizMonthDep = 0; }
+        curBizMonth = tMonth;
+        if (t.type === "Revenu") bizMonthRev += t.amount; else bizMonthDep += t.amount;
         const row = ws3.addRow({ date: dateLabelFull(t.date), cat: t.category, sub: t.subcategory || "", type: t.type, account: t.account || "", amount: t.amount });
         row.getCell("type").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
         row.getCell("amount").font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY }, bold: true };
         row.getCell("amount").numFmt = "#,##0";
         row.getCell("amount").alignment = { horizontal: "right" };
       });
-      const totalRow = ws3.addRow({ date: "", cat: "", sub: "", type: "TOTAL", account: "", amount: bizMargin });
-      totalRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SUBTLE } }; });
+      flushBizMonthSubtotal();
+      const totalRow = ws3.addRow({ date: "", cat: "", sub: "", type: "TOTAL GÉNÉRAL", account: "", amount: bizMargin });
+      totalRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
       totalRow.getCell("amount").numFmt = "#,##0";
       totalRow.getCell("amount").alignment = { horizontal: "right" };
 
@@ -5878,6 +5890,9 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         row.getCell(7).numFmt = "#,##0"; row.getCell(7).alignment = { horizontal: "right" };
       });
       flushActSubtotal();
+      const grandTotalRow5 = ws5.addRow(["TOTAL GÉNÉRAL", "", "", "", "", "", sortedTx.reduce((a, t) => a + (t.type === "Revenu" ? t.amount : -t.amount), 0)]);
+      grandTotalRow5.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      grandTotalRow5.getCell(7).numFmt = "#,##0"; grandTotalRow5.getCell(7).alignment = { horizontal: "right" };
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -7855,12 +7870,28 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
       const headerRow4 = ws4.addRow(["Compte", "Date", "Catégorie", "Sous-catégorie", "Type", "Montant (FCFA)"]);
       styleHeaderRow(headerRow4);
       ws4.columns = [{ width: 18 }, { width: 12 }, { width: 22 }, { width: 20 }, { width: 10 }, { width: 16 }];
-      periodTx.slice().sort((a, b) => (a.account || "").localeCompare(b.account || "") || a.date.localeCompare(b.date)).forEach((t) => {
-        const row = ws4.addRow([t.account || "—", dateLabelFull(t.date), t.category, t.subcategory || "", t.type, t.amount]);
+      const sortedTx4 = periodTx.slice().sort((a, b) => (a.account || "").localeCompare(b.account || "") || a.date.localeCompare(b.date));
+      let curAccount: string | null = null, accRev = 0, accDep = 0;
+      const flushAccountSubtotal = () => {
+        if (curAccount === null) return;
+        const row = ws4.addRow([`Sous-total ${curAccount}`, "", "", "", "", accRev - accDep]);
+        row.eachCell((c: any) => { c.font = { bold: true, color: { argb: GOLD } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF232F27" } }; });
+        row.getCell(6).numFmt = "#,##0"; row.getCell(6).alignment = { horizontal: "right" };
+      };
+      sortedTx4.forEach((t) => {
+        const acc = t.account || "—";
+        if (curAccount !== null && acc !== curAccount) { flushAccountSubtotal(); accRev = 0; accDep = 0; }
+        curAccount = acc;
+        if (t.type === "Revenu") accRev += t.amount; else accDep += t.amount;
+        const row = ws4.addRow([acc, dateLabelFull(t.date), t.category, t.subcategory || "", t.type, t.amount]);
         row.getCell(5).font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
         row.getCell(6).font = { color: { argb: t.type === "Revenu" ? EMERALD : CLAY } };
         row.getCell(6).numFmt = "#,##0"; row.getCell(6).alignment = { horizontal: "right" };
       });
+      flushAccountSubtotal();
+      const grandTotalRow4 = ws4.addRow(["TOTAL GÉNÉRAL", "", "", "", "", sortedTx4.reduce((a, t) => a + (t.type === "Revenu" ? t.amount : -t.amount), 0)]);
+      grandTotalRow4.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+      grandTotalRow4.getCell(6).numFmt = "#,##0"; grandTotalRow4.getCell(6).alignment = { horizontal: "right" };
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -8994,6 +9025,9 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       r.getCell("amount").numFmt = "#,##0";
     });
     flushMonthSubtotal();
+    const grandTotalRow = wsTx.addRow({ cat: "TOTAL GÉNÉRAL", account: `Rev: ${fmt(totalRevenus)}`, amount: totalDepenses });
+    grandTotalRow.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; });
+    grandTotalRow.getCell("amount").numFmt = "#,##0";
 
     // ===== Feuille Par mois =====
     const wsMonth = wb.addWorksheet("Par mois");
