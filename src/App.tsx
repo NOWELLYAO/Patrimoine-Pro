@@ -4934,68 +4934,138 @@ function computeNetWorthReport(accounts: Account[], transactions: Transaction[])
 // mesure de la récupération. Contrairement à une lecture générique de la courbe, ceci
 // s'appuie sur les transactions réelles pour dire PRÉCISÉMENT ce qui explique chaque
 // mouvement plutôt que de lister des causes possibles.
-function generateNetWorthNarrative(fullReport: ReturnType<typeof computeNetWorthReport>, transactions: Transaction[]) {
-  const rows = fullReport.rows;
-  if (rows.length < 2) return null;
+// Moteur narratif générique dans l'esprit d'un rapport d'analyste patrimonial : phases,
+// forces/risques identifiés avec les VRAIES transactions qui les expliquent, scores de
+// diagnostic, arc narratif chronologique, synthèse — tout en prose, sans tableau. Marche
+// pour n'importe quelle série mensuelle (valeur nette, marge d'activité...) du moment
+// qu'on lui donne comment attribuer une transaction à cette série.
+function generateDeepNarrative(
+  series: { month: string; value: number }[],
+  transactions: Transaction[],
+  belongsTo: (t: Transaction) => boolean,
+  opts: { subject: string; cumulative: boolean } // cumulative=true pour une valeur nette (niveau), false pour une marge périodique (flux)
+): string[] {
+  if (series.length < 3) return [];
+  const values = series.map((r) => r.value);
+  const avg = mean(values);
+  const sd = stdev(values);
+  const cv = avg !== 0 ? Math.abs(sd / avg) * 100 : 0;
+  // Échelle de référence pour exprimer une baisse en % : jamais juste "abs(pic)", qui peut
+  // être proche de zéro (ex : une marge mensuelle qui frôle zéro un mois) et faire
+  // exploser le pourcentage à des valeurs absurdes (vu : "-4897%"). On utilise plutôt
+  // le plus grand entre le pic et la moyenne absolue de toute la série.
+  const avgAbs = mean(values.map((v) => Math.abs(v))) || 1;
 
-  // Détecte le plus grand écart sommet→creux dans une tranche de mois donnée.
-  const findMaxDrawdown = (slice: typeof rows, offset: number) => {
-    let runningPeak = slice[0]?.netWorth ?? 0, runningPeakIdx = 0;
+  const findMaxDrawdown = (slice: typeof series, offset: number) => {
+    let runningPeak = slice[0]?.value ?? 0, runningPeakIdx = 0;
     let maxDD = 0, peakIdx = 0, troughIdx = 0;
     slice.forEach((r, i) => {
-      if (r.netWorth > runningPeak) { runningPeak = r.netWorth; runningPeakIdx = i; }
-      const dd = runningPeak > 0 ? (runningPeak - r.netWorth) / runningPeak : 0;
+      if (r.value > runningPeak) { runningPeak = r.value; runningPeakIdx = i; }
+      const scaleRef = Math.max(Math.abs(runningPeak), avgAbs);
+      const dd = scaleRef !== 0 ? (runningPeak - r.value) / scaleRef : 0;
       if (dd > maxDD) { maxDD = dd; peakIdx = runningPeakIdx; troughIdx = i; }
     });
     return { maxDD, peakIdx: peakIdx + offset, troughIdx: troughIdx + offset };
   };
+  const ep1 = findMaxDrawdown(series, 0);
+  const ep2 = ep1.troughIdx < series.length - 1 ? findMaxDrawdown(series.slice(ep1.troughIdx), ep1.troughIdx) : { maxDD: 0, peakIdx: 0, troughIdx: 0 };
+  const episodes = [ep1, ep2].filter((e) => e.maxDD > 0.15 && e.troughIdx > e.peakIdx);
 
-  // Deux épisodes recherchés : le plus grand drawdown de toute l'historique, puis le
-  // plus grand drawdown survenant APRÈS que celui-ci se soit résorbé — pour ne pas
-  // rater un second choc plus récent juste parce qu'un premier, plus ancien, était
-  // proportionnellement plus important (ex : une grosse correction en 2024 peut
-  // masquer une correction plus récente et plus pertinente aujourd'hui).
-  const ep1 = findMaxDrawdown(rows, 0);
-  const ep2 = ep1.troughIdx < rows.length - 1 ? findMaxDrawdown(rows.slice(ep1.troughIdx), ep1.troughIdx) : { maxDD: 0, peakIdx: 0, troughIdx: 0 };
-  const episodes = [ep1, ep2].filter((e) => e.maxDD > 0.1 && e.troughIdx > e.peakIdx);
-
-  const attributeCategories = (peakIdx: number, troughIdx: number) => {
-    const months = rows.slice(peakIdx + 1, troughIdx + 1).map((r) => r.month);
+  const attribMonth = (mk: string, n = 2) => {
     const byCat: Record<string, number> = {};
-    transactions.forEach((t) => {
-      if (t.type === "Dépense" && months.includes(dateToMonthKey(t.date))) byCat[t.category] = (byCat[t.category] || 0) + t.amount;
-    });
-    return Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    transactions.filter((t) => t.type === "Dépense" && belongsTo(t) && dateToMonthKey(t.date) === mk)
+      .forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+    return Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, n);
   };
+  const attribRange = (fromIdx: number, toIdx: number, n = 3) => {
+    const months = series.slice(fromIdx + 1, toIdx + 1).map((r) => r.month);
+    const byCat: Record<string, number> = {};
+    transactions.filter((t) => t.type === "Dépense" && belongsTo(t) && months.includes(dateToMonthKey(t.date)))
+      .forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+    return Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, n);
+  };
+  const fmtCats = (cats: [string, number][]) => cats.map(([c, v]) => `${c} (${fmt(v)} FCFA)`).join(", ");
 
-  const lastRow = rows[rows.length - 1];
-  const totalGrowth = lastRow.netWorth - (rows[0].netWorth - rows[0].delta);
-  const durationMonths = rows.length;
+  const half = Math.floor(series.length / 2);
+  const firstHalfAvg = mean(values.slice(0, half || 1));
+  const secondHalfAvg = mean(values.slice(half));
+  const trendPct = firstHalfAvg !== 0 ? ((secondHalfAvg - firstHalfAvg) / Math.abs(firstHalfAvg)) * 100 : 0;
+  const lastVal = values[values.length - 1];
+  const first = series[0], last = series[series.length - 1];
 
-  const blocks: CalcDetailBlock[] = [];
+  // Scores de diagnostic (0-10), calibrés par seuils simples plutôt que par formule
+  // opaque — pour rester lisibles et défendables.
+  const growthScore = trendPct >= 50 ? 9 : trendPct >= 20 ? 7 : trendPct >= 0 ? 5 : trendPct >= -20 ? 3 : 1;
+  const stabilityScore = cv < 20 ? 9 : cv < 50 ? 7 : cv < 100 ? 5 : cv < 200 ? 3 : 1;
+  const maxDD = episodes.length ? Math.max(...episodes.map((e) => e.maxDD)) : 0;
+  const riskScore = maxDD < 0.1 ? 9 : maxDD < 0.25 ? 7 : maxDD < 0.5 ? 5 : maxDD < 0.75 ? 3 : 1;
+  const recentTrend = values.length >= 4 ? mean(values.slice(-2)) - mean(values.slice(-4, -2)) : 0;
+  const momentumScore = avg !== 0 ? (recentTrend / Math.abs(avg) > 0.3 ? 9 : recentTrend / Math.abs(avg) > 0 ? 6 : recentTrend / Math.abs(avg) > -0.3 ? 4 : 2) : 5;
 
-  blocks.push({ kind: "kv", rows: [
-    { label: `Évolution sur ${durationMonths} mois (${monthLabel(rows[0].month)} → ${monthLabel(lastRow.month)})`, value: `${fmt(rows[0].netWorth - rows[0].delta)} → ${fmt(lastRow.netWorth)} FCFA`, strong: true },
-    { label: "Progression totale", value: `${totalGrowth >= 0 ? "+" : ""}${fmt(totalGrowth)} FCFA` },
-  ] });
+  const out: string[] = [];
+  const unit = opts.cumulative ? "niveau" : "flux mensuel";
 
-  if (episodes.length) {
-    episodes.forEach((ep, i) => {
-      const peakRow = rows[ep.peakIdx], troughRow = rows[ep.troughIdx];
-      const cats = attributeCategories(ep.peakIdx, ep.troughIdx);
-      const recoveryRow = i === episodes.length - 1 ? lastRow : rows[episodes[i + 1].peakIdx];
-      const recoveryPct = troughRow.netWorth > 0 ? ((recoveryRow.netWorth - troughRow.netWorth) / troughRow.netWorth) * 100 : 0;
-      const stillBelowPeakPct = peakRow.netWorth > 0 ? ((peakRow.netWorth - recoveryRow.netWorth) / peakRow.netWorth) * 100 : 0;
-      blocks.push({ kind: "note", tone: "warn", text: `Baisse n°${i + 1} : de ${fmt(peakRow.netWorth)} FCFA (${monthLabel(peakRow.month)}) à ${fmt(troughRow.netWorth)} FCFA (${monthLabel(troughRow.month)}), soit ${(ep.maxDD * 100).toFixed(1)}%. Ce n'est pas nécessairement une perte — voir l'attribution ci-dessous pour ce qui l'explique réellement.` });
-      if (cats.length) blocks.push({ kind: "table", columns: [`Catégorie (baisse n°${i + 1})`, "Montant (FCFA)"], rows: cats.map(([c, v]) => [c, fmt(v)]) });
-      blocks.push({ kind: "kv", rows: [
-        { label: `Récupération depuis ce creux (${monthLabel(troughRow.month)} → ${monthLabel(recoveryRow.month)})`, value: `${recoveryPct >= 0 ? "+" : ""}${recoveryPct.toFixed(1)}%`, strong: true, warn: recoveryPct < 0 },
-        { label: "Écart restant sous ce sommet-là", value: `${stillBelowPeakPct > 0 ? "-" : "+"}${Math.abs(stillBelowPeakPct).toFixed(1)}%` },
-      ] });
-    });
-  } else {
-    blocks.push({ kind: "note", tone: "info", text: "Pas de baisse significative détectée (>10% depuis un sommet) sur cette période — la trajectoire est restée globalement haussière ou stable." });
+  out.push(`De ${monthLabel(first.month)} à ${monthLabel(last.month)}, ${opts.subject} passe de ${fmt(first.value)} à ${fmt(last.value)} FCFA. ${opts.cumulative ? "La tendance de fond" : "Le rythme moyen"} sur la première moitié de la période (${fmt(firstHalfAvg)} FCFA) évolue vers ${fmt(secondHalfAvg)} FCFA sur la seconde (${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(0)}%).`);
+
+  // 🟢 Points forts
+  const strengths: string[] = [];
+  if (trendPct > 10) strengths.push(`tendance structurelle ${opts.cumulative ? "haussière" : "en amélioration"} sur la période`);
+  if (episodes.length && episodes[episodes.length - 1].troughIdx < series.length - 1) {
+    const lastEp = episodes[episodes.length - 1];
+    const recoveryEndIdx = series.length - 1;
+    const recoveryScaleRef = Math.max(Math.abs(series[lastEp.troughIdx].value), avgAbs);
+    const recoveryPct = recoveryScaleRef !== 0 ? ((series[recoveryEndIdx].value - series[lastEp.troughIdx].value) / recoveryScaleRef) * 100 : 0;
+    if (recoveryPct > 20) strengths.push(`récupération de ${recoveryPct >= 0 ? "+" : ""}${recoveryPct.toFixed(0)}% depuis le creux de ${monthLabel(series[lastEp.troughIdx].month)}`);
   }
+  if (opts.cumulative && lastVal > avg) strengths.push(`niveau actuel (${fmt(lastVal)} FCFA) au-dessus de la moyenne de la période (${fmt(avg)} FCFA)`);
+  if (strengths.length) out.push(`🟢 Points forts : ${strengths.join(" ; ")}.`);
+
+  // 🔴 Points de vigilance, avec attribution réelle du principal choc
+  const risks: string[] = [];
+  if (cv > 50) risks.push(`amplitude des fluctuations élevée (variation d'environ ${cv.toFixed(0)}% autour de la moyenne)`);
+  episodes.forEach((ep, i) => {
+    const cats = attribRange(ep.peakIdx, ep.troughIdx);
+    const causeText = cats.length ? ` — expliqué principalement par ${fmtCats(cats)}` : "";
+    const swingAbs = series[ep.peakIdx].value - series[ep.troughIdx].value;
+    risks.push(`baisse de ${fmt(swingAbs)} FCFA (${(ep.maxDD * 100).toFixed(0)}% de la moyenne des mouvements) entre ${monthLabel(series[ep.peakIdx].month)} et ${monthLabel(series[ep.troughIdx].month)}${causeText}`);
+  });
+  if (risks.length) out.push(`🔴 Points de vigilance : ${risks.join(" ; ")}.`);
+
+  // Arc narratif chronologique — un repère tous les 2-3 mois avec la transaction/catégorie
+  // dominante de ce mois-là quand elle est notable, pour ancrer le récit dans le réel.
+  const arcStep = Math.max(1, Math.ceil(series.length / 6));
+  const arcParts: string[] = [];
+  for (let i = 0; i < series.length; i += arcStep) {
+    const r = series[i];
+    const top = attribMonth(r.month, 1);
+    const isEpisodePoint = episodes.some((e) => e.peakIdx === i || e.troughIdx === i);
+    arcParts.push(`${monthLabel(r.month)} : ${fmt(r.value)} FCFA${top.length && (isEpisodePoint || i === series.length - 1) ? ` (dominé par ${top[0][0]}, ${fmt(top[0][1])} FCFA)` : ""}`);
+  }
+  out.push(`Ce que racontent les chiffres, mois par mois : ${arcParts.join(" → ")}.`);
+
+  // Diagnostic chiffré
+  out.push(`Diagnostic — Tendance : ${growthScore}/10 · Stabilité : ${stabilityScore}/10 · Maîtrise des baisses : ${riskScore}/10 · Dynamique récente : ${momentumScore}/10.`);
+
+  // Synthèse
+  const overallTone = growthScore >= 6 && riskScore <= 4 ? "Une vraie capacité de progression, mais encore avec des à-coups importants à maîtriser."
+    : growthScore >= 6 && riskScore >= 6 ? "Une progression solide et raisonnablement maîtrisée."
+    : growthScore < 4 && riskScore <= 4 ? "Une tendance qui mérite une vraie attention, avec des baisses marquées."
+    : "Une situation globalement stable, sans dynamique forte dans un sens ou l'autre.";
+  out.push(`En résumé : ${overallTone}`);
+
+  return out;
+}
+
+
+function generateNetWorthNarrative(fullReport: ReturnType<typeof computeNetWorthReport>, transactions: Transaction[]) {
+  const rows = fullReport.rows;
+  if (rows.length < 3) return null;
+
+  const series = rows.map((r) => ({ month: r.month, value: r.netWorth }));
+  const paragraphs = generateDeepNarrative(series, transactions, () => true, { subject: "la valeur nette", cumulative: true });
+  if (!paragraphs.length) return null;
+
+  const blocks: CalcDetailBlock[] = paragraphs.map((p) => ({ kind: "note", tone: p.startsWith("🔴") ? "warn" : "info", text: p }));
 
   // Meilleur et pire mois individuels, avec leur vraie explication (déjà calculée par
   // computeNetWorthReport à partir des transactions réelles de ce mois).
@@ -5006,10 +5076,11 @@ function generateNetWorthNarrative(fullReport: ReturnType<typeof computeNetWorth
     { label: "Explication", value: fullReport.worst.explanation.replace(/\.$/, "") },
   ] });
 
+  const lastRow = rows[rows.length - 1];
   return {
     title: "Analyse de la courbe de valeur nette",
-    headline: `${fmt(lastRow.netWorth)} FCFA${episodes.length ? ` · ${episodes.length} baisse(s) notable(s) détectée(s)` : ""}`,
-    formula: "Détection automatique des principaux écarts sommet→creux, attribués aux vraies catégories de transactions de la période concernée",
+    headline: `${fmt(lastRow.netWorth)} FCFA`,
+    formula: "Analyse narrative : phases, forces/risques attribués aux vraies transactions, scores de diagnostic",
     blocks,
   };
 }
@@ -5768,31 +5839,11 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
     const s = stats.find((x) => x.act === act);
     if (!s) return null;
     const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
-    if (months.length < 2) return null;
-    const values = months.map((m) => s.byMonth[m]);
-    const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
-    const bestMonth = months[bestIdx], worstMonth = months[worstIdx];
-    // Détail transaction par transaction du mois (pas un agrégat par catégorie) — pour
-    // voir exactement ce qui compose le mois, sur demande explicite de l'utilisateur
-    // (08/08/2026) : "je veux des explicatifs qui vont jusqu'au détail des transactions".
-    const topTxForMonth = (mk: string, type: "Dépense" | "Revenu") =>
-      transactions.filter((t) => t.type === type && activityFor(t.category) === act && dateToMonthKey(t.date) === mk)
-        .sort((a, b) => b.amount - a.amount).slice(0, 5);
-    const half = Math.floor(months.length / 2);
-    const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
-    const blocks: CalcDetailBlock[] = [
-      { kind: "kv", rows: [
-        { label: "Marge totale", value: `${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA`, strong: true },
-        { label: "Marge moyenne/mois", value: `${fmt(s.avgMonthly)} FCFA` },
-        { label: "Tendance (1ère moitié → 2e moitié)", value: `${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%`, warn: trendPct < -20 },
-      ] },
-      { kind: "note", tone: values[bestIdx] >= 0 ? "info" : "warn", text: `Meilleur mois : ${monthLabel(bestMonth)} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de marge). Détail des principales transactions ci-dessous.` },
-      { kind: "table", columns: [`${monthLabel(bestMonth)} — dépenses`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(bestMonth, "Dépense").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) },
-      ...(topTxForMonth(bestMonth, "Revenu").length ? [{ kind: "table" as const, columns: [`${monthLabel(bestMonth)} — revenus`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(bestMonth, "Revenu").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) }] : []),
-      { kind: "note", tone: "warn", text: `Pire mois : ${monthLabel(worstMonth)} (${fmt(values[worstIdx])} FCFA de marge). Détail des principales transactions ci-dessous.` },
-      { kind: "table", columns: [`${monthLabel(worstMonth)} — dépenses`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(worstMonth, "Dépense").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) },
-      ...(topTxForMonth(worstMonth, "Revenu").length ? [{ kind: "table" as const, columns: [`${monthLabel(worstMonth)} — revenus`, "Sous-catégorie", "Montant (FCFA)"], rows: topTxForMonth(worstMonth, "Revenu").map((t) => [t.category, t.subcategory || "—", fmt(t.amount)]) }] : []),
-    ];
+    if (months.length < 3) return null;
+    const series = months.map((m) => ({ month: m, value: s.byMonth[m] }));
+    const paragraphs = generateDeepNarrative(series, transactions, (t) => activityFor(t.category) === act, { subject: `la marge de ${act}`, cumulative: false });
+    if (!paragraphs.length) return null;
+    const blocks: CalcDetailBlock[] = paragraphs.map((p) => ({ kind: "note", tone: p.startsWith("🔴") ? "warn" : "info", text: p }));
     if (s.capital > 0) {
       blocks.push({ kind: "kv", rows: [
         { label: "Capital investi", value: `${fmt(s.capital)} FCFA` },
@@ -6013,6 +6064,8 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       let y = 44;
       stats.filter((s) => s.count > 0).forEach((s) => {
         const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+        const series = months.map((m) => ({ month: m, value: s.byMonth[m] }));
+        const paragraphs = generateDeepNarrative(series, transactions, (t) => activityFor(t.category) === s.act, { subject: `la marge de ${s.act}`, cumulative: false });
 
         if (y > pageHeight - 60) { doc.addPage(); y = 20; }
 
@@ -6032,74 +6085,22 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         doc.setFont("helvetica", "normal");
         y += 22;
 
-        const paragraphs: string[] = [
-          `Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses.`,
-        ];
-        let bestMonth = "", worstMonth = "";
-        if (months.length >= 2) {
-          const values = months.map((m) => s.byMonth[m]);
-          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
-          bestMonth = months[bestIdx]; worstMonth = months[worstIdx];
-          const half = Math.floor(months.length / 2);
-          const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
-          paragraphs.push(`Tendance entre la première et la seconde moitié de la période : ${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%.`);
-          paragraphs.push(`Meilleur mois : ${monthLabel(bestMonth)} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(worstMonth)} (${fmt(values[worstIdx])} FCFA) — détail transaction par transaction ci-dessous.`);
-        }
+        const allParagraphs: string[] = [`Sur ${periodLabel}, ${s.act} a généré ${fmt(s.revenus)} FCFA de revenus pour ${fmt(s.depenses)} FCFA de dépenses.`, ...paragraphs];
         if (s.capital > 0) {
-          paragraphs.push(`Capital investi : ${fmt(s.capital)} FCFA (suivi sur tout l'historique). ${s.paidOff ? "Investissement entièrement remboursé." : `Il reste ${fmt(s.remaining)} FCFA à rembourser${s.monthsLeft ? `, soit environ ${s.monthsLeft} mois au rythme actuel` : ""}.`} ROI à date : ${s.roiPct?.toFixed(1)}%.`);
+          allParagraphs.push(`Capital investi : ${fmt(s.capital)} FCFA (suivi sur tout l'historique). ${s.paidOff ? "Investissement entièrement remboursé." : `Il reste ${fmt(s.remaining)} FCFA à rembourser${s.monthsLeft ? `, soit environ ${s.monthsLeft} mois au rythme actuel` : ""}.`} ROI à date : ${s.roiPct?.toFixed(1)}%.`);
         }
-        const topGroup = [...s.groups].sort((a, b) => b.value - a.value)[0];
-        if (topGroup) paragraphs.push(`Nature des dépenses sur la période : "${topGroup.group}" domine avec ${topGroup.pct.toFixed(0)}% (${fmt(topGroup.value)} FCFA) — voir le détail par catégorie ci-dessous.`);
 
         doc.setFontSize(9.5); doc.setTextColor(40, 40, 40);
-        paragraphs.forEach((p) => {
+        allParagraphs.forEach((p) => {
+          const isFlag = p.startsWith("🟢") || p.startsWith("🔴");
+          if (isFlag) doc.setFont("helvetica", "bold"); else doc.setFont("helvetica", "normal");
           const lines = doc.splitTextToSize(ps(p), pageWidth - 34);
           if (y + lines.length * 5 > pageHeight - 16) { doc.addPage(); y = 20; }
           doc.text(lines, 20, y);
-          y += lines.length * 5 + 4;
+          y += lines.length * 5 + 5;
         });
-
-        if (months.length >= 2) {
-          if (y > pageHeight - 40) { doc.addPage(); y = 20; }
-          autoTable(doc, {
-            startY: y,
-            head: [["Mois", "Marge (FCFA)"]],
-            body: months.map((m) => [monthLabel(m), ps(fmt(s.byMonth[m]))]),
-            headStyles: { fillColor: [26, 43, 76], fontSize: 8 },
-            styles: { fontSize: 8 },
-            columnStyles: { 1: { halign: "right" } },
-            margin: { left: 20, right: 14 },
-          });
-          y = (doc as any).lastAutoTable.finalY + 10;
-
-          // Détail transaction par transaction du meilleur et du pire mois — sur demande
-          // explicite de l'utilisateur (08/08/2026) : les rapports doivent aller jusqu'aux
-          // transactions individuelles, pas s'arrêter à un pourcentage agrégé.
-          const topTxForMonth = (mk: string) =>
-            transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === s.act && dateToMonthKey(t.date) === mk)
-              .sort((a, b) => b.amount - a.amount).slice(0, 6);
-          [[bestMonth, "meilleur"], [worstMonth, "pire"]].forEach(([mk, label]) => {
-            const topTx = topTxForMonth(mk);
-            if (!topTx.length) return;
-            if (y > pageHeight - 30) { doc.addPage(); y = 20; }
-            doc.setFontSize(9); doc.setTextColor(90, 100, 95); doc.setFont("helvetica", "bold");
-            doc.text(ps(`Détail des transactions — ${monthLabel(mk)} (${label} mois)`), 20, y);
-            doc.setFont("helvetica", "normal");
-            y += 5;
-            autoTable(doc, {
-              startY: y,
-              head: [["Catégorie", "Sous-catégorie", "Montant (FCFA)"]],
-              body: topTx.map((t) => [ps(t.category), ps(t.subcategory || "—"), ps(fmt(t.amount))]),
-              headStyles: { fillColor: [201, 162, 39], textColor: [26, 26, 26], fontSize: 8 },
-              styles: { fontSize: 8 },
-              columnStyles: { 2: { halign: "right" } },
-              margin: { left: 20, right: 14 },
-            });
-            y = (doc as any).lastAutoTable.finalY + 10;
-          });
-        } else {
-          y += 8;
-        }
+        doc.setFont("helvetica", "normal");
+        y += 6;
       });
 
       doc.save(`grand-livre_narratif-activites_${todayISO()}.pdf`);
