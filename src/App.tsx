@@ -2813,6 +2813,12 @@ function DeltaRow({ label, val, inverse = false }: { label: string; val: number 
 // FLUX TAB (Sankey + Heatmap)
 // ============================================================
 function FluxTab({ filtered }: { filtered: any[] }) {
+  const [fluxNarrativeOpen, setFluxNarrativeOpen] = useState(false);
+  const byMonthNonProd = useMemo(() => {
+    const m: Record<string, number> = {};
+    filtered.filter((t) => t.type === "Dépense" && t.group === "Non-productif").forEach((t) => { m[t.month] = (m[t.month] || 0) + t.amount; });
+    return Object.keys(m).sort((a, b) => monthSortKey(a) - monthSortKey(b)).map((k) => ({ key: k, label: monthLabel(k), value: m[k] }));
+  }, [filtered]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <PanelWithHelp title="Flux Revenus → Dépenses" subtitle="Comment le revenu de la période se répartit entre les groupes de dépenses et le solde"
@@ -2820,9 +2826,33 @@ function FluxTab({ filtered }: { filtered: any[] }) {
         <FlowDiagram filtered={filtered} />
       </PanelWithHelp>
       <PanelWithHelp title="Calendrier d'intensité — dépenses non-productives" subtitle="Repérer les mois et saisons à risque"
-        explain="Chaque case représente un mois. Plus la couleur est intense (vert → or → rouge), plus les dépenses non-productives (cadeaux, sorties, shopping) ont été élevées ce mois-là. Pratique pour repérer des périodes récurrentes à risque — fêtes de fin d'année, rentrée scolaire, anniversaires groupés…">
+        explain="Chaque case représente un mois. Plus la couleur est intense (vert → or → rouge), plus les dépenses non-productives (cadeaux, sorties, shopping) ont été élevées ce mois-là. Pratique pour repérer des périodes récurrentes à risque — fêtes de fin d'année, rentrée scolaire, anniversaires groupés…"
+        right={
+          byMonthNonProd.length >= 2 && (
+            <button onClick={() => setFluxNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <BookOpen size={13} /> Rapport détaillé
+            </button>
+          )
+        }>
         <HeatmapCalendar filtered={filtered} />
       </PanelWithHelp>
+      {fluxNarrativeOpen && (() => {
+        const values = byMonthNonProd.map((m) => m.value);
+        const avg = mean(values);
+        const hot = [...byMonthNonProd].sort((a, b) => b.value - a.value).slice(0, 3);
+        const attrib = (mk: string) => {
+          const byCat: Record<string, number> = {};
+          filtered.filter((t) => t.type === "Dépense" && t.group === "Non-productif" && t.month === mk).forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+          return Object.entries(byCat).sort((a: any, b: any) => b[1] - a[1]).slice(0, 4);
+        };
+        const blocks: CalcDetailBlock[] = [
+          { kind: "kv", rows: [{ label: "Moyenne mensuelle (Non-productif)", value: `${fmt(avg)} FCFA`, strong: true }] },
+        ];
+        hot.forEach((m) => blocks.push({ kind: "note", tone: m.value > avg * 1.3 ? "warn" : "info", text: `${m.label} : ${fmt(m.value)} FCFA. Répartition : ${attrib(m.key).map(([c, v]: any) => `${c} ${fmt(v)} FCFA`).join(", ")}.` }));
+        return <CalcDetailSheet open={fluxNarrativeOpen} onClose={() => setFluxNarrativeOpen(false)}
+          title="Calendrier d'intensité — analyse détaillée" headline={`Moyenne ${fmt(avg)} FCFA/mois`}
+          formula="Mois les plus intenses en dépenses Non-productif, attribués aux catégories qui les expliquent" blocks={blocks} />;
+      })()}
     </div>
   );
 }
@@ -2834,6 +2864,7 @@ function FluxTab({ filtered }: { filtered: any[] }) {
 function MensuelTab({ filtered }: { filtered: any[] }) {
   const [sortKey, setSortKey] = useState<"mois" | "revenus" | "depenses" | "solde" | "nonProd">("mois");
   const [sortDir, setSortDir] = useState<1 | -1>(-1);
+  const [mensuelNarrativeOpen, setMensuelNarrativeOpen] = useState(false);
 
   const rows = useMemo(() => {
     const m: Record<string, { revenus: number; depenses: number; nonProd: number }> = {};
@@ -2863,7 +2894,14 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <PanelWithHelp title="Revenus, dépenses et solde par mois" subtitle="Cliquer sur une colonne pour trier"
-        explain="La ligne dorée (Solde net) trace la différence revenus−dépenses de chaque mois : au-dessus de zéro, le mois est excédentaire. La ligne rouge pointillée (Non-productif) montre le poids des dépenses sans retour (cadeaux, sorties…) — si elle suit de près ou dépasse le solde net, c'est souvent le premier poste à réduire pour améliorer l'épargne.">
+        explain="La ligne dorée (Solde net) trace la différence revenus−dépenses de chaque mois : au-dessus de zéro, le mois est excédentaire. La ligne rouge pointillée (Non-productif) montre le poids des dépenses sans retour (cadeaux, sorties…) — si elle suit de près ou dépasse le solde net, c'est souvent le premier poste à réduire pour améliorer l'épargne."
+        right={
+          chartData.length >= 2 && (
+            <button onClick={() => setMensuelNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <BookOpen size={13} /> Rapport détaillé
+            </button>
+          )
+        }>
         {chartData.length ? (
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={chartData} margin={{ left: 0, right: 10, top: 10 }}>
@@ -2905,6 +2943,32 @@ function MensuelTab({ filtered }: { filtered: any[] }) {
           </table>
         </div>
       </Panel>
+      {mensuelNarrativeOpen && (() => {
+        const values = chartData.map((r) => r.solde);
+        const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+        const deficits = chartData.filter((r) => r.solde < 0);
+        const half = Math.floor(chartData.length / 2);
+        const firstHalfAvg = mean(values.slice(0, half || 1));
+        const secondHalfAvg = mean(values.slice(half));
+        const attrib = (mk: string) => {
+          const byCat: Record<string, number> = {};
+          filtered.filter((t) => t.type === "Dépense" && t.month === mk).forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+          return Object.entries(byCat).sort((a: any, b: any) => b[1] - a[1]).slice(0, 4);
+        };
+        const blocks: CalcDetailBlock[] = [
+          { kind: "kv", rows: [
+            { label: "Solde total sur la période", value: `${fmt(totals.solde)} FCFA`, strong: true, warn: totals.solde < 0 },
+            { label: "Mois en déficit", value: `${deficits.length} / ${chartData.length}`, warn: deficits.length > chartData.length / 3 },
+            { label: "Tendance du solde (1ère moitié → 2e moitié)", value: `${fmt(firstHalfAvg)} → ${fmt(secondHalfAvg)} FCFA/mois` },
+          ] },
+          { kind: "note", tone: "info", text: `Meilleur mois : ${chartData[bestIdx]?.label} (solde +${fmt(values[bestIdx])} FCFA).` },
+          { kind: "note", tone: "warn", text: `Pire mois : ${chartData[worstIdx]?.label} (solde ${fmt(values[worstIdx])} FCFA).${attrib(chartData[worstIdx]?.mois).length ? ` Principales dépenses ce mois-là : ${attrib(chartData[worstIdx]?.mois).map(([c, v]: any) => `${c} (${fmt(v)} FCFA)`).join(", ")}.` : ""}` },
+        ];
+        if (deficits.length) blocks.push({ kind: "table", columns: ["Mois en déficit", "Solde (FCFA)"], rows: deficits.map((r) => [r.label, fmt(r.solde)]) });
+        return <CalcDetailSheet open={mensuelNarrativeOpen} onClose={() => setMensuelNarrativeOpen(false)}
+          title="Rapport mensuel — analyse détaillée" headline={`${fmt(totals.solde)} FCFA de solde cumulé sur ${chartData.length} mois`}
+          formula="Mois triés par solde net ; attribution du pire mois aux catégories qui l'expliquent" blocks={blocks} />;
+      })()}
     </div>
   );
 }
@@ -3495,10 +3559,25 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
   const [groupDetailKey, setGroupDetailKey] = useState<Group | null>(null);
   const buildGroupDetail = (g: Group) => {
     const c = cards.find((x) => x.group === g)!;
+    const items = dep.filter((t) => t.group === g);
+    const byMonthG: Record<string, number> = {};
+    items.forEach((t) => { byMonthG[t.month] = (byMonthG[t.month] || 0) + t.amount; });
+    const months = Object.keys(byMonthG).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+    const values = months.map((m) => byMonthG[m]);
+    const half = Math.floor(months.length / 2);
+    const trendPct = months.length >= 2 && mean(values.slice(0, half || 1)) > 0
+      ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / mean(values.slice(0, half || 1))) * 100 : 0;
+    const blocks: CalcDetailBlock[] = [
+      { kind: "table" as const, columns: ["Catégorie", "Montant (FCFA)", "%"], rows: c.allCats.map(([name, val]) => [name, fmt(val), `${(val / c.value * 100).toFixed(1)}%`]) },
+    ];
+    if (months.length >= 2) {
+      blocks.push({ kind: "kv", rows: [{ label: "Tendance (1ère moitié → 2e moitié de la période)", value: `${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%`, warn: g !== "Productif" && trendPct > 20, strong: true }] });
+      blocks.push({ kind: "table", columns: ["Mois", "Montant (FCFA)"], rows: months.map((m, i) => [monthLabel(m), fmt(values[i])]) });
+    }
     return {
       title: g, headline: `${fmt(c.value)} FCFA · ${c.pct.toFixed(1)}%`,
       formula: `Somme des dépenses classées "${g}" — ${c.count} transactions`,
-      blocks: [{ kind: "table" as const, columns: ["Catégorie", "Montant (FCFA)", "%"], rows: c.allCats.map(([name, val]) => [name, fmt(val), `${(val / c.value * 100).toFixed(1)}%`]) }],
+      blocks,
     };
   };
 
@@ -3575,7 +3654,45 @@ function GroupesTab({ filtered }: { filtered: any[] }) {
 // ============================================================
 // COMPARATIF ANNUEL TAB
 // ============================================================
+// Compare les deux années les plus récentes (en moyenne mensuelle, pour rester juste
+// même si l'une des deux est partielle) et attribue l'écart aux catégories qui ont le
+// plus contribué à la hausse ou à la baisse — pas juste "2025 vs 2026", mais "pourquoi".
+function generateYearComparisonNarrative(yearTotals: { year: string; dep: number; rev: number; depPerMonth: number; revPerMonth: number }[], byYearCategory: Record<string, Record<string, number>>, monthCounts: Record<string, number>) {
+  if (yearTotals.length < 2) return null;
+  const prev = yearTotals[yearTotals.length - 2], cur = yearTotals[yearTotals.length - 1];
+  const depChangePct = prev.depPerMonth > 0 ? ((cur.depPerMonth - prev.depPerMonth) / prev.depPerMonth) * 100 : 0;
+  const revChangePct = prev.revPerMonth > 0 ? ((cur.revPerMonth - prev.revPerMonth) / prev.revPerMonth) * 100 : 0;
+
+  const catDeltas = Object.entries(byYearCategory).map(([cat, byYear]) => {
+    const prevPerMonth = (byYear[prev.year] || 0) / (monthCounts[prev.year] || 1);
+    const curPerMonth = (byYear[cur.year] || 0) / (monthCounts[cur.year] || 1);
+    return { cat, delta: curPerMonth - prevPerMonth, prevPerMonth, curPerMonth };
+  }).filter((d) => Math.abs(d.delta) > 1000);
+  const risers = catDeltas.filter((d) => d.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, 4);
+  const fallers = catDeltas.filter((d) => d.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 4);
+
+  const blocks: CalcDetailBlock[] = [
+    { kind: "kv", rows: [
+      { label: `Dépense moyenne/mois ${prev.year} → ${cur.year}`, value: `${fmt(prev.depPerMonth)} → ${fmt(cur.depPerMonth)} FCFA`, strong: true },
+      { label: "Variation", value: `${depChangePct >= 0 ? "+" : ""}${depChangePct.toFixed(1)}%`, warn: depChangePct > 15 },
+      { label: `Revenu moyen/mois ${prev.year} → ${cur.year}`, value: `${fmt(prev.revPerMonth)} → ${fmt(cur.revPerMonth)} FCFA` },
+      { label: "Variation", value: `${revChangePct >= 0 ? "+" : ""}${revChangePct.toFixed(1)}%` },
+    ] },
+  ];
+  if (risers.length) blocks.push({ kind: "table", columns: ["Catégorie en hausse", `${prev.year}/mois`, `${cur.year}/mois`], rows: risers.map((r) => [r.cat, fmt(r.prevPerMonth), fmt(r.curPerMonth)]) });
+  if (fallers.length) blocks.push({ kind: "table", columns: ["Catégorie en baisse", `${prev.year}/mois`, `${cur.year}/mois`], rows: fallers.map((r) => [r.cat, fmt(r.prevPerMonth), fmt(r.curPerMonth)]) });
+
+  return {
+    title: `Comparatif ${prev.year} → ${cur.year}`,
+    headline: `Dépenses ${depChangePct >= 0 ? "+" : ""}${depChangePct.toFixed(1)}% · Revenus ${revChangePct >= 0 ? "+" : ""}${revChangePct.toFixed(1)}%`,
+    formula: "Moyennes mensuelles (pas les totaux bruts, pour rester juste même avec une année partielle) ; catégories triées par écart de moyenne mensuelle",
+    blocks,
+  };
+}
+
+
 function ComparatifTab({ transactions, categoryGroups }: { transactions: Transaction[]; categoryGroups: Record<string, Group> }) {
+  const [yearNarrativeOpen, setYearNarrativeOpen] = useState(false);
   const years = Array.from(new Set(transactions.map((t) => t.date.slice(0, 4)))).sort();
   const monthCounts: Record<string, number> = {};
   years.forEach((y) => {
@@ -3611,7 +3728,12 @@ function ComparatifTab({ transactions, categoryGroups }: { transactions: Transac
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <Panel title="Comparatif annuel — moyenne mensuelle" subtitle="2024 et 2026 sont des années partielles ; la comparaison se fait donc par moyenne mensuelle, pas par total brut">
+      <Panel title="Comparatif annuel — moyenne mensuelle" subtitle="2024 et 2026 sont des années partielles ; la comparaison se fait donc par moyenne mensuelle, pas par total brut"
+        right={years.length >= 2 && (
+          <button onClick={() => setYearNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
+            <BookOpen size={13} /> Rapport détaillé
+          </button>
+        )}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
           {yearTotals.map((y) => (
             <div key={y.year} style={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: 16 }}>
@@ -3639,6 +3761,10 @@ function ComparatifTab({ transactions, categoryGroups }: { transactions: Transac
           </BarChart>
         </ResponsiveContainer>
       </PanelWithHelp>
+      {yearNarrativeOpen && (() => {
+        const d = generateYearComparisonNarrative(yearTotals, byYearCategory, monthCounts);
+        return d ? <CalcDetailSheet open={yearNarrativeOpen} onClose={() => setYearNarrativeOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
+      })()}
     </div>
   );
 }
@@ -3659,6 +3785,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   const prevMonth = idxLast > 0 ? allMonths[idxLast - 1] : lastMonth;
 
   const [granularity, setGranularity] = useState<"mois" | "jour">("mois");
+  const [comparateurNarrativeOpen, setComparateurNarrativeOpen] = useState(false);
 
   const [aFrom, setAFrom] = useState(prevMonth);
   const [aTo, setATo] = useState(prevMonth);
@@ -3837,7 +3964,12 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
         </ResponsiveContainer>
       </PanelWithHelp>
 
-      <Panel title="Catégories qui ont le plus évolué" subtitle="Triées par variation absolue entre A et B">
+      <Panel title="Catégories qui ont le plus évolué" subtitle="Triées par variation absolue entre A et B"
+        right={
+          <button onClick={() => setComparateurNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
+            <BookOpen size={13} /> Rapport détaillé
+          </button>
+        }>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {catRows.map((r) => (
             <div key={r.cat} style={{ display: "flex", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -3853,6 +3985,22 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
           {!catRows.length && <EmptyState text="Aucune dépense sur ces deux périodes." />}
         </div>
       </Panel>
+      {comparateurNarrativeOpen && (() => {
+        const depDelta = pctDelta(A.depenses, B.depenses);
+        const revDelta = pctDelta(A.revenus, B.revenus);
+        const blocks: CalcDetailBlock[] = [
+          { kind: "kv", rows: [
+            { label: `Dépenses A (${labelA}) → B (${labelB})`, value: `${fmt(A.depenses)} → ${fmt(B.depenses)} FCFA`, strong: true },
+            { label: "Variation", value: `${depDelta >= 0 ? "+" : ""}${depDelta.toFixed(1)}%`, warn: depDelta > 20 },
+            { label: `Revenus A → B`, value: `${fmt(A.revenus)} → ${fmt(B.revenus)} FCFA` },
+            { label: "Variation", value: `${revDelta >= 0 ? "+" : ""}${revDelta.toFixed(1)}%` },
+          ] },
+          { kind: "table", columns: ["Catégorie", `A (${labelA})`, `B (${labelB})`, "Écart"], rows: catRows.slice(0, 10).map((r) => [r.cat, fmt(r.a), fmt(r.b), `${r.delta >= 0 ? "+" : ""}${fmt(r.delta)}`]) },
+        ];
+        return <CalcDetailSheet open={comparateurNarrativeOpen} onClose={() => setComparateurNarrativeOpen(false)}
+          title="Comparatif détaillé" headline={`${depDelta >= 0 ? "+" : ""}${depDelta.toFixed(1)}% de dépenses entre A et B`}
+          formula="Catégories triées par écart absolu entre les deux périodes choisies" blocks={blocks} />;
+      })()}
     </div>
   );
 }
@@ -4245,10 +4393,66 @@ function trailingRange(allMonths: string[], n: number): [string, string] {
   return [from, cur];
 }
 
+// Analyse narrative pour une catégorie/sous-catégorie donnée : détecte les mois qui
+// s'écartent nettement de la moyenne (pics et creux), les attribue aux transactions
+// individuelles qui les expliquent, et mesure la tendance de fond (première moitié de
+// la période vs seconde moitié) plutôt que de se contenter d'un total.
+function generateCategoryNarrative(byMonth: { key: string; label: string; value: number }[], catTxAll: Transaction[], category: string, subcategory: string, type: TxType) {
+  const nonZero = byMonth.filter((m) => m.value > 0);
+  if (nonZero.length < 2) return null;
+  const vals = byMonth.map((m) => m.value);
+  const avg = mean(vals);
+  const sd = stdev(vals);
+
+  const spikes = byMonth.filter((m) => m.value > avg + sd * 0.8 && m.value > 0).sort((a, b) => b.value - a.value).slice(0, 3);
+  const lows = byMonth.filter((m) => m.value > 0 && m.value < avg - sd * 0.8).sort((a, b) => a.value - b.value).slice(0, 2);
+
+  const txForMonth = (mk: string) => catTxAll.filter((t) => dateToMonthKey(t.date) === mk);
+  const topTxIn = (mk: string) => txForMonth(mk).sort((a, b) => b.amount - a.amount).slice(0, 3);
+
+  const half = Math.floor(byMonth.length / 2);
+  const firstHalfAvg = half > 0 ? mean(vals.slice(0, half)) : 0;
+  const secondHalfAvg = byMonth.length - half > 0 ? mean(vals.slice(half)) : 0;
+  const trendPct = firstHalfAvg > 0 ? ((secondHalfAvg - firstHalfAvg) / firstHalfAvg) * 100 : 0;
+
+  const total = vals.reduce((a, v) => a + v, 0);
+  const blocks: CalcDetailBlock[] = [
+    { kind: "kv", rows: [
+      { label: `Total sur la période (${byMonth.length} mois)`, value: `${fmt(total)} FCFA`, strong: true },
+      { label: "Moyenne mensuelle", value: `${fmt(avg)} FCFA` },
+      { label: `Tendance (1ère moitié → 2e moitié de la période)`, value: `${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%`, warn: type === "Dépense" ? trendPct > 15 : trendPct < -15 },
+    ] },
+  ];
+
+  if (spikes.length) {
+    spikes.forEach((s) => {
+      const top = topTxIn(s.key);
+      blocks.push({ kind: "note", tone: "warn", text: `${s.label} : ${fmt(s.value)} FCFA, nettement au-dessus de la moyenne (${fmt(avg)} FCFA).${top.length ? ` Principales transactions ce mois-là : ${top.map((t) => `${t.subcategory ? `${t.subcategory} ` : ""}${fmt(t.amount)} FCFA${t.payee ? ` (${t.payee})` : ""}`).join(", ")}.` : ""}` });
+    });
+  }
+  if (lows.length) {
+    lows.forEach((l) => {
+      blocks.push({ kind: "note", tone: "info", text: `${l.label} : ${fmt(l.value)} FCFA, nettement en dessous de la moyenne — mois calme pour cette catégorie.` });
+    });
+  }
+  if (!spikes.length && !lows.length) {
+    blocks.push({ kind: "note", tone: "info", text: "Pas de mois qui s'écarte nettement de la moyenne — comportement régulier sur cette période." });
+  }
+
+  return {
+    title: `${category}${subcategory ? ` · ${subcategory}` : ""}`,
+    headline: `${fmt(total)} FCFA sur ${byMonth.length} mois`,
+    formula: "Mois détectés comme pics/creux si l'écart à la moyenne dépasse 0,8× l'écart-type ; tendance = 1ère moitié vs 2e moitié de la période affichée",
+    blocks,
+  };
+}
+
+
 function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navContext }: {
   transactions: Transaction[]; categoryGroups: Record<string, Group>; allMonths: string[]; navContext?: { tab: Tab; data: any } | null;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [catNarrativeOpen, setCatNarrativeOpen] = useState(false);
   const [type, setType] = useState<TxType>("Dépense");
   const [category, setCategory] = useState(() => defaultQuickCategory(transactions, "Dépense"));
   const [subcategory, setSubcategory] = useState("");
@@ -4363,6 +4567,9 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navConte
                 }}>{ty}</button>
               ))}
             </div>
+            <button onClick={() => setCatNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 16, color: COLOR.goldSoft, padding: "7px 16px", fontSize: 12.5, cursor: "pointer" }}>
+              <BookOpen size={13} /> Rapport détaillé
+            </button>
             <button onClick={() => setPickerOpen(true)} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, color: COLOR.goldSoft, padding: "7px 16px", fontSize: 12.5, cursor: "pointer" }}>
               Changer
             </button>
@@ -4429,6 +4636,10 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navConte
           )}
         </div>
       </Panel>
+      {catNarrativeOpen && (() => {
+        const d = generateCategoryNarrative(byMonth, catTxAll, category, subcategory, type);
+        return d ? <CalcDetailSheet open={catNarrativeOpen} onClose={() => setCatNarrativeOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
+      })()}
     </div>
   );
 }
@@ -4438,6 +4649,7 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navConte
 // ENVELOPPES TAB (avec alertes)
 // ============================================================
 function EnveloppesTab({ filtered, cap, setCap }: { filtered: any[]; cap: number; setCap: (n: number) => void }) {
+  const [envNarrativeOpen, setEnvNarrativeOpen] = useState(false);
   const envCats = ["Cadeaux", "Divertissement", "Invitation"];
   const byMonth = useMemo(() => {
     const m: Record<string, number> = {};
@@ -4493,7 +4705,14 @@ function EnveloppesTab({ filtered, cap, setCap }: { filtered: any[]; cap: number
           </div>
         ))}
       </div>
-      <Panel title="Rythme de l'enveloppe dans le temps" subtitle="Total mensuel vs plafond">
+      <Panel title="Rythme de l'enveloppe dans le temps" subtitle="Total mensuel vs plafond"
+        right={
+          byMonth.length >= 2 && (
+            <button onClick={() => setEnvNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <BookOpen size={13} /> Rapport détaillé
+            </button>
+          )
+        }>
         {byMonth.length ? (
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={byMonth} margin={{ left: 0, right: 10, top: 10 }}>
@@ -4509,6 +4728,25 @@ function EnveloppesTab({ filtered, cap, setCap }: { filtered: any[]; cap: number
           </ResponsiveContainer>
         ) : <EmptyState />}
       </Panel>
+      {envNarrativeOpen && (() => {
+        const overages = byMonth.filter((m) => m.total > cap);
+        const attrib = (mk: string) => {
+          const byCat: Record<string, number> = {};
+          filtered.filter((t: any) => t.type === "Dépense" && envCats.includes(t.category) && t.month === mk).forEach((t: any) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+          return Object.entries(byCat).sort((a: any, b: any) => b[1] - a[1]);
+        };
+        const blocks: CalcDetailBlock[] = [
+          { kind: "kv", rows: [
+            { label: "Plafond mensuel", value: `${fmt(cap)} FCFA` },
+            { label: "Mois où le plafond a été dépassé", value: `${overages.length} / ${byMonth.length}`, warn: overages.length > byMonth.length / 3, strong: true },
+          ] },
+        ];
+        overages.forEach((m) => blocks.push({ kind: "note", tone: "warn", text: `${m.mois} : ${fmt(m.total)} FCFA (dépassement de ${fmt(m.total - cap)} FCFA). Répartition : ${attrib(m.key).map(([c, v]: any) => `${c} ${fmt(v)} FCFA`).join(", ")}.` }));
+        if (!overages.length) blocks.push({ kind: "note", tone: "info", text: "Aucun dépassement détecté sur la période affichée — l'enveloppe est restée sous contrôle." });
+        return <CalcDetailSheet open={envNarrativeOpen} onClose={() => setEnvNarrativeOpen(false)}
+          title="Enveloppe — analyse détaillée" headline={`${overages.length} dépassement(s) sur ${byMonth.length} mois`}
+          formula="Cadeaux + Divertissement + Invitation, comparés au plafond mensuel" blocks={blocks} />;
+      })()}
     </div>
   );
 }
@@ -4667,6 +4905,92 @@ function computeNetWorthReport(accounts: Account[], transactions: Transaction[])
   const worst = rows.reduce((a, b) => (b.delta < a.delta ? b : a), rows[0]);
 
   return { rows, depTx, revTx, best, worst };
+}
+
+// Analyse narrative de la courbe de valeur nette dans l'esprit d'un rapport d'analyste
+// patrimonial : détection du plus grand drawdown (creux après un sommet), attribution
+// aux vraies catégories de transactions qui l'expliquent (pas des suppositions), et
+// mesure de la récupération. Contrairement à une lecture générique de la courbe, ceci
+// s'appuie sur les transactions réelles pour dire PRÉCISÉMENT ce qui explique chaque
+// mouvement plutôt que de lister des causes possibles.
+function generateNetWorthNarrative(fullReport: ReturnType<typeof computeNetWorthReport>, transactions: Transaction[]) {
+  const rows = fullReport.rows;
+  if (rows.length < 2) return null;
+
+  // Détecte le plus grand écart sommet→creux dans une tranche de mois donnée.
+  const findMaxDrawdown = (slice: typeof rows, offset: number) => {
+    let runningPeak = slice[0]?.netWorth ?? 0, runningPeakIdx = 0;
+    let maxDD = 0, peakIdx = 0, troughIdx = 0;
+    slice.forEach((r, i) => {
+      if (r.netWorth > runningPeak) { runningPeak = r.netWorth; runningPeakIdx = i; }
+      const dd = runningPeak > 0 ? (runningPeak - r.netWorth) / runningPeak : 0;
+      if (dd > maxDD) { maxDD = dd; peakIdx = runningPeakIdx; troughIdx = i; }
+    });
+    return { maxDD, peakIdx: peakIdx + offset, troughIdx: troughIdx + offset };
+  };
+
+  // Deux épisodes recherchés : le plus grand drawdown de toute l'historique, puis le
+  // plus grand drawdown survenant APRÈS que celui-ci se soit résorbé — pour ne pas
+  // rater un second choc plus récent juste parce qu'un premier, plus ancien, était
+  // proportionnellement plus important (ex : une grosse correction en 2024 peut
+  // masquer une correction plus récente et plus pertinente aujourd'hui).
+  const ep1 = findMaxDrawdown(rows, 0);
+  const ep2 = ep1.troughIdx < rows.length - 1 ? findMaxDrawdown(rows.slice(ep1.troughIdx), ep1.troughIdx) : { maxDD: 0, peakIdx: 0, troughIdx: 0 };
+  const episodes = [ep1, ep2].filter((e) => e.maxDD > 0.1 && e.troughIdx > e.peakIdx);
+
+  const attributeCategories = (peakIdx: number, troughIdx: number) => {
+    const months = rows.slice(peakIdx + 1, troughIdx + 1).map((r) => r.month);
+    const byCat: Record<string, number> = {};
+    transactions.forEach((t) => {
+      if (t.type === "Dépense" && months.includes(dateToMonthKey(t.date))) byCat[t.category] = (byCat[t.category] || 0) + t.amount;
+    });
+    return Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  };
+
+  const lastRow = rows[rows.length - 1];
+  const totalGrowth = lastRow.netWorth - (rows[0].netWorth - rows[0].delta);
+  const durationMonths = rows.length;
+
+  const blocks: CalcDetailBlock[] = [];
+
+  blocks.push({ kind: "kv", rows: [
+    { label: `Évolution sur ${durationMonths} mois (${monthLabel(rows[0].month)} → ${monthLabel(lastRow.month)})`, value: `${fmt(rows[0].netWorth - rows[0].delta)} → ${fmt(lastRow.netWorth)} FCFA`, strong: true },
+    { label: "Progression totale", value: `${totalGrowth >= 0 ? "+" : ""}${fmt(totalGrowth)} FCFA` },
+  ] });
+
+  if (episodes.length) {
+    episodes.forEach((ep, i) => {
+      const peakRow = rows[ep.peakIdx], troughRow = rows[ep.troughIdx];
+      const cats = attributeCategories(ep.peakIdx, ep.troughIdx);
+      const recoveryRow = i === episodes.length - 1 ? lastRow : rows[episodes[i + 1].peakIdx];
+      const recoveryPct = troughRow.netWorth > 0 ? ((recoveryRow.netWorth - troughRow.netWorth) / troughRow.netWorth) * 100 : 0;
+      const stillBelowPeakPct = peakRow.netWorth > 0 ? ((peakRow.netWorth - recoveryRow.netWorth) / peakRow.netWorth) * 100 : 0;
+      blocks.push({ kind: "note", tone: "warn", text: `Baisse n°${i + 1} : de ${fmt(peakRow.netWorth)} FCFA (${monthLabel(peakRow.month)}) à ${fmt(troughRow.netWorth)} FCFA (${monthLabel(troughRow.month)}), soit ${(ep.maxDD * 100).toFixed(1)}%. Ce n'est pas nécessairement une perte — voir l'attribution ci-dessous pour ce qui l'explique réellement.` });
+      if (cats.length) blocks.push({ kind: "table", columns: [`Catégorie (baisse n°${i + 1})`, "Montant (FCFA)"], rows: cats.map(([c, v]) => [c, fmt(v)]) });
+      blocks.push({ kind: "kv", rows: [
+        { label: `Récupération depuis ce creux (${monthLabel(troughRow.month)} → ${monthLabel(recoveryRow.month)})`, value: `${recoveryPct >= 0 ? "+" : ""}${recoveryPct.toFixed(1)}%`, strong: true, warn: recoveryPct < 0 },
+        { label: "Écart restant sous ce sommet-là", value: `${stillBelowPeakPct > 0 ? "-" : "+"}${Math.abs(stillBelowPeakPct).toFixed(1)}%` },
+      ] });
+    });
+  } else {
+    blocks.push({ kind: "note", tone: "info", text: "Pas de baisse significative détectée (>10% depuis un sommet) sur cette période — la trajectoire est restée globalement haussière ou stable." });
+  }
+
+  // Meilleur et pire mois individuels, avec leur vraie explication (déjà calculée par
+  // computeNetWorthReport à partir des transactions réelles de ce mois).
+  blocks.push({ kind: "kv", rows: [
+    { label: `Meilleur mois : ${monthLabel(fullReport.best.month)}`, value: `+${fmt(fullReport.best.delta)} FCFA` },
+    { label: "Explication", value: fullReport.best.explanation.replace(/\.$/, "") },
+    { label: `Pire mois : ${monthLabel(fullReport.worst.month)}`, value: `${fmt(fullReport.worst.delta)} FCFA`, warn: true },
+    { label: "Explication", value: fullReport.worst.explanation.replace(/\.$/, "") },
+  ] });
+
+  return {
+    title: "Analyse de la courbe de valeur nette",
+    headline: `${fmt(lastRow.netWorth)} FCFA${episodes.length ? ` · ${episodes.length} baisse(s) notable(s) détectée(s)` : ""}`,
+    formula: "Détection automatique des principaux écarts sommet→creux, attribués aux vraies catégories de transactions de la période concernée",
+    blocks,
+  };
 }
 
 
@@ -4871,6 +5195,7 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
 // ============================================================
 function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[]; transactions: Transaction[]; filters: Filters }) {
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
+  const [narrativeSheetOpen, setNarrativeSheetOpen] = useState(false);
   // La série complète est toujours calculée sur tout l'historique — un cumul de valeur
   // nette n'a de sens que reconstruit depuis le début. Seul l'AFFICHAGE (tableau, graphique,
   // KPI, plus grosses transactions) respecte ensuite le filtre "Du mois / Au mois" global,
@@ -4963,14 +5288,22 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
       <PanelWithHelp title="Valeur nette mensuelle" subtitle={`${monthLabel(filters.from)} — ${monthLabel(filters.to)} · explication automatique de chaque variation`}
         explain="Pour chaque mois, la variation de valeur nette est expliquée par le principal poste de dépense et le principal poste de revenu de ce mois-là — pas une simple observation du solde, mais une tentative de dire concrètement ce qui l'a fait bouger."
         right={
-          <button onClick={exportNetWorthExcel} disabled={xlsState === "loading"} style={{
-            display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
-            border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
-            color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
-          }}>
-            {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
-            {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setNarrativeSheetOpen(true)} style={{
+              display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
+              borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer",
+            }}>
+              <BookOpen size={13} /> Rapport détaillé
+            </button>
+            <button onClick={exportNetWorthExcel} disabled={xlsState === "loading"} style={{
+              display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
+              border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
+              color: xlsState === "error" ? COLOR.claySoft : COLOR.emeraldSoft, padding: "7px 14px", fontSize: 12.5, cursor: xlsState === "loading" ? "default" : "pointer",
+            }}>
+              {xlsState === "loading" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />}
+              {xlsState === "loading" ? "Génération…" : xlsState === "error" ? "Réessayer" : "Rapport Excel"}
+            </button>
+          </div>
         }>
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={report.rows.map((r) => ({ mois: monthLabel(r.month), valeur: r.netWorth }))} margin={{ left: 0, right: 10, top: 10 }}>
@@ -5042,6 +5375,10 @@ function NetWorthTab({ accounts, transactions, filters }: { accounts: Account[];
           </div>
         </Panel>
       </div>
+      {narrativeSheetOpen && (() => {
+        const d = generateNetWorthNarrative(fullReport, transactions);
+        return d ? <CalcDetailSheet open={narrativeSheetOpen} onClose={() => setNarrativeSheetOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
+      })()}
     </div>
   );
 }
@@ -5112,6 +5449,7 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
   setCategoryScope: (s: Record<string, Scope>) => void; allCategories: string[];
 }) {
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
+  const [bizNarrativeOpen, setBizNarrativeOpen] = useState(false);
   const withScope = transactions.map((t) => ({ ...t, scope: categoryScope[t.category] || "Personnel" }));
   const bizRev = withScope.filter((t) => t.scope === "Business" && t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const bizDep = withScope.filter((t) => t.scope === "Business" && t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
@@ -5230,7 +5568,7 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Revenus Business (total)" value={fmt(bizRev)} tone={COLOR.emeraldSoft} icon={Briefcase} />
         <Kpi label="Dépenses Business (total)" value={fmt(bizDep)} tone={COLOR.claySoft} icon={Briefcase} />
-        <Kpi label="Marge Business" value={fmt(bizMargin)} tone={bizMargin >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} />
+        <Kpi label="Marge Business" value={fmt(bizMargin)} tone={bizMargin >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Wallet} onDetailClick={() => setBizNarrativeOpen(true)} />
       </div>
       <Panel title="Compte de résultat — activité (GRUNDFOS / ECO PUMP AFRIK / INVEST SGO)" subtitle="Isole l'activité commerciale du budget personnel"
         right={
@@ -5262,6 +5600,27 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
           ))}
         </div>
       </Panel>
+      {bizNarrativeOpen && (() => {
+        const byMonth: Record<string, number> = {};
+        withScope.forEach((t) => { if (t.scope === "Business") { const mk = dateToMonthKey(t.date); byMonth[mk] = (byMonth[mk] || 0) + (t.type === "Revenu" ? t.amount : -t.amount); } });
+        const months = Object.keys(byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+        const values = months.map((m) => byMonth[m]);
+        const blocks: CalcDetailBlock[] = [
+          { kind: "kv", rows: [
+            { label: "Marge Business totale", value: `${bizMargin >= 0 ? "+" : ""}${fmt(bizMargin)} FCFA`, strong: true },
+            { label: "Revenus Business", value: `${fmt(bizRev)} FCFA` },
+            { label: "Dépenses Business", value: `${fmt(bizDep)} FCFA` },
+          ] },
+        ];
+        if (months.length >= 2) {
+          const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+          blocks.push({ kind: "table", columns: ["Mois", "Marge Business (FCFA)"], rows: months.map((m, i) => [monthLabel(m), fmt(values[i])]) });
+          blocks.push({ kind: "note", tone: values[worstIdx] < 0 ? "warn" : "info", text: `Meilleur mois : ${monthLabel(months[bestIdx])} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA). Pire mois : ${monthLabel(months[worstIdx])} (${fmt(values[worstIdx])} FCFA).` });
+        }
+        return <CalcDetailSheet open={bizNarrativeOpen} onClose={() => setBizNarrativeOpen(false)}
+          title="Business — analyse détaillée" headline={`${bizMargin >= 0 ? "+" : ""}${fmt(bizMargin)} FCFA de marge`}
+          formula="Marge Business = Revenus − Dépenses des catégories classées Business, mois par mois" blocks={blocks} />;
+      })()}
     </div>
   );
 }
@@ -5331,9 +5690,45 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         .filter((g) => g.value > 0);
       if (groupTotals["Non classifié"] > 0) groups.push({ group: "Non classifié", value: groupTotals["Non classifié"], pct: (groupTotals["Non classifié"] / depTotal) * 100 });
 
-      return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length, groups };
+      return { act, revenus, depenses, marge, capital, roiPct, remaining, monthsLeft, paidOff, avgMonthly, count: tx.length, groups, byMonth };
     }).filter((s) => s.count > 0 || s.capital > 0);
   }, [transactions, categoryActivity, activityCapital, allActivities]);
+
+  const [activityNarrativeKey, setActivityNarrativeKey] = useState<string | null>(null);
+  const buildActivityNarrative = (act: string) => {
+    const s = stats.find((x) => x.act === act);
+    if (!s) return null;
+    const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
+    if (months.length < 2) return null;
+    const values = months.map((m) => s.byMonth[m]);
+    const bestIdx = values.indexOf(Math.max(...values)), worstIdx = values.indexOf(Math.min(...values));
+    const bestMonth = months[bestIdx], worstMonth = months[worstIdx];
+    const attrib = (mk: string) => {
+      const byCat: Record<string, number> = {};
+      transactions.filter((t) => t.type === "Dépense" && activityFor(t.category) === act && dateToMonthKey(t.date) === mk)
+        .forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+      return Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    };
+    const half = Math.floor(months.length / 2);
+    const trendPct = mean(values.slice(0, half || 1)) !== 0 ? ((mean(values.slice(half)) - mean(values.slice(0, half || 1))) / Math.abs(mean(values.slice(0, half || 1)))) * 100 : 0;
+    const blocks: CalcDetailBlock[] = [
+      { kind: "kv", rows: [
+        { label: "Marge totale", value: `${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA`, strong: true },
+        { label: "Marge moyenne/mois", value: `${fmt(s.avgMonthly)} FCFA` },
+        { label: "Tendance (1ère moitié → 2e moitié)", value: `${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(1)}%`, warn: trendPct < -20 },
+      ] },
+      { kind: "note", tone: values[bestIdx] >= 0 ? "info" : "warn", text: `Meilleur mois : ${monthLabel(bestMonth)} (${values[bestIdx] >= 0 ? "+" : ""}${fmt(values[bestIdx])} FCFA de marge).` },
+      { kind: "note", tone: "warn", text: `Pire mois : ${monthLabel(worstMonth)} (${fmt(values[worstIdx])} FCFA de marge).${attrib(worstMonth).length ? ` Principales dépenses : ${attrib(worstMonth).map(([c, v]) => `${c} (${fmt(v)} FCFA)`).join(", ")}.` : ""}` },
+    ];
+    if (s.capital > 0) {
+      blocks.push({ kind: "kv", rows: [
+        { label: "Capital investi", value: `${fmt(s.capital)} FCFA` },
+        { label: "ROI à date", value: `${s.roiPct?.toFixed(1)}%`, warn: (s.roiPct || 0) < 0 },
+        { label: s.paidOff ? "Statut" : "Reste à rembourser", value: s.paidOff ? "Capital remboursé" : `${fmt(s.remaining)} FCFA${s.monthsLeft ? ` (~${s.monthsLeft} mois au rythme actuel)` : ""}` },
+      ] });
+    }
+    return { title: `Activité — ${act}`, headline: `${s.marge >= 0 ? "+" : ""}${fmt(s.marge)} FCFA de marge`, formula: "Marge = Revenus − Dépenses de l'activité, mois par mois", blocks };
+  };
 
   // Catégories qui composent un groupe (Nécessaire/Productif/Non-productif) au sein d'une activité donnée.
   const catsForGroup = (act: string, group: Group) => {
@@ -5485,6 +5880,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
                 <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, color: COLOR.ink, display: "flex", alignItems: "center", gap: 8 }}>
                   <Rocket size={15} color={COLOR.goldSoft} /> {s.act}
                   <span style={{ fontSize: 11, color: COLOR.inkMuted, fontFamily: "'IBM Plex Mono', monospace" }}>({s.count} tx)</span>
+                  <CalcDetailIcon onClick={() => setActivityNarrativeKey(s.act)} />
                 </div>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 700, color: s.marge >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>
                   {s.marge >= 0 ? "+" : ""}{fmt(s.marge)} FCFA
@@ -5670,6 +6066,10 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
         onConfirm={() => { if (confirmDeleteId) removeTx(confirmDeleteId); setConfirmDeleteId(null); }}
         onCancel={() => setConfirmDeleteId(null)}
       />
+      {activityNarrativeKey && (() => {
+        const d = buildActivityNarrative(activityNarrativeKey);
+        return d ? <CalcDetailSheet open={!!activityNarrativeKey} onClose={() => setActivityNarrativeKey(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} /> : null;
+      })()}
     </div>
   );
 }
@@ -7326,6 +7726,7 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
   transactions: Transaction[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void; allCategories: string[];
 }) {
   const [adding, setAdding] = useState(false);
+  const [budgetNarrativeOpen, setBudgetNarrativeOpen] = useState(false);
   const [form, setForm] = useState({ category: categoriesForType(transactions, "Dépense")[0] || "", amount: 100000, rollover: false });
   const [transferFrom, setTransferFrom] = useState<string | null>(null);
   const [transferAmount, setTransferAmount] = useState(0);
@@ -7355,9 +7756,16 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Budgets par catégorie" subtitle="Limite mensuelle, reconduction du solde non utilisé, transfert entre catégories"
         right={
-          <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
-            {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Nouveau budget"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            {budgets.length > 0 && (
+              <button onClick={() => setBudgetNarrativeOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 6, color: COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+                <BookOpen size={13} /> Rapport détaillé
+              </button>
+            )}
+            <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Nouveau budget"}
+            </button>
+          </div>
         }>
         {adding && (
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
@@ -7415,6 +7823,24 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
           {!budgets.length && <EmptyState text="Aucun budget défini." />}
         </div>
       </Panel>
+      {budgetNarrativeOpen && (() => {
+        const monthsBack: string[] = [];
+        { let mk = currentMonth; for (let i = 0; i < 6; i++) { monthsBack.push(mk); mk = prevMonthKey(mk); } }
+        const rows = budgets.map((b) => {
+          const overMonths = monthsBack.filter((m) => spentInMonth(b.category, m) > b.amount);
+          const avgSpent = mean(monthsBack.map((m) => spentInMonth(b.category, m)));
+          return { cat: b.category, limit: b.amount, avgSpent, overCount: overMonths.length, overRate: (overMonths.length / monthsBack.length) * 100 };
+        }).sort((a, b) => b.overRate - a.overRate);
+        const blocks: CalcDetailBlock[] = [
+          { kind: "table", columns: ["Catégorie budgétée", "Limite (FCFA)", "Dépense moy./mois", "Mois dépassés (sur 6)"], rows: rows.map((r) => [r.cat, fmt(r.limit), fmt(r.avgSpent), `${r.overCount}/6`]) },
+        ];
+        const worst = rows[0];
+        if (worst && worst.overCount > 0) blocks.push({ kind: "note", tone: "warn", text: `"${worst.cat}" est le budget le plus souvent dépassé (${worst.overCount} mois sur 6) — dépense moyenne ${fmt(worst.avgSpent)} FCFA/mois pour une limite de ${fmt(worst.limit)} FCFA.` });
+        else blocks.push({ kind: "note", tone: "info", text: "Aucun budget dépassé sur les 6 derniers mois." });
+        return <CalcDetailSheet open={budgetNarrativeOpen} onClose={() => setBudgetNarrativeOpen(false)}
+          title="Budgets — analyse détaillée" headline={`${rows.filter((r) => r.overCount > 0).length} budget(s) dépassé(s) au moins une fois sur 6 mois`}
+          formula="Comparaison dépense réelle vs limite, mois par mois, sur les 6 derniers mois" blocks={blocks} />;
+      })()}
     </div>
   );
 }
