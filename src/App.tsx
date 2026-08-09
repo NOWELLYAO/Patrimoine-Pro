@@ -674,8 +674,22 @@ function PanelWithHelp({ title, subtitle, explain, right, children, style = {}, 
   );
 }
 
-function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint, onDetailClick }: {
-  label: string; value: string; suffix?: string; tone?: string; icon?: any; hint?: string; onDetailClick?: () => void;
+// Calcule le badge de comparaison "vs période passée" — flèche + mot, avec un sens qui
+// s'inverse selon l'indicateur : pour un solde/revenu, monter est bon ; pour une dépense,
+// monter est mauvais. Seuils : ±5% = stable, ±5-20% = bon/à surveiller, >20% = excellent/mauvais.
+function compareLabel(diffPct: number | null, goodDirection: "up" | "down"): { text: string; tone: string; Icon: any } | null {
+  if (diffPct === null) return null;
+  const effective = goodDirection === "up" ? diffPct : -diffPct; // ramène toujours à "positif = amélioration"
+  if (Math.abs(diffPct) < 5) return { text: "Stable", tone: COLOR.inkMuted, Icon: Minus };
+  if (effective >= 20) return { text: "Excellent", tone: COLOR.emeraldSoft, Icon: diffPct >= 0 ? TrendingUp : TrendingDown };
+  if (effective >= 5) return { text: "Bon", tone: COLOR.emeraldSoft, Icon: diffPct >= 0 ? TrendingUp : TrendingDown };
+  if (effective <= -20) return { text: "Mauvais", tone: COLOR.claySoft, Icon: diffPct >= 0 ? TrendingUp : TrendingDown };
+  return { text: "À surveiller", tone: COLOR.goldSoft, Icon: diffPct >= 0 ? TrendingUp : TrendingDown };
+}
+
+function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint, hintBadge, onDetailClick }: {
+  label: string; value: string; suffix?: string; tone?: string; icon?: any; hint?: string;
+  hintBadge?: { text: string; tone: string; Icon: any } | null; onDetailClick?: () => void;
 }) {
   return (
     <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "16px 18px", flex: 1, minWidth: 190 }}>
@@ -685,7 +699,16 @@ function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint
       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, fontWeight: 600, color: tone }}>
         {value}<span style={{ fontSize: 11.5, color: COLOR.inkMuted, marginLeft: 6 }}>{suffix}</span>
       </div>
-      {hint && <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 6 }}>{hint}</div>}
+      {hint && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+          {hintBadge && (
+            <span style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 700, color: hintBadge.tone, background: `${hintBadge.tone}22`, borderRadius: 20, padding: "2px 7px" }}>
+              <hintBadge.Icon size={11} /> {hintBadge.text}
+            </span>
+          )}
+          <div style={{ fontSize: 11, color: COLOR.inkMuted }}>{hint}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -9530,11 +9553,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} />
-        <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} />
-        <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} />
-        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} />
-        <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} />
+        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} />
+        <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
+        <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.solde, monthLastMonthTotals.solde), "up")} />
+        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} />
+        <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
