@@ -9467,6 +9467,26 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const weekTotals = sumFor((t) => t.date >= weekAgo && t.date <= today);
   const monthTotals = sumFor((t) => dateToMonthKey(t.date) === currentMonthKey);
 
+  // Comparaisons "vs même période le mois dernier" — même logique que la carte déjà
+  // existante dans le Conseiller quotidien ("Mieux que le mois dernier à la même date"),
+  // reprise ici pour chacun des 5 indicateurs, sur demande explicite de l'utilisateur.
+  const prevMonthKeyVal = prevMonthKey(currentMonthKey);
+  const dayNum = new Date(today + "T00:00:00").getDate();
+  const clampDay = (mk: string, d: number) => Math.min(d, daysInMonthOf(mk));
+  const mkDate = (mk: string, d: number) => { const [y, m] = mk.split("_"); return `${y}-${pad2(Number(m))}-${pad2(d)}`; };
+  const sameDayLastMonth = mkDate(prevMonthKeyVal, clampDay(prevMonthKeyVal, dayNum));
+  const weekStartDayLastMonth = mkDate(prevMonthKeyVal, clampDay(prevMonthKeyVal, Math.max(1, dayNum - 6)));
+
+  const todayLastMonthTotals = sumFor((t) => t.date === sameDayLastMonth);
+  const weekLastMonthTotals = sumFor((t) => t.date >= weekStartDayLastMonth && t.date <= sameDayLastMonth);
+  const monthLastMonthTotals = sumFor((t) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum);
+
+  const pctDelta = (cur: number, prev: number) => (prev !== 0 ? ((cur - prev) / Math.abs(prev)) * 100 : null);
+  const vsHint = (cur: number, prev: number, suffix: string) => {
+    const d = pctDelta(cur, prev);
+    return `vs ${fmt(prev)} FCFA ${suffix}${d !== null ? ` (${d >= 0 ? "+" : ""}${d.toFixed(0)}%)` : ""}`;
+  };
+
   const quickDateEntries = withGroup.filter((t) => t.date === quickDate).sort((a, b) => b.id.localeCompare(a.id));
 
   const resetForm = () => {
@@ -9510,11 +9530,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} />
-        <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} />
-        <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} />
-        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} />
-        <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} />
+        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} />
+        <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} />
+        <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} />
+        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} />
+        <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} />
       </div>
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
