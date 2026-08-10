@@ -9654,6 +9654,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [quickType, setQuickType] = useState<TxType>("Dépense");
   const [quickAmount, setQuickAmount] = useState<number | "">("");
   const [quickAccount, setQuickAccount] = useState(() => defaultQuickAccount(accounts));
+  const [quickOnBehalfOf, setQuickOnBehalfOf] = useState("");
   const [quickNote, setQuickNote] = useState("");
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
@@ -9700,18 +9701,19 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const quickDateEntries = withGroup.filter((t) => t.date === quickDate).sort((a, b) => b.id.localeCompare(a.id));
 
   const resetForm = () => {
-    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null);
+    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null); setQuickOnBehalfOf("");
   };
 
   const submit = () => {
     if (!quickCategory || !quickAmount || Number(quickAmount) <= 0) return;
+    const onBehalfOfVal = (quickType === "Dépense" && quickOnBehalfOf && quickOnBehalfOf !== quickAccount) ? quickOnBehalfOf : undefined;
     if (editingId) {
       setTransactions(transactions.map((t) => t.id === editingId ? {
         ...t, date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined,
-        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, note: quickNote || undefined,
+        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined,
       } : t));
     } else {
-      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, note: quickNote || undefined }]);
+      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined }]);
     }
     resetForm();
     setJustAdded(true);
@@ -9727,6 +9729,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     setQuickSubcategory(t.subcategory || "");
     setQuickAmount(t.amount);
     setQuickAccount(t.account || defaultQuickAccount(accounts));
+    setQuickOnBehalfOf(t.onBehalfOf || "");
     setQuickNote(t.note || "");
   };
 
@@ -9816,6 +9819,22 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                     )}
                   </div>
                 </div>
+                {quickType === "Dépense" && accounts.length > 1 && (
+                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!quickOnBehalfOf} onChange={(e) => setQuickOnBehalfOf(e.target.checked ? (accounts.find((a) => a.name !== quickAccount)?.name || "") : "")} />
+                      Payée depuis {quickAccount || "ce compte"} mais destinée à un autre compte (avance entre comptes)
+                    </label>
+                    {quickOnBehalfOf && (
+                      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Compte réellement concerné :</span>
+                        <select value={quickOnBehalfOf} onChange={(e) => setQuickOnBehalfOf(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+                          {accounts.filter((a) => a.name !== quickAccount).map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={quickType}
                   value={quickCategory} subvalue={quickSubcategory} onSelect={(c, s) => { setQuickCategory(c); setQuickSubcategory(s); }} />
 
