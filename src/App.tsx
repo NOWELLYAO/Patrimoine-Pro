@@ -8972,6 +8972,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [bulkCategory, setBulkCategory] = useState("");
+  const [bulkOnBehalfOf, setBulkOnBehalfOf] = useState("");
   const pageSize = 25;
 
   const sorted = useMemo(() => filtered.slice().sort((a, b) => b.date.localeCompare(a.date)), [filtered]);
@@ -8990,6 +8991,19 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
     if (!bulkCategory) return;
     setTransactions(transactions.map((t) => (selected.has(t.id) ? { ...t, category: bulkCategory } : t)));
     setSelected(new Set()); setBulkCategory("");
+  };
+  // Applique l'avance entre comptes à toute la sélection d'un coup — sur demande
+  // explicite de l'utilisateur (10/08/2026), pour retagger efficacement les anciennes
+  // transactions sans les rouvrir une par une. Ne touche que les Dépenses de la
+  // sélection (les Revenus ne sont pas concernés par ce mécanisme).
+  const bulkApplyOnBehalfOf = () => {
+    if (!bulkOnBehalfOf) return;
+    setTransactions(transactions.map((t) => (selected.has(t.id) && t.type === "Dépense" && t.account !== bulkOnBehalfOf) ? { ...t, onBehalfOf: bulkOnBehalfOf } : t));
+    setSelected(new Set()); setBulkOnBehalfOf("");
+  };
+  const bulkClearOnBehalfOf = () => {
+    setTransactions(transactions.map((t) => (selected.has(t.id) ? { ...t, onBehalfOf: undefined } : t)));
+    setSelected(new Set());
   };
 
   const addTransaction = () => {
@@ -9127,6 +9141,12 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
               {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
             <button onClick={bulkChangeCategory} disabled={!bulkCategory} style={{ background: bulkCategory ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: bulkCategory ? COLOR.bg : COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: bulkCategory ? "pointer" : "default" }}>Appliquer</button>
+            <select style={{ ...inputStyle, width: 210 }} value={bulkOnBehalfOf} onChange={(e) => setBulkOnBehalfOf(e.target.value)} title="Marque ces dépenses comme réellement destinées à cet autre compte">
+              <option value="">Marquer avance pour…</option>
+              {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+            </select>
+            <button onClick={bulkApplyOnBehalfOf} disabled={!bulkOnBehalfOf} style={{ background: bulkOnBehalfOf ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: bulkOnBehalfOf ? COLOR.bg : COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: bulkOnBehalfOf ? "pointer" : "default" }}>Appliquer</button>
+            <button onClick={bulkClearOnBehalfOf} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}>Retirer l'avance</button>
             <button onClick={() => setConfirmBulkDelete(true)} style={{ display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 6, color: COLOR.claySoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer" }}><Trash2 size={12} /> Supprimer la sélection</button>
             <button onClick={() => setSelected(new Set())} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 11.5, cursor: "pointer" }}>Désélectionner</button>
           </div>
@@ -9167,6 +9187,11 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                         <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
                       ) : (
                         <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                      )}
+                      {t.onBehalfOf && (
+                        <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }} title="Avance entre comptes">
+                          <ArrowRight size={9} /> pour {t.onBehalfOf}
+                        </div>
                       )}
                     </td>
                     <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
