@@ -4307,11 +4307,14 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   const exportPDF = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
 
@@ -4337,7 +4340,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
       drawKpiBox(14 + kpiW + 8, "VS PÉRIODE PRÉC.", `${delta >= 0 ? "+" : "−"}${fmtPdf(Math.abs(delta))}`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
       drawKpiBox(14 + (kpiW + 8) * 2, "VARIATION", `${delta >= 0 ? "+" : "−"}${Math.abs(deltaPct).toFixed(0)}%`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
 
-      autoTable(doc, {
+      doc.autoTable({
         startY: 68,
         head: [["Catégorie", "Montant (FCFA)", "% du total"]],
         body: catList.map((c) => [c.name, fmtPdf(c.value), `${c.pct.toFixed(0)}%`]),
@@ -4354,7 +4357,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         doc.setFontSize(10); doc.setTextColor(26, 43, 76); doc.setFont("helvetica", "bold");
         doc.text(c.name, 14, y);
         doc.setFont("helvetica", "normal");
-        autoTable(doc, {
+        doc.autoTable({
           startY: y + 3,
           head: [["Sous-catégorie", "Montant (FCFA)", "% de la catégorie"]],
           body: subs.map((s) => [s.name, fmtPdf(s.value), `${s.pct.toFixed(0)}%`]),
@@ -6199,11 +6202,14 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
   const exportActivitiesNarrativePdf = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -7181,11 +7187,14 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
   const downloadPdf = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
       // Les polices standard de jsPDF (Helvetica) ne supportent pas l'espace fine
@@ -7214,7 +7223,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       blocks.forEach((b) => {
         if (y > 260) { doc.addPage(); y = 20; }
         if (b.kind === "kv") {
-          autoTable(doc, {
+          doc.autoTable({
             startY: y,
             body: b.rows.map((r) => [ps(r.label), ps(r.value)]),
             theme: "plain",
@@ -7228,7 +7237,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
           });
           y = (doc as any).lastAutoTable.finalY + 8;
         } else if (b.kind === "table") {
-          autoTable(doc, {
+          doc.autoTable({
             startY: y,
             head: [b.columns.map(ps)],
             body: b.rows.map((row) => row.map((c) => ps(c))),
@@ -8337,11 +8346,14 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   const exportComptesNarrativePdf = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -8402,7 +8414,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
 
         if (months.length >= 2) {
           if (y > pageHeight - 40) { doc.addPage(); y = 20; }
-          autoTable(doc, {
+          doc.autoTable({
             startY: y,
             head: [["Mois", "Mouvement net (FCFA)"]],
             body: months.map((m) => [monthLabel(m), ps(fmt(c.byMonth[m]))]),
@@ -9729,11 +9741,14 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
   const exportPDF = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
 
@@ -9804,7 +9819,7 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       });
       pushSubtotal();
 
-      autoTable(doc, {
+      doc.autoTable({
         startY: chartBottom,
         head: [["Date", "Heure", "Catégorie", "Type", "Montant (FCFA)"]],
         body: rows,
