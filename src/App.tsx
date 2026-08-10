@@ -159,7 +159,8 @@ async function subscribeRealtime(syncCode: string, onRemoteChange: () => void): 
 type TxType = "Dépense" | "Revenu";
 type Group = "Nécessaire" | "Productif" | "Non-productif" | "Non classifié";
 type Scope = "Personnel" | "Business";
-type LoanStatus = "En attente" | "Remboursé";
+type LoanStatus = "En attente" | "Partiellement remboursé" | "Remboursé";
+interface LoanRepayment { id: string; date: string; amount: number; note?: string; }
 
 interface Transaction {
   id: string;
@@ -174,6 +175,12 @@ interface Transaction {
   note?: string;
   tags?: string;
   reconciled?: boolean; // pointée face au relevé bancaire réel (rapprochement bancaire)
+  // Avance entre comptes : cette dépense a réellement été payée depuis "account", mais
+  // concerne en réalité "onBehalfOf" (compte vide au moment du paiement, avancé par un
+  // autre). Permet de suivre qui doit quoi à qui entre comptes, sans fausser les soldes
+  // réels (qui restent basés sur "account", où l'argent a vraiment bougé).
+  onBehalfOf?: string;
+  settled?: boolean; // avance entre comptes déjà réglée entre les deux comptes concernés
 }
 interface Account {
   id: string;
@@ -211,6 +218,7 @@ interface Loan {
   dateGiven: string;
   status: LoanStatus;
   notes: string;
+  repayments?: LoanRepayment[];
 }
 interface CategorizationRule {
   id: string;
@@ -1152,6 +1160,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
   const [subcategory, setSubcategory] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [account, setAccount] = useState("");
+  const [onBehalfOf, setOnBehalfOf] = useState("");
   const [note, setNote] = useState("");
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1162,6 +1171,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
       setDate(transaction.date); setTime(transaction.time || nowTime()); setType(transaction.type);
       setCategory(transaction.category); setSubcategory(transaction.subcategory || "");
       setAmount(transaction.amount); setAccount(transaction.account || defaultQuickAccount(accounts));
+      setOnBehalfOf(transaction.onBehalfOf || "");
       setNote(transaction.note || "");
       setSaved(false);
     }
@@ -1177,7 +1187,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, note: note || undefined });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (type === "Dépense" && onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
@@ -1247,6 +1257,22 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
                 {subcategory && <div style={{ textAlign: "right", fontSize: 13, color: COLOR.inkMuted, marginTop: 4 }}>{subcategory}</div>}
               </div>
             </div>
+            {type === "Dépense" && accounts.length > 1 && (
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!onBehalfOf} onChange={(e) => setOnBehalfOf(e.target.checked ? (accounts.find((a) => a.name !== account)?.name || "") : "")} />
+                  Payée depuis {account || "ce compte"} mais destinée à un autre compte (avance entre comptes)
+                </label>
+                {onBehalfOf && (
+                  <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Compte réellement concerné :</span>
+                    <select value={onBehalfOf} onChange={(e) => setOnBehalfOf(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+                      {accounts.filter((a) => a.name !== account).map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
             <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
               value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
@@ -5201,9 +5227,12 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
     transactions.forEach((t) => {
       const tmk = dateToMonthKey(t.date);
       if (!lookback.includes(tmk)) return;
+      // Corrigé le 10/08/2026 : la liste "excluded" ne s'appliquait qu'aux dépenses —
+      // cocher/décocher une catégorie de REVENU dans la liste n'avait donc aucun effet
+      // sur la projection, alors qu'elle est proposée comme n'importe quelle catégorie.
+      if (excluded.includes(t.category)) return;
       if (t.type === "Revenu") { revByMonth[tmk] = (revByMonth[tmk] || 0) + t.amount; return; }
       // Dépense : exclue si dans la liste, ou si c'est la catégorie remplacée par un montant fixe (comptée à part).
-      if (excluded.includes(t.category)) return;
       if (overrideCategory && t.category === overrideCategory) return;
       depByMonth[tmk] = (depByMonth[tmk] || 0) + t.amount;
     });
@@ -7846,21 +7875,56 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Loan, "id">>({ person: "", amount: 0, dateGiven: "2026_8", status: "En attente", notes: "" });
+  const [repayForm, setRepayForm] = useState<{ loanId: string; amount: number; date: string; note: string } | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const add = () => { if (!form.person || form.amount <= 0) return; setLoans([...loans, { ...form, id: uid("l") }]); setForm({ person: "", amount: 0, dateGiven: "2026_8", status: "En attente", notes: "" }); setAdding(false); };
-  const toggleStatus = (id: string) => setLoans(loans.map((l) => l.id === id ? { ...l, status: l.status === "En attente" ? "Remboursé" : "En attente" } : l));
+  // Le statut se déduit désormais du montant réellement remboursé plutôt que d'être
+  // basculé à la main — sur demande explicite de l'utilisateur (10/08/2026) : gérer des
+  // remboursements partiels, pas juste "tout ou rien".
+  const repaidOf = (l: Loan) => (l.repayments || []).reduce((a, r) => a + r.amount, 0);
+  const remainingOf = (l: Loan) => Math.max(0, l.amount - repaidOf(l));
+  const statusOf = (l: Loan): LoanStatus => {
+    const repaid = repaidOf(l);
+    if (repaid <= 0) return "En attente";
+    if (repaid >= l.amount) return "Remboursé";
+    return "Partiellement remboursé";
+  };
+
+  const add = () => { if (!form.person || form.amount <= 0) return; setLoans([...loans, { ...form, id: uid("l"), repayments: [] }]); setForm({ person: "", amount: 0, dateGiven: "2026_8", status: "En attente", notes: "" }); setAdding(false); };
   const remove = (id: string) => setLoans(loans.filter((l) => l.id !== id));
 
-  const totalOutstanding = loans.filter((l) => l.status === "En attente").reduce((a, l) => a + l.amount, 0);
-  const totalRepaid = loans.filter((l) => l.status === "Remboursé").reduce((a, l) => a + l.amount, 0);
+  const addRepayment = () => {
+    if (!repayForm || repayForm.amount <= 0) return;
+    setLoans(loans.map((l) => {
+      if (l.id !== repayForm.loanId) return l;
+      const repayments = [...(l.repayments || []), { id: uid("rp"), date: repayForm.date, amount: repayForm.amount, note: repayForm.note || undefined }];
+      return { ...l, repayments, status: statusOf({ ...l, repayments }) };
+    }));
+    setRepayForm(null);
+  };
+  const removeRepayment = (loanId: string, repaymentId: string) => {
+    setLoans(loans.map((l) => {
+      if (l.id !== loanId) return l;
+      const repayments = (l.repayments || []).filter((r) => r.id !== repaymentId);
+      return { ...l, repayments, status: statusOf({ ...l, repayments }) };
+    }));
+  };
+
+  const totalOutstanding = loans.reduce((a, l) => a + remainingOf(l), 0);
+  const totalRepaid = loans.reduce((a, l) => a + repaidOf(l), 0);
+  const statusStyle: Record<LoanStatus, { color: string; border: string }> = {
+    "En attente": { color: COLOR.goldSoft, border: COLOR.gold },
+    "Partiellement remboursé": { color: COLOR.slateBlueSoft, border: COLOR.slateBlue },
+    "Remboursé": { color: COLOR.emeraldSoft, border: COLOR.emerald },
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Créances en attente" value={fmt(totalOutstanding)} tone={COLOR.gold} icon={HandCoins} />
-        <Kpi label="Créances remboursées" value={fmt(totalRepaid)} tone={COLOR.emeraldSoft} icon={Check} />
+        <Kpi label="Créances en attente (reste dû)" value={fmt(totalOutstanding)} tone={COLOR.gold} icon={HandCoins} />
+        <Kpi label="Total remboursé à date" value={fmt(totalRepaid)} tone={COLOR.emeraldSoft} icon={Check} />
       </div>
-      <Panel title="Suivi des prêts accordés" subtitle="Ces montants ne sont pas des dépenses perdues — ce sont des créances récupérables"
+      <Panel title="Suivi des prêts accordés" subtitle="Ces montants ne sont pas des dépenses perdues — ce sont des créances récupérables, remboursables en plusieurs fois"
         right={
           <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
             {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Ajouter un prêt"}
@@ -7876,19 +7940,73 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
           </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {loans.map((l) => (
-            <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
-              <div>
-                <div style={{ fontSize: 13 }}>{l.person} <span style={{ color: COLOR.inkMuted, fontSize: 11.5 }}>· {monthLabel(l.dateGiven)}</span></div>
-                {l.notes && <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>{l.notes}</div>}
+          {loans.map((l) => {
+            const status = statusOf(l);
+            const repaid = repaidOf(l);
+            const remaining = remainingOf(l);
+            const isExpanded = expandedId === l.id;
+            const repayments = l.repayments || [];
+            return (
+              <div key={l.id} style={{ background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}`, overflow: "hidden" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      {l.person} <span style={{ color: COLOR.inkMuted, fontSize: 11.5 }}>· {monthLabel(l.dateGiven)}</span>
+                      {repayments.length > 0 && (
+                        <button onClick={() => setExpandedId(isExpanded ? null : l.id)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 11, display: "flex", alignItems: "center", gap: 2, padding: 0 }}>
+                          {repayments.length} remboursement(s) {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                        </button>
+                      )}
+                    </div>
+                    {l.notes && <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>{l.notes}</div>}
+                    {status !== "En attente" && (
+                      <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ flex: 1, maxWidth: 160, height: 5, background: COLOR.hairline, borderRadius: 3, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${Math.min(100, (repaid / l.amount) * 100)}%`, background: status === "Remboursé" ? COLOR.emerald : COLOR.slateBlue }} />
+                        </div>
+                        <span style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{fmt(repaid)} / {fmt(l.amount)} FCFA</span>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>{fmt(l.amount)}</div>
+                      {status !== "Remboursé" && <div style={{ fontSize: 10.5, color: COLOR.claySoft }}>reste {fmt(remaining)}</div>}
+                    </div>
+                    <span style={{ fontSize: 11, padding: "4px 10px", borderRadius: 12, border: `1px solid ${statusStyle[status].border}`, color: statusStyle[status].color }}>{status}</span>
+                    {status !== "Remboursé" && (
+                      <button onClick={() => setRepayForm({ loanId: l.id, amount: remaining, date: todayISO(), note: "" })} title="Enregistrer un remboursement" style={{ display: "flex", alignItems: "center", gap: 5, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "5px 10px", fontSize: 11.5, cursor: "pointer" }}>
+                        <Plus size={12} /> Rembourser
+                      </button>
+                    )}
+                    <button onClick={() => remove(l.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+                {repayForm?.loanId === l.id && (
+                  <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 14, background: COLOR.surface, borderTop: `1px solid ${COLOR.hairline}` }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant remboursé</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 130 }} value={repayForm.amount || ""} onChange={(e) => setRepayForm({ ...repayForm, amount: Number(e.target.value) })} /></div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Date</label><input type="date" style={{ ...inputStyle, width: 150 }} value={repayForm.date} onChange={(e) => setRepayForm({ ...repayForm, date: e.target.value })} /></div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Note (optionnel)</label><input style={{ ...inputStyle, width: 160 }} value={repayForm.note} onChange={(e) => setRepayForm({ ...repayForm, note: e.target.value })} /></div>
+                    <button onClick={addRepayment} style={{ display: "flex", alignItems: "center", gap: 6, background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}><Save size={13} /> Confirmer</button>
+                    <button onClick={() => setRepayForm(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 14px", fontSize: 12.5, cursor: "pointer", height: 32 }}>Annuler</button>
+                  </div>
+                )}
+                {isExpanded && repayments.length > 0 && (
+                  <div style={{ padding: "8px 14px 12px", borderTop: `1px solid ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 4 }}>
+                    {repayments.slice().sort((a, b) => b.date.localeCompare(a.date)).map((r) => (
+                      <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "4px 0" }}>
+                        <span style={{ color: COLOR.inkMuted }}>{dateLabelFull(r.date)}{r.note ? ` — ${r.note}` : ""}</span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.emeraldSoft }}>+{fmt(r.amount)}</span>
+                          <button onClick={() => removeRepayment(l.id, r.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={11} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>{fmt(l.amount)}</span>
-                <button onClick={() => toggleStatus(l.id)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 12, border: `1px solid ${l.status === "Remboursé" ? COLOR.emerald : COLOR.gold}`, background: "transparent", color: l.status === "Remboursé" ? COLOR.emeraldSoft : COLOR.goldSoft, cursor: "pointer" }}>{l.status}</button>
-                <button onClick={() => remove(l.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {!loans.length && <EmptyState text="Aucune créance enregistrée." />}
         </div>
       </Panel>
@@ -7898,7 +8016,7 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
 // ============================================================
 // COMPTES (ACCOUNTS)
 // ============================================================
-function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account[]; setAccounts: (a: Account[]) => void; transactions: Transaction[] }) {
+function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { accounts: Account[]; setAccounts: (a: Account[]) => void; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Account, "id">>({ name: "", kind: "Banque", openingBalance: 0 });
   const [editingOpening, setEditingOpening] = useState<string | null>(null);
@@ -8163,9 +8281,77 @@ function ComptesTab({ accounts, setAccounts, transactions }: { accounts: Account
     }
   };
 
+  // Avances entre comptes : regroupe toutes les dépenses marquées "onBehalfOf" par paire
+  // (payeur réel → compte concerné), net des règlements déjà marqués. Sur demande
+  // explicite de l'utilisateur (10/08/2026) : quand un compte est vide et qu'on doit
+  // payer depuis un autre compte, il faut pouvoir suivre "qui doit quoi à qui" entre
+  // comptes sans fausser les soldes réels (qui restent basés sur le compte réellement débité).
+  const advances = useMemo(() => {
+    const groups: Record<string, { payer: string; beneficiary: string; total: number; settled: number; tx: Transaction[] }> = {};
+    transactions.forEach((t) => {
+      if (t.type !== "Dépense" || !t.onBehalfOf || !t.account || t.onBehalfOf === t.account) return;
+      const key = `${t.account}→${t.onBehalfOf}`;
+      groups[key] = groups[key] || { payer: t.account, beneficiary: t.onBehalfOf, total: 0, settled: 0, tx: [] };
+      groups[key].total += t.amount;
+      if (t.settled) groups[key].settled += t.amount;
+      groups[key].tx.push(t);
+    });
+    return Object.values(groups).map((g) => ({ ...g, outstanding: g.total - g.settled })).sort((a, b) => b.outstanding - a.outstanding);
+  }, [transactions]);
+  const [expandedAdvance, setExpandedAdvance] = useState<string | null>(null);
+  const toggleSettled = (txId: string) => setTransactions(transactions.map((t) => t.id === txId ? { ...t, settled: !t.settled } : t));
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Kpi label="Total des comptes (temps réel)" value={fmt(total)} tone={COLOR.goldSoft} icon={Wallet} />
+
+      {advances.length > 0 && (
+        <Panel title="Avances entre comptes" subtitle="Dépenses payées depuis un compte pour couvrir un besoin d'un autre compte vide — à régler entre eux quand possible">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {advances.map((adv) => {
+              const key = `${adv.payer}→${adv.beneficiary}`;
+              const isExpanded = expandedAdvance === key;
+              return (
+                <div key={key} style={{ background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${adv.outstanding > 0 ? COLOR.gold : COLOR.hairline}`, overflow: "hidden" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
+                    <div>
+                      <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ color: COLOR.claySoft }}>{adv.payer}</span>
+                        <ArrowRight size={12} color={COLOR.inkMuted} />
+                        <span style={{ color: COLOR.emeraldSoft }}>{adv.beneficiary}</span>
+                      </div>
+                      <button onClick={() => setExpandedAdvance(isExpanded ? null : key)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 11, display: "flex", alignItems: "center", gap: 2, padding: 0, marginTop: 2 }}>
+                        {adv.tx.length} transaction(s) {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      </button>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: adv.outstanding > 0 ? COLOR.goldSoft : COLOR.emeraldSoft }}>
+                        {adv.outstanding > 0 ? `${fmt(adv.outstanding)} dû` : "Réglé"}
+                      </div>
+                      {adv.settled > 0 && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{fmt(adv.settled)} déjà réglé sur {fmt(adv.total)}</div>}
+                    </div>
+                  </div>
+                  {isExpanded && (
+                    <div style={{ padding: "8px 14px 12px", borderTop: `1px solid ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 4 }}>
+                      {adv.tx.slice().sort((a, b) => b.date.localeCompare(a.date)).map((t) => (
+                        <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "4px 0" }}>
+                          <span style={{ color: COLOR.inkMuted }}>{dateLabelFull(t.date)} — {t.category}{t.subcategory ? ` · ${t.subcategory}` : ""}</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: t.settled ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(t.amount)}</span>
+                            <button onClick={() => toggleSettled(t.id)} style={{ fontSize: 10.5, padding: "3px 8px", borderRadius: 10, border: `1px solid ${t.settled ? COLOR.emerald : COLOR.hairline}`, background: "transparent", color: t.settled ? COLOR.emeraldSoft : COLOR.inkMuted, cursor: "pointer" }}>
+                              {t.settled ? "Réglé ✓" : "Marquer réglé"}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+      )}
 
       <PanelWithHelp title="Consommation par compte" subtitle={`${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`}
         explain="Le solde ci-dessus est un instantané à aujourd'hui. Ce panneau, lui, montre ce qui a réellement transité sur chaque compte pendant une période choisie : combien en a été dépensé (consommation), combien y est entré (revenus), et le mouvement net. Utile pour voir, par exemple, à quel point Petty Cash ou SALAIRE ont été sollicités sur les 3 derniers mois."
@@ -9775,6 +9961,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [subcategory, setSubcategory] = useState("");
   const [amount, setAmount] = useState<number | "">("");
   const [account, setAccount] = useState(() => defaultQuickAccount(accounts));
+  const [onBehalfOf, setOnBehalfOf] = useState("");
   const [note, setNote] = useState("");
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
@@ -9797,9 +9984,9 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     if (!category || !amount || Number(amount) <= 0) return;
     setTransactions([...transactions, {
       id: uid(), date, time, category, subcategory: subcategory || undefined, type, amount: Number(amount),
-      account: account || undefined, note: note || undefined,
+      account: account || undefined, onBehalfOf: (type === "Dépense" && onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined,
     }]);
-    setAmount(""); setNote("");
+    setAmount(""); setNote(""); setOnBehalfOf("");
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1000);
   };
@@ -9808,6 +9995,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     setType(ty);
     setSubcategory("");
     setCategory(defaultQuickCategory(transactions, ty));
+    if (ty !== "Dépense") setOnBehalfOf("");
   };
 
   const typeColor = type === "Revenu" ? COLOR.emerald : COLOR.clay;
@@ -9924,6 +10112,22 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                   )}
                 </div>
               </div>
+              {type === "Dépense" && accounts.length > 1 && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!onBehalfOf} onChange={(e) => setOnBehalfOf(e.target.checked ? (accounts.find((a) => a.name !== account)?.name || "") : "")} />
+                    Payée depuis {account || "ce compte"} mais destinée à un autre compte (avance entre comptes)
+                  </label>
+                  {onBehalfOf && (
+                    <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11.5, color: COLOR.inkMuted }}>Compte réellement concerné :</span>
+                      <select value={onBehalfOf} onChange={(e) => setOnBehalfOf(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+                        {accounts.filter((a) => a.name !== account).map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
               <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
                 value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
@@ -10395,7 +10599,7 @@ export default function GrandLivre() {
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
-          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} />}
+          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactions} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
           {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} accounts={accounts} />}
