@@ -756,10 +756,47 @@ const inputStyle: React.CSSProperties = {
 // ============================================================
 // FILTER BAR
 // ============================================================
-interface Filters { from: string; to: string; type: string; group: string; category: string; subcategory: string; search: string; scope: string; }
+interface Filters { from: string; to: string; type: string; group: string; category: string; subcategory: string; search: string; scope: string; accounts: string[]; }
 
-function FilterBar({ filters, setFilters, allMonths, allCategories, onReset }: {
-  filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; onReset: () => void;
+// Sélecteur multi-choix simple (liste à cocher) — utilisé pour le filtre "Compte", qui
+// doit permettre de choisir PLUSIEURS comptes à la fois (ex: "Petty Cash" + "Revenus
+// MAZDA", pour repérer les dépenses d'une catégorie qui n'ont PAS été prélevées sur le
+// compte habituel — sur demande explicite de l'utilisateur, 10/08/2026).
+function MultiSelectDropdown({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (v: string[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+  const toggle = (v: string) => onChange(selected.includes(v) ? selected.filter((x) => x !== v) : [...selected, v]);
+  const summary = selected.length === 0 ? "Tous" : selected.length === 1 ? selected[0] : `${selected.length} sélectionnés`;
+  return (
+    <div ref={ref} style={{ position: "relative", display: "flex", flexDirection: "column", gap: 5 }}>
+      <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</label>
+      <button onClick={() => setOpen((o) => !o)} style={{ background: COLOR.surfaceInput, border: `1px solid ${selected.length ? COLOR.gold : COLOR.hairline}`, borderRadius: 6, color: selected.length ? COLOR.goldSoft : COLOR.ink, padding: "8px 10px", fontSize: 12.5, cursor: "pointer", minWidth: 140, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        {summary} <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: 8, zIndex: 20, minWidth: 200, maxHeight: 260, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          {selected.length > 0 && (
+            <button onClick={() => onChange([])} style={{ display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none", color: COLOR.claySoft, fontSize: 11.5, cursor: "pointer", padding: "4px 6px", marginBottom: 4 }}>Tout désélectionner</button>
+          )}
+          {options.map((o) => (
+            <label key={o} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "5px 6px", cursor: "pointer", borderRadius: 4 }}>
+              <input type="checkbox" checked={selected.includes(o)} onChange={() => toggle(o)} />
+              {o}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterBar({ filters, setFilters, allMonths, allCategories, allAccounts, onReset }: {
+  filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; allAccounts: string[]; onReset: () => void;
 }) {
   // "Du mois" cale automatiquement "Au mois" sur la même valeur (l'utilisateur élargit
   // ensuite lui-même si besoin) — sur demande explicite de l'utilisateur, plutôt que de
@@ -787,6 +824,7 @@ function FilterBar({ filters, setFilters, allMonths, allCategories, onReset }: {
         <Select label="Sous-catégorie" value={filters.subcategory} onChange={(v) => patch({ subcategory: v })}
           options={[{ value: "Toutes", label: "Toutes" }, ...Array.from(new Set([...depSubcategories[filters.category] || [], ...revSubcategories[filters.category] || []])).map((s) => ({ value: s, label: s }))]} />
       )}
+      <MultiSelectDropdown label="Compte" options={allAccounts} selected={filters.accounts} onChange={(v) => patch({ accounts: v })} />
       <div style={{ display: "flex", flexDirection: "column", gap: 5, flex: 1, minWidth: 160 }}>
         <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Recherche</label>
         <div style={{ position: "relative" }}>
@@ -8301,9 +8339,47 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   const [expandedAdvance, setExpandedAdvance] = useState<string | null>(null);
   const toggleSettled = (txId: string) => setTransactions(transactions.map((t) => t.id === txId ? { ...t, settled: !t.settled } : t));
 
+  // Solde "corrigé" par compte : ce que serait le solde de chaque compte si toutes les
+  // avances en cours étaient réglées aujourd'hui — le payeur récupère ce qu'on lui doit,
+  // le bénéficiaire paie ce qu'il doit. Permet de voir la vraie situation de fond de
+  // chaque compte, au-delà du solde brut faussé par des paiements faits pour un autre.
+  const correctedBalances = useMemo(() => {
+    const owedTo: Record<string, number> = {}; // ce que ce compte doit récupérer (il a avancé pour d'autres)
+    const owedBy: Record<string, number> = {}; // ce que ce compte doit payer (d'autres ont avancé pour lui)
+    advances.forEach((a) => {
+      owedTo[a.payer] = (owedTo[a.payer] || 0) + a.outstanding;
+      owedBy[a.beneficiary] = (owedBy[a.beneficiary] || 0) + a.outstanding;
+    });
+    return accounts.map((a) => {
+      const real = accountBalance(a, transactions);
+      const receivable = owedTo[a.name] || 0;
+      const payable = owedBy[a.name] || 0;
+      return { account: a, real, corrected: real + receivable - payable, receivable, payable };
+    }).filter((r) => r.receivable > 0 || r.payable > 0);
+  }, [accounts, transactions, advances]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Kpi label="Total des comptes (temps réel)" value={fmt(total)} tone={COLOR.goldSoft} icon={Wallet} />
+
+      {correctedBalances.length > 0 && (
+        <Panel title="Soldes corrigés — si les avances étaient réglées" subtitle="Ce que serait le solde de chaque compte si les avances en cours (non encore marquées réglées) étaient soldées aujourd'hui">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {correctedBalances.map((r) => (
+              <div key={r.account.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ fontSize: 13 }}>{r.account.name}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>
+                  <span style={{ color: COLOR.inkMuted }}>{fmt(r.real)}</span>
+                  <ArrowRight size={12} color={COLOR.inkMuted} />
+                  <span style={{ fontWeight: 600, color: r.corrected >= r.real ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(r.corrected)} FCFA</span>
+                  {r.receivable > 0 && <span style={{ fontSize: 10.5, color: COLOR.emeraldSoft }}>+{fmt(r.receivable)} à recevoir</span>}
+                  {r.payable > 0 && <span style={{ fontSize: 10.5, color: COLOR.claySoft }}>−{fmt(r.payable)} à payer</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
 
       {advances.length > 0 && (
         <Panel title="Avances entre comptes" subtitle="Dépenses payées depuis un compte pour couvrir un besoin d'un autre compte vide — à régler entre eux quand possible">
@@ -10365,7 +10441,7 @@ export default function GrandLivre() {
 
   const defaultFilters: Filters = {
     from: allMonths[0] || "2024_6", to: allMonths[allMonths.length - 1] || "2026_8",
-    type: "Tous", group: "Tous", category: "Toutes", subcategory: "Toutes", search: "", scope: "Tous",
+    type: "Tous", group: "Tous", category: "Toutes", subcategory: "Toutes", search: "", scope: "Tous", accounts: [],
   };
   const [filters, setFilters] = useState<Filters>(defaultFilters);
 
@@ -10414,6 +10490,7 @@ export default function GrandLivre() {
       if (filters.category !== "Toutes" && t.category !== filters.category) return false;
       if (filters.subcategory && filters.subcategory !== "Toutes" && t.subcategory !== filters.subcategory) return false;
       if (filters.search && !normalizeText(t.category).includes(normalizeText(filters.search)) && !normalizeText(t.subcategory || "").includes(normalizeText(filters.search))) return false;
+      if (filters.accounts.length && !filters.accounts.includes(t.account || "")) return false;
       return true;
     });
   }, [txWithGroup, filters]);
@@ -10596,12 +10673,12 @@ export default function GrandLivre() {
                   </button>
                   {filtersOpen && (
                     <div style={{ marginTop: 10 }}>
-                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
+                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
                     </div>
                   )}
                 </div>
               ) : (
-                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} onReset={() => setFilters(defaultFilters)} />
+                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
               )}
             </div>
           )}
