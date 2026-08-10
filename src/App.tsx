@@ -509,6 +509,15 @@ function categoriesForType(transactions: Transaction[], type: TxType): string[] 
   known.forEach((c) => used.add(c));
   return Array.from(used).sort((a, b) => a.localeCompare(b, "fr"));
 }
+// Construit une liste d'options de catégorie regroupée "Dépenses" / "Revenus" (une
+// catégorie qui existe dans les deux — ex: "Ajustement" — apparaît dans les deux
+// groupes) — sur demande explicite de l'utilisateur (10/08/2026) : la liste plate,
+// mélangée et triée alphabétiquement toutes catégories confondues était trop désordonnée.
+function groupedCategoryOptions(transactions: Transaction[]): { value: string; label: string; group: string }[] {
+  const dep = categoriesForType(transactions, "Dépense").map((c) => ({ value: c, label: c, group: "Dépenses" }));
+  const rev = categoriesForType(transactions, "Revenu").map((c) => ({ value: c, label: c, group: "Revenus" }));
+  return [...dep, ...rev];
+}
 function defaultQuickCategory(transactions: Transaction[], type: TxType): string {
   const list = categoriesForType(transactions, type);
   if (type === "Dépense" && list.includes("Aliments")) return "Aliments";
@@ -723,8 +732,19 @@ function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint
 }
 
 function Select({ value, onChange, options, label }: {
-  value: string; onChange: (v: string) => void; options: { value: string; label: string }[]; label?: string;
+  value: string; onChange: (v: string) => void; options: { value: string; label: string; group?: string }[]; label?: string;
 }) {
+  // Regroupe les options par "group" si fourni (ex: Dépenses / Revenus), en conservant
+  // l'ordre d'apparition des groupes — sur demande explicite de l'utilisateur
+  // (10/08/2026) : la liste de catégories mélangée dépenses/revenus était trop désordonnée.
+  const hasGroups = options.some((o) => o.group);
+  const groups: { name: string | null; items: typeof options }[] = [];
+  options.forEach((o) => {
+    const g = o.group || null;
+    let bucket = groups.find((b) => b.name === g);
+    if (!bucket) { bucket = { name: g, items: [] }; groups.push(bucket); }
+    bucket.items.push(o);
+  });
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
       {label && <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</label>}
@@ -732,7 +752,11 @@ function Select({ value, onChange, options, label }: {
         background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.ink,
         padding: "8px 10px", fontSize: 12.5, fontFamily: "'Inter', sans-serif", minWidth: 130, cursor: "pointer",
       }}>
-        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        {hasGroups
+          ? groups.map((g, i) => g.name
+              ? <optgroup key={g.name} label={g.name}>{g.items.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</optgroup>
+              : g.items.map((o) => <option key={o.value} value={o.value}>{o.label}</option>))
+          : options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
   );
@@ -795,8 +819,8 @@ function MultiSelectDropdown({ label, options, selected, onChange }: { label: st
   );
 }
 
-function FilterBar({ filters, setFilters, allMonths, allCategories, allAccounts, onReset }: {
-  filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; allAccounts: string[]; onReset: () => void;
+function FilterBar({ filters, setFilters, allMonths, allCategories, categoryOptions, allAccounts, onReset }: {
+  filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; categoryOptions: { value: string; label: string; group: string }[]; allAccounts: string[]; onReset: () => void;
 }) {
   // "Du mois" cale automatiquement "Au mois" sur la même valeur (l'utilisateur élargit
   // ensuite lui-même si besoin) — sur demande explicite de l'utilisateur, plutôt que de
@@ -819,7 +843,7 @@ function FilterBar({ filters, setFilters, allMonths, allCategories, allAccounts,
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
-      <Select label="Catégorie" value={filters.category} onChange={(v) => patch({ category: v, subcategory: "Toutes" })} options={[{ value: "Toutes", label: "Toutes" }, ...allCategories.map((c) => ({ value: c, label: c }))]} />
+      <Select label="Catégorie" value={filters.category} onChange={(v) => patch({ category: v, subcategory: "Toutes" })} options={[{ value: "Toutes", label: "Toutes" }, ...categoryOptions]} />
       {filters.category !== "Toutes" && (
         <Select label="Sous-catégorie" value={filters.subcategory} onChange={(v) => patch({ subcategory: v })}
           options={[{ value: "Toutes", label: "Toutes" }, ...Array.from(new Set([...depSubcategories[filters.category] || [], ...revSubcategories[filters.category] || []])).map((s) => ({ value: s, label: s }))]} />
@@ -1225,7 +1249,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (type === "Dépense" && onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
@@ -1295,7 +1319,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
                 {subcategory && <div style={{ textAlign: "right", fontSize: 13, color: COLOR.inkMuted, marginTop: 4 }}>{subcategory}</div>}
               </div>
             </div>
-            {type === "Dépense" && accounts.length > 1 && (
+            {accounts.length > 1 && (
               <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
                   <input type="checkbox" checked={!!onBehalfOf} onChange={(e) => setOnBehalfOf(e.target.checked ? (accounts.find((a) => a.name !== account)?.name || "") : "")} />
@@ -5320,7 +5344,8 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
             <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Remplacer une catégorie par un montant fixe</label>
             <select value={overrideCategory} onChange={(e) => setOverrideCategory(e.target.value)} style={{ ...inputStyle, width: 200 }}>
               <option value="">— aucune —</option>
-              {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
+              <optgroup label="Dépenses">{categoriesForType(transactions, "Dépense").map((c) => <option key={`d-${c}`} value={c}>{c}</option>)}</optgroup>
+              <optgroup label="Revenus">{categoriesForType(transactions, "Revenu").map((c) => <option key={`r-${c}`} value={c}>{c}</option>)}</optgroup>
             </select>
           </div>
           {overrideCategory && (
@@ -8123,18 +8148,22 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
     // finance vraiment" ne soit pas faussé par un dépannage ponctuel entre comptes.
     // Le solde réel (soldeDebut/soldeFin plus bas) reste lui basé sur le compte qui a
     // vraiment payé, sans aucune réattribution — un solde ne doit jamais mentir.
-    const tx = periodTx.filter((t) => {
-      if (t.type === "Revenu") return t.account === a.name;
-      return (t.onBehalfOf || t.account) === a.name;
-    });
+    // Consommation ET revenus réels du compte : une transaction marquée "avance"
+    // (onBehalfOf) est rattachée au compte BÉNÉFICIAIRE ici — que ce soit une dépense
+    // payée pour un autre compte, ou un revenu encaissé qui appartient en fait à un
+    // autre compte — sur demande explicite de l'utilisateur (10/08/2026). Le solde réel
+    // (soldeDebut/soldeFin plus bas) reste lui basé sur le compte réellement mouvementé,
+    // sans aucune réattribution — un solde ne doit jamais mentir.
+    const tx = periodTx.filter((t) => (t.onBehalfOf || t.account) === a.name);
     const depenses = tx.filter((t) => t.type === "Dépense").reduce((s, t) => s + t.amount, 0);
     const revenus = tx.filter((t) => t.type === "Revenu").reduce((s, t) => s + t.amount, 0);
     const depByCat: Record<string, number> = {};
     const revByCat: Record<string, number> = {};
     tx.forEach((t) => { (t.type === "Dépense" ? depByCat : revByCat)[t.category] = ((t.type === "Dépense" ? depByCat : revByCat)[t.category] || 0) + t.amount; });
-    // Montant reçu en avance d'un autre compte (déjà inclus dans "depenses" ci-dessus,
-    // mais isolé ici pour l'affichage — utile pour comprendre l'écart avec le solde réel).
-    const receivedAsAdvance = tx.filter((t) => t.type === "Dépense" && t.account !== a.name).reduce((s, t) => s + t.amount, 0);
+    // Montant reçu en avance d'un autre compte (déjà inclus dans "depenses"/"revenus"
+    // ci-dessus, mais isolé ici pour l'affichage — utile pour comprendre l'écart avec le
+    // solde réel, quel que soit le type de la transaction).
+    const receivedAsAdvance = tx.filter((t) => t.account !== a.name).reduce((s, t) => s + t.amount, 0);
     // Solde réel du compte (pas juste le mouvement net de la période) : ce qu'il y avait
     // avant le début de la période, et ce qu'il y a à la fin — pour voir l'évolution du
     // solde effectif, pas seulement ce qui a transité pendant la fenêtre choisie.
@@ -8356,17 +8385,19 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
     }
   };
 
-  // Avances entre comptes : regroupe toutes les dépenses marquées "onBehalfOf" par paire
-  // (payeur réel → compte concerné), net des règlements déjà marqués. Sur demande
-  // explicite de l'utilisateur (10/08/2026) : quand un compte est vide et qu'on doit
-  // payer depuis un autre compte, il faut pouvoir suivre "qui doit quoi à qui" entre
-  // comptes sans fausser les soldes réels (qui restent basés sur le compte réellement débité).
+  // Avances entre comptes : regroupe toutes les transactions marquées "onBehalfOf" par
+  // paire débiteur→créancier, net des règlements déjà marqués. Sur demande explicite de
+  // l'utilisateur (10/08/2026) : le sens de la dette s'inverse selon le type — pour une
+  // DÉPENSE, le compte qui a payé est le créancier (on lui doit) ; pour un REVENU, le
+  // compte qui a encaissé est le débiteur (il doit reverser l'argent au bon compte).
   const advances = useMemo(() => {
-    const groups: Record<string, { payer: string; beneficiary: string; total: number; settled: number; tx: Transaction[] }> = {};
+    const groups: Record<string, { debtor: string; creditor: string; total: number; settled: number; tx: Transaction[] }> = {};
     transactions.forEach((t) => {
-      if (t.type !== "Dépense" || !t.onBehalfOf || !t.account || t.onBehalfOf === t.account) return;
-      const key = `${t.account}→${t.onBehalfOf}`;
-      groups[key] = groups[key] || { payer: t.account, beneficiary: t.onBehalfOf, total: 0, settled: 0, tx: [] };
+      if (!t.onBehalfOf || !t.account || t.onBehalfOf === t.account) return;
+      const debtor = t.type === "Dépense" ? t.onBehalfOf : t.account;
+      const creditor = t.type === "Dépense" ? t.account : t.onBehalfOf;
+      const key = `${debtor}→${creditor}`;
+      groups[key] = groups[key] || { debtor, creditor, total: 0, settled: 0, tx: [] };
       groups[key].total += t.amount;
       if (t.settled) groups[key].settled += t.amount;
       groups[key].tx.push(t);
@@ -8384,8 +8415,8 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
     const owedTo: Record<string, number> = {}; // ce que ce compte doit récupérer (il a avancé pour d'autres)
     const owedBy: Record<string, number> = {}; // ce que ce compte doit payer (d'autres ont avancé pour lui)
     advances.forEach((a) => {
-      owedTo[a.payer] = (owedTo[a.payer] || 0) + a.outstanding;
-      owedBy[a.beneficiary] = (owedBy[a.beneficiary] || 0) + a.outstanding;
+      owedTo[a.creditor] = (owedTo[a.creditor] || 0) + a.outstanding;
+      owedBy[a.debtor] = (owedBy[a.debtor] || 0) + a.outstanding;
     });
     return accounts.map((a) => {
       const real = accountBalance(a, transactions);
@@ -8419,19 +8450,19 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
       )}
 
       {advances.length > 0 && (
-        <Panel title="Avances entre comptes" subtitle="Dépenses payées depuis un compte pour couvrir un besoin d'un autre compte vide — à régler entre eux quand possible">
+        <Panel title="Avances entre comptes" subtitle="Dépenses payées ou revenus encaissés sur le mauvais compte — le compte à gauche doit au compte à droite">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {advances.map((adv) => {
-              const key = `${adv.payer}→${adv.beneficiary}`;
+              const key = `${adv.debtor}→${adv.creditor}`;
               const isExpanded = expandedAdvance === key;
               return (
                 <div key={key} style={{ background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${adv.outstanding > 0 ? COLOR.gold : COLOR.hairline}`, overflow: "hidden" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
                     <div>
                       <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ color: COLOR.claySoft }}>{adv.payer}</span>
+                        <span style={{ color: COLOR.claySoft }}>{adv.debtor}</span>
                         <ArrowRight size={12} color={COLOR.inkMuted} />
-                        <span style={{ color: COLOR.emeraldSoft }}>{adv.beneficiary}</span>
+                        <span style={{ color: COLOR.emeraldSoft }}>{adv.creditor}</span>
                       </div>
                       <button onClick={() => setExpandedAdvance(isExpanded ? null : key)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 11, display: "flex", alignItems: "center", gap: 2, padding: 0, marginTop: 2 }}>
                         {adv.tx.length} transaction(s) {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -9172,7 +9203,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   // sélection (les Revenus ne sont pas concernés par ce mécanisme).
   const bulkApplyOnBehalfOf = () => {
     if (!bulkOnBehalfOf) return;
-    setTransactions(transactions.map((t) => (selected.has(t.id) && t.type === "Dépense" && t.account !== bulkOnBehalfOf) ? { ...t, onBehalfOf: bulkOnBehalfOf } : t));
+    setTransactions(transactions.map((t) => (selected.has(t.id) && t.account !== bulkOnBehalfOf) ? { ...t, onBehalfOf: bulkOnBehalfOf } : t));
     setSelected(new Set()); setBulkOnBehalfOf("");
   };
   const bulkClearOnBehalfOf = () => {
@@ -9312,7 +9343,8 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
             <span style={{ fontSize: 12.5, color: COLOR.goldSoft }}>{selected.size} sélectionnée(s)</span>
             <select style={{ ...inputStyle, width: 170 }} value={bulkCategory} onChange={(e) => setBulkCategory(e.target.value)}>
               <option value="">Changer la catégorie…</option>
-              {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
+              <optgroup label="Dépenses">{categoriesForType(transactions, "Dépense").map((c) => <option key={`d-${c}`} value={c}>{c}</option>)}</optgroup>
+              <optgroup label="Revenus">{categoriesForType(transactions, "Revenu").map((c) => <option key={`r-${c}`} value={c}>{c}</option>)}</optgroup>
             </select>
             <button onClick={bulkChangeCategory} disabled={!bulkCategory} style={{ background: bulkCategory ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: bulkCategory ? COLOR.bg : COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: bulkCategory ? "pointer" : "default" }}>Appliquer</button>
             <select style={{ ...inputStyle, width: 210 }} value={bulkOnBehalfOf} onChange={(e) => setBulkOnBehalfOf(e.target.value)} title="Marque ces dépenses comme réellement destinées à cet autre compte">
@@ -9905,7 +9937,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   const submit = () => {
     if (!quickCategory || !quickAmount || Number(quickAmount) <= 0) return;
-    const onBehalfOfVal = (quickType === "Dépense" && quickOnBehalfOf && quickOnBehalfOf !== quickAccount) ? quickOnBehalfOf : undefined;
+    const onBehalfOfVal = (quickOnBehalfOf && quickOnBehalfOf !== quickAccount) ? quickOnBehalfOf : undefined;
     if (editingId) {
       setTransactions(transactions.map((t) => t.id === editingId ? {
         ...t, date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined,
@@ -10018,7 +10050,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                     )}
                   </div>
                 </div>
-                {quickType === "Dépense" && accounts.length > 1 && (
+                {accounts.length > 1 && (
                   <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
                       <input type="checkbox" checked={!!quickOnBehalfOf} onChange={(e) => setQuickOnBehalfOf(e.target.checked ? (accounts.find((a) => a.name !== quickAccount)?.name || "") : "")} />
@@ -10202,7 +10234,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     if (!category || !amount || Number(amount) <= 0) return;
     setTransactions([...transactions, {
       id: uid(), date, time, category, subcategory: subcategory || undefined, type, amount: Number(amount),
-      account: account || undefined, onBehalfOf: (type === "Dépense" && onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined,
+      account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined,
     }]);
     setAmount(""); setNote(""); setOnBehalfOf("");
     setJustAdded(true);
@@ -10330,7 +10362,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                   )}
                 </div>
               </div>
-              {type === "Dépense" && accounts.length > 1 && (
+              {accounts.length > 1 && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
                     <input type="checkbox" checked={!!onBehalfOf} onChange={(e) => setOnBehalfOf(e.target.checked ? (accounts.find((a) => a.name !== account)?.name || "") : "")} />
@@ -10536,6 +10568,7 @@ export default function GrandLivre() {
     const s = new Set(transactions.map((t) => t.category));
     return Array.from(s).sort();
   }, [transactions]);
+  const groupedCatOptions = useMemo(() => groupedCategoryOptions(transactions), [transactions]);
 
   const defaultFilters: Filters = {
     from: allMonths[0] || "2024_6", to: allMonths[allMonths.length - 1] || "2026_8",
@@ -10771,12 +10804,12 @@ export default function GrandLivre() {
                   </button>
                   {filtersOpen && (
                     <div style={{ marginTop: 10 }}>
-                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
+                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} categoryOptions={groupedCatOptions} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
                     </div>
                   )}
                 </div>
               ) : (
-                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
+                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} categoryOptions={groupedCatOptions} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
               )}
             </div>
           )}
