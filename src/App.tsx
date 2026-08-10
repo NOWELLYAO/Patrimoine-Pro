@@ -10891,7 +10891,7 @@ export default function GrandLivre() {
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
       <style>{fontImport}</style>
       {txStartedEmpty && !syncCode && !emptyStartDismissed && (
-        <div className="gl-noprint" style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 300, background: "rgba(193,84,63,0.16)", borderBottom: `1px solid ${COLOR.clay}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, fontSize: 12.5 }}>
+        <div className="gl-noprint" style={{ background: "rgba(193,84,63,0.16)", borderBottom: `1px solid ${COLOR.clay}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, fontSize: 12.5 }}>
           <AlertTriangle size={15} color={COLOR.claySoft} style={{ flexShrink: 0 }} />
           <span style={{ color: COLOR.claySoft, flex: 1 }}>Aucune donnée trouvée sur cet appareil/navigateur — les données de démonstration sont affichées. Si tu avais déjà des vraies données, vérifie que tu es sur le même appareil et la même adresse qu'avant (les données sont stockées localement, pas sur un serveur, sauf si la synchronisation est activée dans Sauvegarde).</span>
           <button onClick={() => setEmptyStartDismissed(true)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", flexShrink: 0 }}><X size={15} /></button>
