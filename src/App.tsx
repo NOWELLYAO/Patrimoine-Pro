@@ -667,7 +667,7 @@ function PanelWithHelp({ title, subtitle, explain, right, children, style = {}, 
               <ChevronDown size={17} color={COLOR.inkMuted} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
             </div>
           </button>
-          {open && <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 24, flexShrink: 0 }}>{right}{helpButton}</div>}
+          {open && <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 24, flexWrap: "wrap", justifyContent: "flex-end" }}>{right}{helpButton}</div>}
         </div>
         {open && <div style={{ padding: "0 24px 24px 24px" }}>{explainBlock}{children}</div>}
       </div>
@@ -4728,7 +4728,7 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navConte
               {category}{subcategory && <span style={{ color: COLOR.inkMuted, fontWeight: 400 }}> · {subcategory}</span>}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
               {(["mois", "jour"] as const).map((g) => (
                 <button key={g} onClick={() => setGranularity(g)} style={{
@@ -6272,7 +6272,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       <PanelWithHelp title="Rentabilité par activité" subtitle="Basée sur la catégorie de chaque transaction, pas sur le compte — l'argent circule souvent entre comptes"
         explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé."
         right={
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={exportActivitiesExcel} disabled={xlsState === "loading"} style={{
               display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
               border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
@@ -8051,8 +8051,8 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
             const repayments = l.repayments || [];
             return (
               <div key={l.id} style={{ background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}`, overflow: "hidden" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", flexWrap: "wrap", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
                     <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       {l.person} <span style={{ color: COLOR.inkMuted, fontSize: 11.5 }}>· {monthLabel(l.dateGiven)}</span>
                       {repayments.length > 0 && (
@@ -8071,7 +8071,7 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
                       </div>
                     )}
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <div style={{ textAlign: "right" }}>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>{fmt(l.amount)}</div>
                       {status !== "Remboursé" && <div style={{ fontSize: 10.5, color: COLOR.claySoft }}>reste {fmt(remaining)}</div>}
@@ -8496,15 +8496,19 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
         <Panel title="Soldes corrigés — si les avances étaient réglées" subtitle="Ce que serait le solde de chaque compte si les avances en cours (non encore marquées réglées) étaient soldées aujourd'hui">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {correctedBalances.map((r) => (
-              <div key={r.account.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
-                <div style={{ fontSize: 13 }}>{r.account.name}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>
+              <div key={r.account.id} style={{ padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>{r.account.name}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, flexWrap: "wrap" }}>
                   <span style={{ color: COLOR.inkMuted }}>{fmt(r.real)}</span>
-                  <ArrowRight size={12} color={COLOR.inkMuted} />
+                  <ArrowRight size={12} color={COLOR.inkMuted} style={{ flexShrink: 0 }} />
                   <span style={{ fontWeight: 600, color: r.corrected >= r.real ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(r.corrected)} FCFA</span>
-                  {r.receivable > 0 && <span style={{ fontSize: 10.5, color: COLOR.emeraldSoft }}>+{fmt(r.receivable)} à recevoir</span>}
-                  {r.payable > 0 && <span style={{ fontSize: 10.5, color: COLOR.claySoft }}>−{fmt(r.payable)} à payer</span>}
                 </div>
+                {(r.receivable > 0 || r.payable > 0) && (
+                  <div style={{ display: "flex", gap: 10, marginTop: 4, flexWrap: "wrap" }}>
+                    {r.receivable > 0 && <span style={{ fontSize: 10.5, color: COLOR.emeraldSoft }}>+{fmt(r.receivable)} à recevoir</span>}
+                    {r.payable > 0 && <span style={{ fontSize: 10.5, color: COLOR.claySoft }}>−{fmt(r.payable)} à payer</span>}
+                  </div>
+                )}
               </div>
             ))}
           </div>
