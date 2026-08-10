@@ -786,6 +786,52 @@ interface Filters { from: string; to: string; type: string; group: string; categ
 // doit permettre de choisir PLUSIEURS comptes à la fois (ex: "Petty Cash" + "Revenus
 // MAZDA", pour repérer les dépenses d'une catégorie qui n'ont PAS été prélevées sur le
 // compte habituel — sur demande explicite de l'utilisateur, 10/08/2026).
+// Menu déroulant simple-sélection avec en-têtes de groupe colorés (Dépenses en rouille,
+// Revenus en vert) — remplace un <select> natif avec <optgroup>, dont la couleur n'est
+// pas fiable, en particulier sur mobile où l'OS prend le rendu en main et ignore le CSS
+// de l'app. Sur demande explicite de l'utilisateur (10/08/2026).
+function GroupedSingleSelect({ label, value, onChange, allLabel, options }: {
+  label: string; value: string; onChange: (v: string) => void; allLabel: string;
+  options: { value: string; label: string; group: string }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+  const groupColor: Record<string, string> = { "Dépenses": COLOR.claySoft, "Revenus": COLOR.emeraldSoft };
+  const groups: { name: string; items: typeof options }[] = [];
+  options.forEach((o) => {
+    let bucket = groups.find((b) => b.name === o.group);
+    if (!bucket) { bucket = { name: o.group, items: [] }; groups.push(bucket); }
+    bucket.items.push(o);
+  });
+  const current = options.find((o) => o.value === value);
+  return (
+    <div ref={ref} style={{ position: "relative", display: "flex", flexDirection: "column", gap: 5 }}>
+      <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</label>
+      <button onClick={() => setOpen((o) => !o)} style={{ background: COLOR.surfaceInput, border: `1px solid ${value ? COLOR.gold : COLOR.hairline}`, borderRadius: 6, color: current ? (groupColor[current.group] || COLOR.ink) : COLOR.ink, padding: "8px 10px", fontSize: 12.5, cursor: "pointer", minWidth: 130, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{current ? current.label : allLabel}</span> <ChevronDown size={12} color={COLOR.inkMuted} />
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: 8, zIndex: 20, minWidth: 200, maxHeight: 320, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          <button onClick={() => { onChange(""); setOpen(false); }} style={{ display: "block", width: "100%", textAlign: "left", background: !value ? "rgba(201,162,39,0.12)" : "transparent", border: "none", color: COLOR.ink, fontSize: 12.5, cursor: "pointer", padding: "6px 8px", borderRadius: 4, marginBottom: 4 }}>{allLabel}</button>
+          {groups.map((g) => (
+            <div key={g.name}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: groupColor[g.name] || COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", padding: "8px 8px 4px" }}>{g.name}</div>
+              {g.items.map((o) => (
+                <button key={o.value} onClick={() => { onChange(o.value); setOpen(false); }} style={{ display: "block", width: "100%", textAlign: "left", background: value === o.value ? "rgba(201,162,39,0.12)" : "transparent", border: "none", color: groupColor[g.name] || COLOR.ink, fontSize: 12.5, cursor: "pointer", padding: "6px 8px", borderRadius: 4 }}>{o.label}</button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MultiSelectDropdown({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (v: string[]) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -843,7 +889,8 @@ function FilterBar({ filters, setFilters, allMonths, allCategories, categoryOpti
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
-      <Select label="Catégorie" value={filters.category} onChange={(v) => patch({ category: v, subcategory: "Toutes" })} options={[{ value: "Toutes", label: "Toutes" }, ...categoryOptions]} />
+      <GroupedSingleSelect label="Catégorie" allLabel="Toutes" value={filters.category === "Toutes" ? "" : filters.category}
+        onChange={(v) => patch({ category: v || "Toutes", subcategory: "Toutes" })} options={categoryOptions} />
       {filters.category !== "Toutes" && (
         <Select label="Sous-catégorie" value={filters.subcategory} onChange={(v) => patch({ subcategory: v })}
           options={[{ value: "Toutes", label: "Toutes" }, ...Array.from(new Set([...depSubcategories[filters.category] || [], ...revSubcategories[filters.category] || []])).map((s) => ({ value: s, label: s }))]} />
@@ -5340,14 +5387,7 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
         </div>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Remplacer une catégorie par un montant fixe</label>
-            <select value={overrideCategory} onChange={(e) => setOverrideCategory(e.target.value)} style={{ ...inputStyle, width: 200 }}>
-              <option value="">— aucune —</option>
-              <optgroup label="Dépenses">{categoriesForType(transactions, "Dépense").map((c) => <option key={`d-${c}`} value={c}>{c}</option>)}</optgroup>
-              <optgroup label="Revenus">{categoriesForType(transactions, "Revenu").map((c) => <option key={`r-${c}`} value={c}>{c}</option>)}</optgroup>
-            </select>
-          </div>
+          <GroupedSingleSelect label="Remplacer une catégorie par un montant fixe" allLabel="— aucune —" value={overrideCategory} onChange={setOverrideCategory} options={groupedCategoryOptions(transactions)} />
           {overrideCategory && (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nouveau montant / mois</label>
@@ -8386,10 +8426,15 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   };
 
   // Avances entre comptes : regroupe toutes les transactions marquées "onBehalfOf" par
-  // paire débiteur→créancier, net des règlements déjà marqués. Sur demande explicite de
-  // l'utilisateur (10/08/2026) : le sens de la dette s'inverse selon le type — pour une
-  // DÉPENSE, le compte qui a payé est le créancier (on lui doit) ; pour un REVENU, le
-  // compte qui a encaissé est le débiteur (il doit reverser l'argent au bon compte).
+  // paire débiteur→créancier, net des règlements déjà marqués. Le sens de la dette
+  // s'inverse selon le type — pour une DÉPENSE, le compte qui a payé est le créancier (on
+  // lui doit) ; pour un REVENU, le compte qui a encaissé est le débiteur (il doit reverser
+  // l'argent au bon compte).
+  //
+  // Compensation automatique : si A doit B ET B doit A en même temps (deux dettes en sens
+  // opposé entre les deux mêmes comptes), ça n'a pas de sens d'afficher deux lignes
+  // contradictoires — seul le SOLDE NET doit apparaître, dans un seul sens. Sur demande
+  // explicite de l'utilisateur (10/08/2026), après avoir vu ce cas de figure en pratique.
   const advances = useMemo(() => {
     const groups: Record<string, { debtor: string; creditor: string; total: number; settled: number; tx: Transaction[] }> = {};
     transactions.forEach((t) => {
@@ -8402,7 +8447,24 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
       if (t.settled) groups[key].settled += t.amount;
       groups[key].tx.push(t);
     });
-    return Object.values(groups).map((g) => ({ ...g, outstanding: g.total - g.settled })).sort((a, b) => b.outstanding - a.outstanding);
+    const pairKeys = new Set<string>();
+    Object.values(groups).forEach((g) => pairKeys.add([g.debtor, g.creditor].sort().join("|")));
+    const netted: { debtor: string; creditor: string; outstanding: number; grossFwd: number; grossBwd: number; tx: Transaction[] }[] = [];
+    pairKeys.forEach((pk) => {
+      const [x, y] = pk.split("|");
+      const fwd = groups[`${x}→${y}`];
+      const bwd = groups[`${y}→${x}`];
+      const fwdOut = fwd ? fwd.total - fwd.settled : 0;
+      const bwdOut = bwd ? bwd.total - bwd.settled : 0;
+      const net = fwdOut - bwdOut;
+      const allTx = [...(fwd?.tx || []), ...(bwd?.tx || [])];
+      if (Math.abs(net) < 1 && fwdOut === 0 && bwdOut === 0) return; // rien à afficher
+      netted.push({
+        debtor: net >= 0 ? x : y, creditor: net >= 0 ? y : x, outstanding: Math.abs(net),
+        grossFwd: fwd?.total || 0, grossBwd: bwd?.total || 0, tx: allTx,
+      });
+    });
+    return netted.sort((a, b) => b.outstanding - a.outstanding);
   }, [transactions]);
   const [expandedAdvance, setExpandedAdvance] = useState<string | null>(null);
   const toggleSettled = (txId: string) => setTransactions(transactions.map((t) => t.id === txId ? { ...t, settled: !t.settled } : t));
@@ -8472,7 +8534,11 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: adv.outstanding > 0 ? COLOR.goldSoft : COLOR.emeraldSoft }}>
                         {adv.outstanding > 0 ? `${fmt(adv.outstanding)} dû` : "Réglé"}
                       </div>
-                      {adv.settled > 0 && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{fmt(adv.settled)} déjà réglé sur {fmt(adv.total)}</div>}
+                      {adv.grossFwd > 0 && adv.grossBwd > 0 && (
+                        <div style={{ fontSize: 10.5, color: COLOR.inkMuted }} title="Les deux comptes se devaient mutuellement — compensé automatiquement, seul le solde net reste dû">
+                          brut {fmt(adv.grossFwd)} / {fmt(adv.grossBwd)} — compensé
+                        </div>
+                      )}
                     </div>
                   </div>
                   {isExpanded && (
@@ -9341,11 +9407,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
         {selected.size > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: "rgba(201,162,39,0.1)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, color: COLOR.goldSoft }}>{selected.size} sélectionnée(s)</span>
-            <select style={{ ...inputStyle, width: 170 }} value={bulkCategory} onChange={(e) => setBulkCategory(e.target.value)}>
-              <option value="">Changer la catégorie…</option>
-              <optgroup label="Dépenses">{categoriesForType(transactions, "Dépense").map((c) => <option key={`d-${c}`} value={c}>{c}</option>)}</optgroup>
-              <optgroup label="Revenus">{categoriesForType(transactions, "Revenu").map((c) => <option key={`r-${c}`} value={c}>{c}</option>)}</optgroup>
-            </select>
+            <GroupedSingleSelect label="" allLabel="Changer la catégorie…" value={bulkCategory} onChange={setBulkCategory} options={groupedCategoryOptions(transactions)} />
             <button onClick={bulkChangeCategory} disabled={!bulkCategory} style={{ background: bulkCategory ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: bulkCategory ? COLOR.bg : COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: bulkCategory ? "pointer" : "default" }}>Appliquer</button>
             <select style={{ ...inputStyle, width: 210 }} value={bulkOnBehalfOf} onChange={(e) => setBulkOnBehalfOf(e.target.value)} title="Marque ces dépenses comme réellement destinées à cet autre compte">
               <option value="">Marquer avance pour…</option>
