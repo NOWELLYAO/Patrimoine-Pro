@@ -568,25 +568,37 @@ function CustomTooltip({ active, payload, label }: any) {
 //    démonstration au lieu des vraies données, ce qui RESSEMBLE à une perte de données
 //    alors que rien n'a été effacé — juste chargé depuis le mauvais endroit. Signalé via
 //    le 4e élément retourné pour que l'app puisse avertir clairement l'utilisateur.
-function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boolean, boolean] {
+// Corrigé le 11/08/2026 : le vrai défaut de conception qui causait la perte de données
+// n'était pas juste "le local peut se vider" (ça, on ne peut pas l'empêcher — c'est le
+// navigateur/l'OS qui décide) — c'est que dès que le local était vide, l'app se mettait
+// À SAUVEGARDER SILENCIEUSEMENT les données de secours comme si c'était les vraies,
+// sans jamais demander confirmation. Le paramètre "holdSave" permet de bloquer
+// complètement l'écriture tant qu'un choix explicite n'a pas été fait (voir l'écran de
+// blocage plus bas dans le composant racine).
+function usePersistentState<T>(key: string, initial: T, gateResolved?: boolean): [T, (v: T) => void, boolean, boolean] {
   const [state, setState] = useState<T>(initial);
-  const [loaded, setLoaded] = useState(false);
+  const [readDone, setReadDone] = useState(false);
   const [startedEmpty, setStartedEmpty] = useState(false);
+  const [foundReal, setFoundReal] = useState(false);
   useEffect(() => {
     try {
       const raw = localStorage.getItem(key);
-      if (raw) setState(JSON.parse(raw));
+      if (raw) { setState(JSON.parse(raw)); setFoundReal(true); }
       else setStartedEmpty(true);
     } catch {}
-    setLoaded(true);
+    setReadDone(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // On n'écrit dans le localStorage que si on a trouvé de vraies données au départ, OU
+  // si le blocage a été explicitement levé (voir l'écran de choix au niveau racine) —
+  // jamais automatiquement juste parce que la lecture est terminée.
+  const safeToSave = readDone && (foundReal || !!gateResolved);
   useEffect(() => {
-    if (!loaded) return;
+    if (!safeToSave) return;
     try {
       localStorage.setItem(key, JSON.stringify(state));
     } catch {}
-  }, [state, loaded]);
+  }, [state, safeToSave]);
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== key || e.newValue === null) return;
@@ -595,7 +607,7 @@ function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boo
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [key]);
-  return [state, setState, loaded, startedEmpty];
+  return [state, setState, readDone, startedEmpty];
 }
 
 // ============================================================
@@ -9065,6 +9077,114 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // ============================================================
 // SAUVEGARDE & RESTAURATION
 // ============================================================
+// Écran bloquant affiché quand le stockage local semble vide — force un choix explicite
+// avant que quoi que ce soit ne soit sauvegardé, pour ne plus jamais transformer
+// silencieusement des données de secours en "vraies" données. Sur demande explicite de
+// l'utilisateur (11/08/2026), après une perte de données réelle causée par ce défaut.
+function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh }: {
+  onRestore: (data: any) => void; onConnectSync: (code: string) => Promise<boolean>; onStartFresh: () => void;
+}) {
+  const [mode, setMode] = useState<"choix" | "sync" | "confirmFresh">("choix");
+  const [codeInput, setCodeInput] = useState("");
+  const [syncTrying, setSyncTrying] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result as string);
+        if (!data || typeof data !== "object") throw new Error("format");
+        setFileError(null);
+        onRestore(data);
+      } catch {
+        setFileError("Fichier invalide — vérifie que c'est bien un export Grand Livre (.json).");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const tryConnect = async () => {
+    if (!codeInput.trim()) return;
+    setSyncTrying(true); setSyncError(null);
+    const ok = await onConnectSync(codeInput.trim());
+    setSyncTrying(false);
+    if (!ok) setSyncError("Aucune donnée trouvée pour ce code — vérifie qu'il est correct, ou essaie une autre option.");
+  };
+
+  const cardStyle: React.CSSProperties = { background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 20, cursor: "pointer", textAlign: "left", width: "100%" };
+
+  return (
+    <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ maxWidth: 460, width: "100%" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <AlertTriangle size={22} color={COLOR.claySoft} />
+          <h1 style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 500, margin: 0 }}>Aucune donnée trouvée ici</h1>
+        </div>
+        <p style={{ color: COLOR.inkMuted, fontSize: 13, lineHeight: 1.5, marginBottom: 24 }}>
+          Ce navigateur/appareil ne contient aucune donnée enregistrée. Si tu avais déjà utilisé l'app, tes données existent probablement encore ailleurs — choisis comment les retrouver avant de continuer. Rien ne sera sauvegardé tant que tu n'as pas fait un choix ici.
+        </p>
+
+        {mode === "choix" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <label style={cardStyle}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <UploadCloud size={16} color={COLOR.goldSoft} />
+                <strong style={{ fontSize: 14 }}>Importer une sauvegarde</strong>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Un fichier .json déjà exporté depuis Sauvegarde, sur cet appareil ou un autre.</div>
+              <input type="file" accept=".json" onChange={onFile} style={{ display: "none" }} />
+            </label>
+            {fileError && <div style={{ fontSize: 12, color: COLOR.claySoft }}>{fileError}</div>}
+
+            <button onClick={() => setMode("sync")} style={cardStyle}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <Repeat size={16} color={COLOR.slateBlueSoft} />
+                <strong style={{ fontSize: 14 }}>Se connecter à une synchronisation existante</strong>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Si tu avais déjà activé la synchronisation avant, entre ton code pour retrouver tes données.</div>
+            </button>
+
+            <button onClick={() => setMode("confirmFresh")} style={{ ...cardStyle, borderColor: COLOR.hairline, opacity: 0.85 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <Plus size={16} color={COLOR.inkMuted} />
+                <strong style={{ fontSize: 14, color: COLOR.inkMuted }}>Démarrer avec des données de démonstration</strong>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Seulement si c'est vraiment la première fois que tu utilises l'app sur cet appareil.</div>
+            </button>
+          </div>
+        )}
+
+        {mode === "sync" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <input value={codeInput} onChange={(e) => setCodeInput(e.target.value)} placeholder="ex: atelier-lagune-482" style={{ ...inputStyle, width: "100%", padding: "12px 14px", fontSize: 14 }} />
+            {syncError && <div style={{ fontSize: 12, color: COLOR.claySoft }}>{syncError}</div>}
+            <button onClick={tryConnect} disabled={syncTrying || !codeInput.trim()} style={{ background: COLOR.emerald, border: "none", borderRadius: 8, color: COLOR.bg, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, cursor: syncTrying ? "default" : "pointer" }}>
+              {syncTrying ? "Connexion…" : "Se connecter"}
+            </button>
+            <button onClick={() => setMode("choix")} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 12.5, cursor: "pointer", padding: 6 }}>← Retour</button>
+          </div>
+        )}
+
+        {mode === "confirmFresh" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: "rgba(193,84,63,0.12)", border: `1px solid ${COLOR.clay}`, borderRadius: 8, padding: 14, fontSize: 12.5, color: COLOR.claySoft }}>
+              Confirme bien : si tu avais déjà de vraies données ailleurs et que tu choisis cette option par erreur, les données de démonstration commenceront à être sauvegardées ici à la place. Tu pourras toujours importer une sauvegarde plus tard depuis Sauvegarde.
+            </div>
+            <button onClick={onStartFresh} style={{ background: COLOR.clay, border: "none", borderRadius: 8, color: "#fff", padding: "12px 14px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+              Oui, démarrer avec les données de démonstration
+            </button>
+            <button onClick={() => setMode("choix")} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 12.5, cursor: "pointer", padding: 6 }}>← Retour</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected, undoSnapshotAt, onUndoRestore, settingsLog }: {
   getSnapshot: () => any; restore: (data: any) => void; syncCode: string; setSyncCode: (c: string) => void;
   syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void; realtimeConnected: boolean;
@@ -10553,21 +10673,26 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
 ];
 
 export default function GrandLivre() {
-  const [transactions, setTransactions, txLoaded, txStartedEmpty] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions);
-  const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups);
-  const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope);
-  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities);
-  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity);
-  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {});
-  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0);
-  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides);
-  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true);
+  // Contrôle le blocage complet des sauvegardes tant qu'un choix explicite n'a pas été
+  // fait après un démarrage à vide (voir plus bas : écran de blocage). Tant que
+  // holdSave=true, RIEN n'est écrit dans le localStorage, pour ne jamais transformer
+  // silencieusement les données de secours en "vraies" données.
+  const [dataGateResolved, setDataGateResolved] = useState(false);
+  const [transactions, setTransactions, txLoaded, txStartedEmpty] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions, dataGateResolved);
+  const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups, dataGateResolved);
+  const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope, dataGateResolved);
+  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities, dataGateResolved);
+  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity, dataGateResolved);
+  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {}, dataGateResolved);
+  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0, dataGateResolved);
+  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, dataGateResolved);
+  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, dataGateResolved);
   const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
   const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
   const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
   const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
-  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories);
-  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories);
+  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories, dataGateResolved);
+  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, dataGateResolved);
   CUSTOM_DEP_SUBCATS = customDepSubcategories;
   CUSTOM_REV_SUBCATS = customRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
@@ -10612,13 +10737,13 @@ export default function GrandLivre() {
     });
     setCategoryScope(next);
   };
-  const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules);
-  const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans);
-  const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000);
-  const [accounts, setAccounts, accountsLoaded] = usePersistentState<Account[]>("gl-accounts", seedAccounts);
-  const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets);
-  const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals);
-  const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring);
+  const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules, dataGateResolved);
+  const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans, dataGateResolved);
+  const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000, dataGateResolved);
+  const [accounts, setAccounts, accountsLoaded] = usePersistentState<Account[]>("gl-accounts", seedAccounts, dataGateResolved);
+  const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets, dataGateResolved);
+  const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals, dataGateResolved);
+  const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring, dataGateResolved);
   const [tab, setTab] = useState<Tab>("saisie");
   // Navigation contextuelle entre pages : navigateTo("categoryoverview", { category: "Shopping" })
   // change d'onglet ET transmet un contexte que la page de destination applique à son
@@ -10879,10 +11004,59 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
 
-  const [emptyStartDismissed, setEmptyStartDismissed] = useState(false);
+  // Réutilisée par le Sauvegarde et par l'écran de choix ci-dessous.
+  const restoreFromBackup = (data: any) => {
+    setPreRestoreSnapshot({
+      transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+      activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+    });
+    setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
+    if (data.transactions) setTransactions(data.transactions);
+    if (data.categoryGroups) setCategoryGroups(data.categoryGroups);
+    if (data.categoryScope) setCategoryScope(data.categoryScope);
+    if (data.rules) setRules(data.rules);
+    if (data.loans) setLoans(data.loans);
+    if (typeof data.envelopeCap === "number") setEnvelopeCap(data.envelopeCap);
+    if (data.accounts) setAccounts(data.accounts);
+    if (data.budgets) setBudgets(data.budgets);
+    if (data.goals) setGoals(data.goals);
+    if (data.recurring) setRecurring(data.recurring);
+    if (data.activities) setActivities(data.activities);
+    if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
+    if (data.activityCapital) setActivityCapital(data.activityCapital);
+    if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
+    if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
+    if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
+    if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
+    if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
+  };
 
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
+  }
+
+  // Écran de choix bloquant : rien n'est jamais sauvegardé tant qu'un choix explicite
+  // n'a pas été fait ici. Corrige la cause de fond d'une perte de données passée : avant,
+  // dès que le stockage local était vide, l'app se mettait à sauvegarder silencieusement
+  // les données de démonstration comme si c'était les vraies. Sur demande explicite de
+  // l'utilisateur (11/08/2026) : "résoudre ça une fois pour de bon".
+  if (txStartedEmpty && !dataGateResolved) {
+    return (
+      <DataRecoveryGate
+        onRestore={(data) => { restoreFromBackup(data); setDataGateResolved(true); }}
+        onConnectSync={async (code) => {
+          setSyncCode(code);
+          const remote = await fetchRemoteState(code);
+          if (remote?.data?.transactions?.length) {
+            restoreFromBackup(remote.data);
+            setDataGateResolved(true);
+            return true;
+          }
+          return false;
+        }}
+        onStartFresh={() => setDataGateResolved(true)}
+      />
+    );
   }
 
   const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
@@ -10890,13 +11064,6 @@ export default function GrandLivre() {
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
       <style>{fontImport}</style>
-      {txStartedEmpty && !syncCode && !emptyStartDismissed && (
-        <div className="gl-noprint" style={{ background: "rgba(193,84,63,0.16)", borderBottom: `1px solid ${COLOR.clay}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, fontSize: 12.5 }}>
-          <AlertTriangle size={15} color={COLOR.claySoft} style={{ flexShrink: 0 }} />
-          <span style={{ color: COLOR.claySoft, flex: 1 }}>Aucune donnée trouvée sur cet appareil/navigateur — les données de démonstration sont affichées. Si tu avais déjà des vraies données, vérifie que tu es sur le même appareil et la même adresse qu'avant (les données sont stockées localement, pas sur un serveur, sauf si la synchronisation est activée dans Sauvegarde).</span>
-          <button onClick={() => setEmptyStartDismissed(true)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", flexShrink: 0 }}><X size={15} /></button>
-        </div>
-      )}
 
       {/* SIDEBAR — poussé sur desktop, tiroir superposé sur mobile */}
       {(!isMobile || mobileMenuOpen) && (
@@ -11046,34 +11213,7 @@ export default function GrandLivre() {
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
               })}
-              restore={(data: any) => {
-                // Filet de sécurité : on garde un instantané de l'état actuel avant
-                // d'écraser quoi que ce soit, pour permettre une annulation en un clic.
-                setPreRestoreSnapshot({
-                  transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                });
-                setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
-
-                if (data.transactions) setTransactions(data.transactions);
-                if (data.categoryGroups) setCategoryGroups(data.categoryGroups);
-                if (data.categoryScope) setCategoryScope(data.categoryScope);
-                if (data.rules) setRules(data.rules);
-                if (data.loans) setLoans(data.loans);
-                if (typeof data.envelopeCap === "number") setEnvelopeCap(data.envelopeCap);
-                if (data.accounts) setAccounts(data.accounts);
-                if (data.budgets) setBudgets(data.budgets);
-                if (data.goals) setGoals(data.goals);
-                if (data.recurring) setRecurring(data.recurring);
-                if (data.activities) setActivities(data.activities);
-                if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
-                if (data.activityCapital) setActivityCapital(data.activityCapital);
-                if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
-                if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
-                if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
-                if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
-                if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
-              }}
+              restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
               settingsLog={settingsLog}
               onUndoRestore={() => {
