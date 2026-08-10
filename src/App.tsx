@@ -91,7 +91,7 @@ const SUPABASE_URL = getEnvVar("VITE_SUPABASE_URL");
 const SUPABASE_ANON_KEY = getEnvVar("VITE_SUPABASE_ANON_KEY");
 const SYNC_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 
-async function fetchRemoteState(syncCode: string): Promise<any | null> {
+async function fetchRemoteState(syncCode: string): Promise<{ data: any; updatedAt: string } | null> {
   if (!SYNC_ENABLED || !syncCode) return null;
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
@@ -99,7 +99,8 @@ async function fetchRemoteState(syncCode: string): Promise<any | null> {
     });
     if (!res.ok) return null;
     const rows = await res.json();
-    return rows?.[0]?.data || null;
+    if (!rows?.[0]?.data) return null;
+    return { data: rows[0].data, updatedAt: rows[0].updated_at };
   } catch { return null; }
 }
 async function pushRemoteState(syncCode: string, data: any): Promise<boolean> {
@@ -554,13 +555,28 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
-function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boolean] {
+// Corrigé le 11/08/2026 : des transactions récemment saisies disparaissaient parfois,
+// notamment juste après un redéploiement. Deux garde-fous ajoutés :
+// 1. Synchronisation entre onglets/fenêtres : si l'app est ouverte à deux endroits (ex :
+//    icône PWA sur l'écran d'accueil + onglet navigateur), sans ce correctif, un onglet
+//    avec des données périmées pouvait écraser silencieusement les données plus
+//    récentes de l'autre en enregistrant son propre état obsolète après coup. On écoute
+//    maintenant les changements de storage venant d'un autre onglet et on les adopte.
+// 2. Détection de démarrage à vide : si le localStorage est vide au chargement (ex :
+//    nouvel appareil, navigation privée, ou un déploiement qui change d'URL/domaine —
+//    le localStorage est propre à chaque origine), l'app retombe sur les données de
+//    démonstration au lieu des vraies données, ce qui RESSEMBLE à une perte de données
+//    alors que rien n'a été effacé — juste chargé depuis le mauvais endroit. Signalé via
+//    le 4e élément retourné pour que l'app puisse avertir clairement l'utilisateur.
+function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boolean, boolean] {
   const [state, setState] = useState<T>(initial);
   const [loaded, setLoaded] = useState(false);
+  const [startedEmpty, setStartedEmpty] = useState(false);
   useEffect(() => {
     try {
       const raw = localStorage.getItem(key);
       if (raw) setState(JSON.parse(raw));
+      else setStartedEmpty(true);
     } catch {}
     setLoaded(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -571,7 +587,15 @@ function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boo
       localStorage.setItem(key, JSON.stringify(state));
     } catch {}
   }, [state, loaded]);
-  return [state, setState, loaded];
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== key || e.newValue === null) return;
+      try { setState(JSON.parse(e.newValue)); } catch {}
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [key]);
+  return [state, setState, loaded, startedEmpty];
 }
 
 // ============================================================
@@ -10529,7 +10553,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
 ];
 
 export default function GrandLivre() {
-  const [transactions, setTransactions, txLoaded] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions);
+  const [transactions, setTransactions, txLoaded, txStartedEmpty] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions);
   const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups);
   const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope);
   const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities);
@@ -10638,6 +10662,18 @@ export default function GrandLivre() {
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const skipNextPush = useRef(false);
+  // Corrigé le 11/08/2026 : des transactions saisies disparaissaient parfois après un
+  // rechargement — cause identifiée avec certitude : au démarrage, la synchronisation
+  // distante ÉCRASAIT toujours l'état local avec l'état distant, même quand l'état
+  // local était en réalité PLUS RÉCENT (ex : une saisie faite juste avant de fermer
+  // l'app, dans la fenêtre de 1,5s avant l'envoi différé vers le serveur — l'envoi
+  // n'avait pas eu le temps de partir, donc le serveur avait encore l'ancienne version,
+  // et au rechargement cette ancienne version remplaçait silencieusement la nouvelle).
+  // On retient maintenant la date de la dernière VRAIE modification locale (persistée,
+  // pour survivre à un rechargement), comparée à la date de dernière mise à jour
+  // distante avant de décider qui écrase qui.
+  const lastLocalChangeRef = useRef<string>((() => { try { return localStorage.getItem("gl-last-local-change") || ""; } catch { return ""; } })());
+  const localChangeTrackInit = useRef(false);
   const pushTimer = useRef<any>(null);
 
   const allMonths = useMemo(() => {
@@ -10709,36 +10745,51 @@ export default function GrandLivre() {
 
   const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded;
 
-  // Tire l'état distant et hydrate les états locaux. Réutilisé au chargement,
-  // sur demande (forcer la sync) et à chaque notification temps réel.
+  // Tire l'état distant et hydrate les états locaux — SAUF si le local est plus récent
+  // que le distant (voir note plus haut) : dans ce cas, on pousse le local vers le
+  // serveur au lieu de l'écraser. Réutilisé au chargement, sur demande (forcer la sync)
+  // et à chaque notification temps réel.
   const pullAndHydrate = React.useCallback(async (code: string) => {
     setSyncStatus("syncing");
     const remote = await fetchRemoteState(code);
     if (remote) {
+      const localIsNewer = lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt));
+      if (localIsNewer) {
+        // Le local a changé après la dernière sauvegarde distante connue (ex: saisie
+        // faite juste avant fermeture, avant que l'envoi différé de 1,5s n'ait eu le
+        // temps de partir) — on ne l'écrase surtout pas : on pousse le local à la place.
+        const ok = await pushRemoteState(code, {
+          transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+          activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+        });
+        setSyncStatus(ok ? "synced" : "error");
+        if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+        return;
+      }
       skipNextPush.current = true;
-      if (remote.transactions) setTransactions(remote.transactions);
-      if (remote.categoryGroups) setCategoryGroups(remote.categoryGroups);
-      if (remote.categoryScope) setCategoryScope(remote.categoryScope);
-      if (remote.rules) setRules(remote.rules);
-      if (remote.loans) setLoans(remote.loans);
-      if (typeof remote.envelopeCap === "number") setEnvelopeCap(remote.envelopeCap);
-      if (remote.accounts) setAccounts(remote.accounts);
-      if (remote.budgets) setBudgets(remote.budgets);
-      if (remote.goals) setGoals(remote.goals);
-      if (remote.recurring) setRecurring(remote.recurring);
-      if (remote.activities) setActivities(remote.activities);
-      if (remote.categoryActivity) setCategoryActivity(remote.categoryActivity);
-      if (remote.activityCapital) setActivityCapital(remote.activityCapital);
-      if (typeof remote.monthlyObjective === "number") setMonthlyObjective(remote.monthlyObjective);
-      if (remote.chargeOverrides) setChargeOverrides(remote.chargeOverrides);
-      if (typeof remote.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(remote.includeGrundfosVoiture);
-      if (remote.customDepSubcategories) setCustomDepSubcategories(remote.customDepSubcategories);
-      if (remote.customRevSubcategories) setCustomRevSubcategories(remote.customRevSubcategories);
+      if (remote.data.transactions) setTransactions(remote.data.transactions);
+      if (remote.data.categoryGroups) setCategoryGroups(remote.data.categoryGroups);
+      if (remote.data.categoryScope) setCategoryScope(remote.data.categoryScope);
+      if (remote.data.rules) setRules(remote.data.rules);
+      if (remote.data.loans) setLoans(remote.data.loans);
+      if (typeof remote.data.envelopeCap === "number") setEnvelopeCap(remote.data.envelopeCap);
+      if (remote.data.accounts) setAccounts(remote.data.accounts);
+      if (remote.data.budgets) setBudgets(remote.data.budgets);
+      if (remote.data.goals) setGoals(remote.data.goals);
+      if (remote.data.recurring) setRecurring(remote.data.recurring);
+      if (remote.data.activities) setActivities(remote.data.activities);
+      if (remote.data.categoryActivity) setCategoryActivity(remote.data.categoryActivity);
+      if (remote.data.activityCapital) setActivityCapital(remote.data.activityCapital);
+      if (typeof remote.data.monthlyObjective === "number") setMonthlyObjective(remote.data.monthlyObjective);
+      if (remote.data.chargeOverrides) setChargeOverrides(remote.data.chargeOverrides);
+      if (typeof remote.data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(remote.data.includeGrundfosVoiture);
+      if (remote.data.customDepSubcategories) setCustomDepSubcategories(remote.data.customDepSubcategories);
+      if (remote.data.customRevSubcategories) setCustomRevSubcategories(remote.data.customRevSubcategories);
       setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }
     setSyncStatus("synced");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories]);
 
   // Tire l'état distant au chargement si un code de synchronisation est défini.
   useEffect(() => {
@@ -10766,8 +10817,25 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Pousse l'état local vers le cloud après chaque modification (avec un court délai
-  // pour regrouper les changements rapprochés et éviter de spammer l'API).
+  // Note la date de toute VRAIE modification locale (pas un pull, filtré via
+  // skipNextPush ci-dessous, ni le tout premier rendu au chargement) — persistée pour
+  // survivre à un rechargement, seule façon de savoir après coup si le local était plus
+  // récent que le serveur au moment où l'app s'est fermée.
+  useEffect(() => {
+    if (!allLoaded) return;
+    if (!localChangeTrackInit.current) { localChangeTrackInit.current = true; return; }
+    if (skipNextPush.current) return; // ce changement vient d'un pull, pas d'une saisie
+    const now = new Date().toISOString();
+    lastLocalChangeRef.current = now;
+    try { localStorage.setItem("gl-last-local-change", now); } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, allLoaded]);
+
+  // Pousse l'état local vers le cloud après chaque modification. Délai raccourci à
+  // 500ms (au lieu de 1,5s) le 11/08/2026 pour réduire la fenêtre de risque où une
+  // fermeture rapide de l'app laisse le serveur avec une version périmée — la
+  // comparaison de fraîcheur ci-dessus protège aussi contre ce cas, mais moins
+  // d'attente reste préférable.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
     if (skipNextPush.current) { skipNextPush.current = false; return; }
@@ -10780,8 +10848,34 @@ export default function GrandLivre() {
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-    }, 1500);
+    }, 500);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
+
+  // Filet de sécurité final : si l'app se ferme/passe en arrière-plan alors qu'un envoi
+  // est encore en attente (fenêtre de 500ms), on tente un envoi immédiat "best effort"
+  // via sendBeacon (fiable même pendant la fermeture, contrairement à fetch normal).
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    const flush = () => {
+      if (!pushTimer.current) return;
+      try {
+        const body = JSON.stringify({
+          sync_code: syncCode, updated_at: new Date().toISOString(),
+          data: { transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories },
+        });
+        navigator.sendBeacon?.(
+          `${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`,
+          new Blob([body], { type: "application/json" })
+        );
+      } catch {}
+    };
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); });
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
 
@@ -10790,10 +10884,18 @@ export default function GrandLivre() {
   }
 
   const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
+  const [emptyStartDismissed, setEmptyStartDismissed] = useState(false);
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
       <style>{fontImport}</style>
+      {txStartedEmpty && !syncCode && !emptyStartDismissed && (
+        <div className="gl-noprint" style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 300, background: "rgba(193,84,63,0.16)", borderBottom: `1px solid ${COLOR.clay}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, fontSize: 12.5 }}>
+          <AlertTriangle size={15} color={COLOR.claySoft} style={{ flexShrink: 0 }} />
+          <span style={{ color: COLOR.claySoft, flex: 1 }}>Aucune donnée trouvée sur cet appareil/navigateur — les données de démonstration sont affichées. Si tu avais déjà des vraies données, vérifie que tu es sur le même appareil et la même adresse qu'avant (les données sont stockées localement, pas sur un serveur, sauf si la synchronisation est activée dans Sauvegarde).</span>
+          <button onClick={() => setEmptyStartDismissed(true)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", flexShrink: 0 }}><X size={15} /></button>
+        </div>
+      )}
 
       {/* SIDEBAR — poussé sur desktop, tiroir superposé sur mobile */}
       {(!isMobile || mobileMenuOpen) && (
