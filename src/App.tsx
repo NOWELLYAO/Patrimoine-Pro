@@ -8092,12 +8092,24 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   const [accountNarrativeId, setAccountNarrativeId] = useState<string | null>(null);
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
   const consoParAccount = useMemo(() => accounts.map((a) => {
-    const tx = periodTx.filter((t) => t.account === a.name);
+    // Consommation réelle du compte : une dépense marquée "avance" (onBehalfOf) est
+    // rattachée au compte BÉNÉFICIAIRE ici, pas au compte qui a réellement payé — sur
+    // demande explicite de l'utilisateur (10/08/2026), pour que "qu'est-ce que ce compte
+    // finance vraiment" ne soit pas faussé par un dépannage ponctuel entre comptes.
+    // Le solde réel (soldeDebut/soldeFin plus bas) reste lui basé sur le compte qui a
+    // vraiment payé, sans aucune réattribution — un solde ne doit jamais mentir.
+    const tx = periodTx.filter((t) => {
+      if (t.type === "Revenu") return t.account === a.name;
+      return (t.onBehalfOf || t.account) === a.name;
+    });
     const depenses = tx.filter((t) => t.type === "Dépense").reduce((s, t) => s + t.amount, 0);
     const revenus = tx.filter((t) => t.type === "Revenu").reduce((s, t) => s + t.amount, 0);
     const depByCat: Record<string, number> = {};
     const revByCat: Record<string, number> = {};
     tx.forEach((t) => { (t.type === "Dépense" ? depByCat : revByCat)[t.category] = ((t.type === "Dépense" ? depByCat : revByCat)[t.category] || 0) + t.amount; });
+    // Montant reçu en avance d'un autre compte (déjà inclus dans "depenses" ci-dessus,
+    // mais isolé ici pour l'affichage — utile pour comprendre l'écart avec le solde réel).
+    const receivedAsAdvance = tx.filter((t) => t.type === "Dépense" && t.account !== a.name).reduce((s, t) => s + t.amount, 0);
     // Solde réel du compte (pas juste le mouvement net de la période) : ce qu'il y avait
     // avant le début de la période, et ce qu'il y a à la fin — pour voir l'évolution du
     // solde effectif, pas seulement ce qui a transité pendant la fenêtre choisie.
@@ -8107,7 +8119,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
     const soldeFin = accountBalance(a, uptoEndOfPeriod);
     const byMonth: Record<string, number> = {};
     tx.forEach((t) => { byMonth[t.month] = (byMonth[t.month] || 0) + (t.type === "Revenu" ? t.amount : -t.amount); });
-    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length, depByCat, revByCat, soldeDebut, soldeFin, byMonth };
+    return { account: a, depenses, revenus, net: revenus - depenses, count: tx.length, depByCat, revByCat, soldeDebut, soldeFin, byMonth, receivedAsAdvance };
   }).sort((x, y) => y.depenses - x.depenses), [accounts, periodTx, withMonth, periodFrom, periodTo]);
 
   const totalConsoDep = consoParAccount.reduce((a, c) => a + c.depenses, 0);
@@ -8429,7 +8441,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
         </Panel>
       )}
 
-      <PanelWithHelp title="Consommation par compte" subtitle={`${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`}
+      <PanelWithHelp title="Consommation par compte" subtitle={`${monthLabel(periodFrom)} — ${monthLabel(periodTo)} · les avances entre comptes sont comptées ici sous le compte bénéficiaire, pas le compte payeur`}
         explain="Le solde ci-dessus est un instantané à aujourd'hui. Ce panneau, lui, montre ce qui a réellement transité sur chaque compte pendant une période choisie : combien en a été dépensé (consommation), combien y est entré (revenus), et le mouvement net. Utile pour voir, par exemple, à quel point Petty Cash ou SALAIRE ont été sollicités sur les 3 derniers mois."
         right={
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -8465,11 +8477,16 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
                   {c.net >= 0 ? "+" : ""}{fmt(c.net)} FCFA
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 20, fontSize: 11.5 }}>
+              <div style={{ display: "flex", gap: 20, fontSize: 11.5, flexWrap: "wrap" }}>
                 <span style={{ color: COLOR.claySoft }}>Consommé : <strong style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(c.depenses)}</strong></span>
                 <span style={{ color: COLOR.emeraldSoft }}>Reçu : <strong style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(c.revenus)}</strong></span>
                 {totalConsoDep > 0 && c.depenses > 0 && (
                   <span style={{ color: COLOR.inkMuted }}>{((c.depenses / totalConsoDep) * 100).toFixed(0)}% de la conso totale</span>
+                )}
+                {c.receivedAsAdvance > 0 && (
+                  <span style={{ color: COLOR.goldSoft, display: "flex", alignItems: "center", gap: 3 }} title="Dépenses réellement payées depuis un autre compte, réattribuées ici">
+                    <ArrowRight size={10} /> dont {fmt(c.receivedAsAdvance)} avancés par un autre compte
+                  </span>
                 )}
               </div>
               {(c.depenses > 0 || c.revenus > 0) && (
@@ -9053,7 +9070,15 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
 
   const sorted = useMemo(() => filtered.slice().sort((a, b) => b.date.localeCompare(a.date)), [filtered]);
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const pageRows = sorted.slice(page * pageSize, page * pageSize + pageSize);
+  // Corrigé le 10/08/2026 : la page ne se réinitialisait jamais quand le filtre changeait
+  // — rester sur la page 3 puis restreindre à une catégorie avec 1 seul résultat donnait
+  // un tableau vide malgré un compteur correct ("1 transaction filtrée" mais rien affiché).
+  // Garde-fou en deux temps : on réinitialise à la page 0 dès que la liste filtrée change,
+  // et on protège quand même l'affichage avec un clamp au cas où le rendu arrive avant
+  // que l'effet ait eu le temps de s'appliquer.
+  useEffect(() => { setPage(0); }, [filtered]);
+  const safePage = Math.min(page, pageCount - 1);
+  const pageRows = sorted.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   const toggleSelect = (id: string) => setSelected((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const allPageSelected = pageRows.length > 0 && pageRows.every((t) => selected.has(t.id));
@@ -9281,9 +9306,9 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
         </div>
         {pageCount > 1 && (
           <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 16 }}>
-            <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} style={pagerBtn(page === 0)}>Précédent</button>
-            <span style={{ fontSize: 12, color: COLOR.inkMuted, alignSelf: "center" }}>Page {page + 1} / {pageCount}</span>
-            <button disabled={page >= pageCount - 1} onClick={() => setPage((p) => p + 1)} style={pagerBtn(page >= pageCount - 1)}>Suivant</button>
+            <button disabled={safePage === 0} onClick={() => setPage((p) => p - 1)} style={pagerBtn(safePage === 0)}>Précédent</button>
+            <span style={{ fontSize: 12, color: COLOR.inkMuted, alignSelf: "center" }}>Page {safePage + 1} / {pageCount}</span>
+            <button disabled={safePage >= pageCount - 1} onClick={() => setPage((p) => p + 1)} style={pagerBtn(safePage >= pageCount - 1)}>Suivant</button>
           </div>
         )}
       </Panel>
