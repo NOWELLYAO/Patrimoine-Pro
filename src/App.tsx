@@ -8059,11 +8059,36 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   const [form, setForm] = useState<Omit<Account, "id">>({ name: "", kind: "Banque", openingBalance: 0 });
   const [editingOpening, setEditingOpening] = useState<string | null>(null);
   const kinds: Account["kind"][] = ["Espèces", "Banque", "Mobile Money", "Carte de crédit", "Autre"];
+  const [merging, setMerging] = useState(false);
+  const [mergeSourceId, setMergeSourceId] = useState("");
+  const [mergeTargetId, setMergeTargetId] = useState("");
+  const [confirmMerge, setConfirmMerge] = useState(false);
 
   const add = () => { if (!form.name) return; setAccounts([...accounts, { ...form, id: uid("a") }]); setForm({ name: "", kind: "Banque", openingBalance: 0 }); setAdding(false); };
   const update = (id: string, patch: Partial<Account>) => setAccounts(accounts.map((a) => (a.id === id ? { ...a, ...patch } : a)));
   const remove = (id: string) => setAccounts(accounts.filter((a) => a.id !== id));
   const total = totalAccountsBalance(accounts, transactions);
+
+  // Fusion de deux comptes en un seul, en conservant le nom du compte "cible" — sur
+  // demande explicite de l'utilisateur (10/08/2026). Ce n'est pas un simple renommage :
+  // il faut aussi additionner les soldes de départ (sinon l'argent du compte absorbé
+  // disparaît), réattribuer toute transaction qui référençait le compte absorbé comme
+  // avance (onBehalfOf), et nettoyer les avances qui deviendraient incohérentes (un
+  // compte ne peut pas s'être avancé de l'argent à lui-même une fois fusionné).
+  const mergeAccounts = () => {
+    const source = accounts.find((a) => a.id === mergeSourceId);
+    const target = accounts.find((a) => a.id === mergeTargetId);
+    if (!source || !target || source.id === target.id) return;
+    setTransactions(transactions.map((t) => {
+      let next = t;
+      if (next.account === source.name) next = { ...next, account: target.name };
+      if (next.onBehalfOf === source.name) next = { ...next, onBehalfOf: target.name };
+      if (next.account === next.onBehalfOf) next = { ...next, onBehalfOf: undefined };
+      return next;
+    }));
+    setAccounts(accounts.filter((a) => a.id !== source.id).map((a) => a.id === target.id ? { ...a, openingBalance: a.openingBalance + source.openingBalance } : a));
+    setMerging(false); setMergeSourceId(""); setMergeTargetId(""); setConfirmMerge(false);
+  };
 
   // Consommation par compte sur une période — indépendant du solde temps réel ci-dessus.
   const withMonth = useMemo(() => transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date) })), [transactions]);
@@ -8526,10 +8551,50 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
 
       <Panel title="Comptes" subtitle="Le solde de chaque compte se met à jour automatiquement dès qu'une transaction lui est liée"
         right={
-          <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
-            {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Ajouter un compte"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            {accounts.length >= 2 && (
+              <button onClick={() => { setMerging((m) => !m); setAdding(false); }} style={{ display: "flex", alignItems: "center", gap: 6, background: merging ? COLOR.hairline : "rgba(110,127,168,0.14)", border: `1px solid ${merging ? COLOR.hairline : COLOR.slateBlue}`, borderRadius: 6, color: merging ? COLOR.inkMuted : COLOR.slateBlueSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+                <GitCompare size={13} /> {merging ? "Annuler" : "Fusionner deux comptes"}
+              </button>
+            )}
+            <button onClick={() => { setAdding((a) => !a); setMerging(false); }} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Ajouter un compte"}
+            </button>
+          </div>
         }>
+        {merging && (
+          <div style={{ padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
+            <div style={{ fontSize: 12, color: COLOR.inkMuted, marginBottom: 10 }}>Le compte "à absorber" disparaît ; toutes ses transactions et son solde de départ rejoignent le compte "à garder", qui conserve son nom.</div>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte à absorber (disparaît)</label>
+                <select style={{ ...inputStyle, width: 200 }} value={mergeSourceId} onChange={(e) => setMergeSourceId(e.target.value)}>
+                  <option value="">Choisir…</option>
+                  {accounts.map((a) => <option key={a.id} value={a.id} disabled={a.id === mergeTargetId}>{a.name}</option>)}
+                </select>
+              </div>
+              <ArrowRight size={16} color={COLOR.inkMuted} style={{ marginBottom: 8 }} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte à garder (nom conservé)</label>
+                <select style={{ ...inputStyle, width: 200 }} value={mergeTargetId} onChange={(e) => setMergeTargetId(e.target.value)}>
+                  <option value="">Choisir…</option>
+                  {accounts.map((a) => <option key={a.id} value={a.id} disabled={a.id === mergeSourceId}>{a.name}</option>)}
+                </select>
+              </div>
+              <button onClick={() => setConfirmMerge(true)} disabled={!mergeSourceId || !mergeTargetId} style={{ background: mergeSourceId && mergeTargetId ? COLOR.slateBlue : COLOR.hairline, border: "none", borderRadius: 6, color: mergeSourceId && mergeTargetId ? COLOR.bg : COLOR.inkMuted, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: mergeSourceId && mergeTargetId ? "pointer" : "default", height: 32 }}>Fusionner</button>
+            </div>
+            {mergeSourceId && mergeTargetId && (() => {
+              const source = accounts.find((a) => a.id === mergeSourceId)!;
+              const target = accounts.find((a) => a.id === mergeTargetId)!;
+              const linkedCount = transactions.filter((t) => t.account === source.name || t.onBehalfOf === source.name).length;
+              return (
+                <div style={{ marginTop: 10, fontSize: 11.5, color: COLOR.goldSoft }}>
+                  {linkedCount} transaction(s) de "{source.name}" rejoindront "{target.name}" · solde de départ combiné : {fmt(target.openingBalance + source.openingBalance)} FCFA
+                </div>
+              );
+            })()}
+          </div>
+        )}
         {adding && (
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 16, background: COLOR.surfaceRaised, borderRadius: 8, marginBottom: 16, border: `1px solid ${COLOR.hairline}` }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nom</label><input style={{ ...inputStyle, width: 170 }} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
@@ -8565,6 +8630,14 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
           {!accounts.length && <EmptyState text="Aucun compte." />}
         </div>
       </Panel>
+      <ConfirmDialog
+        open={confirmMerge}
+        title="Fusionner ces deux comptes ?"
+        message={mergeSourceId && mergeTargetId ? `"${accounts.find((a) => a.id === mergeSourceId)?.name}" disparaîtra définitivement. Toutes ses transactions et son solde de départ rejoindront "${accounts.find((a) => a.id === mergeTargetId)?.name}". Cette action est irréversible.` : ""}
+        confirmLabel="Fusionner"
+        onConfirm={mergeAccounts}
+        onCancel={() => setConfirmMerge(false)}
+      />
     </div>
   );
 }
