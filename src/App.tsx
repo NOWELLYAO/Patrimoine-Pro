@@ -10879,12 +10879,13 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
 
+  const [emptyStartDismissed, setEmptyStartDismissed] = useState(false);
+
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
   }
 
   const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
-  const [emptyStartDismissed, setEmptyStartDismissed] = useState(false);
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
