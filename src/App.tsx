@@ -10827,20 +10827,6 @@ export default function GrandLivre() {
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const skipNextPush = useRef(false);
-  // Corrigé le 11/08/2026 : des transactions saisies disparaissaient parfois après un
-  // rechargement — cause identifiée avec certitude : au démarrage, la synchronisation
-  // distante ÉCRASAIT toujours l'état local avec l'état distant, même quand l'état
-  // local était en réalité PLUS RÉCENT (ex : une saisie faite juste avant de fermer
-  // l'app, dans la fenêtre de 1,5s avant l'envoi différé vers le serveur — l'envoi
-  // n'avait pas eu le temps de partir, donc le serveur avait encore l'ancienne version,
-  // et au rechargement cette ancienne version remplaçait silencieusement la nouvelle).
-  // On retient maintenant la date de la dernière VRAIE modification locale (persistée,
-  // pour survivre à un rechargement), comparée à la date de dernière mise à jour
-  // distante avant de décider qui écrase qui.
-  const lastLocalChangeRef = useRef<string>((() => { try { return localStorage.getItem("gl-last-local-change") || ""; } catch { return ""; } })());
-  const localChangeTrackInit = useRef(false);
-  const pushTimer = useRef<any>(null);
-
   const allMonths = useMemo(() => {
     const s = new Set(transactions.filter((t) => t).map((t) => dateToMonthKey(t.date)));
     return Array.from(s).sort((a, b) => monthSortKey(a) - monthSortKey(b));
@@ -10910,64 +10896,90 @@ export default function GrandLivre() {
 
   const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded;
 
-  // Tire l'état distant et hydrate les états locaux — SAUF si le local est plus récent
-  // que le distant (voir note plus haut) : dans ce cas, on pousse le local vers le
-  // serveur au lieu de l'écraser. Réutilisé au chargement, sur demande (forcer la sync)
-  // et à chaque notification temps réel.
-  const pullAndHydrate = React.useCallback(async (code: string) => {
+  // ============================================================
+  // MOTEUR DE SYNCHRONISATION UNIFIÉ — reconstruit le 11/08/2026
+  // ============================================================
+  // Avant : 6 mécanismes séparés (chargement, édition, reconnexion réseau, retour au
+  // premier plan, intervalle, notification temps réel) coordonnés entre eux par un
+  // drapeau partagé fragile ("skipNextPush") — d'où des incohérences observées en
+  // pratique (suppressions qui reviennent, statut qui s'affole, appareils qui ne se
+  // rejoignent pas). Reconstruit en un seul moteur (runSync), appelé par tous ces
+  // déclencheurs, avec deux garanties strictes :
+  //   1. Jamais deux synchronisations en même temps (une file d'attente d'une place).
+  //   2. Toujours les données les plus fraîches, lues via une référence mise à jour à
+  //      CHAQUE rendu — plus aucun risque de "fermeture périmée" (stale closure), quel
+  //      que soit le déclencheur ou son ancienneté.
+
+  // Référence toujours à jour de tout l'état synchronisé — mise à jour à chaque rendu,
+  // jamais figée dans la fermeture d'un effet créé plus tôt.
+  const syncedRef = useRef({
+    transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+    activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds,
+  });
+  useEffect(() => {
+    syncedRef.current = {
+      transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+      activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds,
+    };
+  });
+  const syncCodeRef = useRef(syncCode);
+  useEffect(() => { syncCodeRef.current = syncCode; }, [syncCode]);
+  // Retient la date de la dernière VRAIE modification locale (persistée, pour survivre à
+  // un rechargement) — comparée à la date de dernière mise à jour distante pour les
+  // réglages scalaires (pas de fusion possible pour un simple nombre ou booléen) :
+  // celui modifié le plus récemment l'emporte.
+  const lastLocalChangeRef = useRef<string>((() => { try { return localStorage.getItem("gl-last-local-change") || ""; } catch { return ""; } })());
+  const localChangeTrackInit = useRef(false);
+  const syncInFlight = useRef(false);
+  const syncQueued = useRef(false);
+
+  // Le moteur lui-même : AUCUNE dépendance (tableau vide) — reste la même fonction sur
+  // toute la durée de vie du composant, donc toujours sûr à passer à n'importe quel
+  // écouteur ou intervalle créé une seule fois, sans jamais devenir périmé, puisqu'il
+  // ne lit l'état qu'au travers de syncedRef.current au moment de l'exécution.
+  const runSync = React.useCallback(async () => {
+    const code = syncCodeRef.current;
+    if (!SYNC_ENABLED || !code) return;
+    if (syncInFlight.current) { syncQueued.current = true; return; }
+    syncInFlight.current = true;
     setSyncStatus("syncing");
-    const remote = await fetchRemoteState(code);
-    if (remote) {
+    try {
+      const s = syncedRef.current;
+      const remote = await fetchRemoteState(code);
+      if (!remote) { setSyncStatus("error"); return; }
       const d = remote.data || {};
       const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
-      // Union des suppressions connues des deux côtés — une suppression a toujours le
-      // dernier mot, peu importe l'appareil qui l'a faite ou l'ordre de synchronisation.
-      const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...deletedTransactionIds } : deletedTransactionIds;
-      // Fusion réelle par identifiant pour toutes les listes — jamais un simple
-      // écrasement. Ce qui n'existe que d'un côté (local ou distant) est toujours
-      // conservé, y compris si un appareil a ajouté des données hors ligne pendant
-      // qu'un autre appareil en ajoutait d'autres en parallèle — SAUF ce qui a été
-      // explicitement supprimé (voir mergedDeletedIds ci-dessus), qui ne revient jamais.
-      const mergedTransactions = (d.transactions ? mergeById(transactions, d.transactions) : transactions)
-        .filter((t) => !mergedDeletedIds[t.id]);
-      const mergedLoans = d.loans ? mergeById(loans, d.loans) : loans;
-      const mergedBudgets = d.budgets ? mergeById(budgets, d.budgets) : budgets;
-      const mergedGoals = d.goals ? mergeById(goals, d.goals) : goals;
-      const mergedRecurring = d.recurring ? mergeById(recurring, d.recurring) : recurring;
-      const mergedRules = d.rules ? mergeById(rules, d.rules) : rules;
-      const mergedAccounts = d.accounts ? mergeById(accounts, d.accounts) : accounts;
-      // Fusion par union pour la liste d'activités (simples chaînes, pas d'id).
-      const mergedActivities = d.activities ? Array.from(new Set([...activities, ...d.activities])) : activities;
-      // Fusion par clé pour les correspondances catégorie→X : le choix fait sur CET
-      // appareil prime en cas de conflit sur une même clé (édition volontaire récente),
-      // mais toute clé nouvelle apportée par l'autre appareil est conservée.
-      const mergedCategoryGroups = d.categoryGroups ? { ...d.categoryGroups, ...categoryGroups } : categoryGroups;
-      const mergedCategoryScope = d.categoryScope ? { ...d.categoryScope, ...categoryScope } : categoryScope;
-      const mergedChargeOverrides = d.chargeOverrides ? { ...d.chargeOverrides, ...chargeOverrides } : chargeOverrides;
-      const mergedCategoryActivity = d.categoryActivity ? { ...d.categoryActivity, ...categoryActivity } : categoryActivity;
-      const mergedActivityCapital = d.activityCapital ? { ...d.activityCapital, ...activityCapital } : activityCapital;
-      const mergedCustomDep = d.customDepSubcategories ? { ...d.customDepSubcategories, ...customDepSubcategories } : customDepSubcategories;
-      const mergedCustomRev = d.customRevSubcategories ? { ...d.customRevSubcategories, ...customRevSubcategories } : customRevSubcategories;
-      // Les réglages scalaires (pas de fusion possible) suivent la comparaison de
-      // fraîcheur : la version la plus récemment modifiée localement l'emporte.
-      const localIsNewer = lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt));
-      const finalEnvelopeCap = localIsNewer || typeof d.envelopeCap !== "number" ? envelopeCap : d.envelopeCap;
-      const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? monthlyObjective : d.monthlyObjective;
-      const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? includeGrundfosVoiture : d.includeGrundfosVoiture;
 
-      // Corrigé le 11/08/2026 : repousser systématiquement après chaque fusion créait
-      // une boucle infinie avec l'abonnement temps réel — chaque envoi déclenchait une
-      // notification "la ligne distante a changé" sur TOUS les appareils (y compris
-      // celui qui vient d'écrire), qui relançait pullAndHydrate, qui repoussait à
-      // nouveau, indéfiniment ("Synchronisation…" / "Synchronisé" qui s'alternaient en
-      // continu). On ne touche désormais au state local et on ne repousse vers le
-      // serveur QUE si la fusion a réellement changé quelque chose.
-      const localChanged = !eq(mergedTransactions, transactions) || !eq(mergedLoans, loans) || !eq(mergedBudgets, budgets)
-        || !eq(mergedGoals, goals) || !eq(mergedRecurring, recurring) || !eq(mergedRules, rules) || !eq(mergedAccounts, accounts)
-        || !eq(mergedActivities, activities) || !eq(mergedCategoryGroups, categoryGroups) || !eq(mergedCategoryScope, categoryScope)
-        || !eq(mergedChargeOverrides, chargeOverrides) || !eq(mergedCategoryActivity, categoryActivity) || !eq(mergedActivityCapital, activityCapital)
-        || !eq(mergedCustomDep, customDepSubcategories) || !eq(mergedCustomRev, customRevSubcategories) || !eq(mergedDeletedIds, deletedTransactionIds)
-        || finalEnvelopeCap !== envelopeCap || finalMonthlyObjective !== monthlyObjective || finalIncludeGrundfos !== includeGrundfosVoiture;
+      const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...s.deletedTransactionIds } : s.deletedTransactionIds;
+      const mergedTransactions = (d.transactions ? mergeById(s.transactions, d.transactions) : s.transactions).filter((t: Transaction) => !mergedDeletedIds[t.id]);
+      const mergedLoans = d.loans ? mergeById(s.loans, d.loans) : s.loans;
+      const mergedBudgets = d.budgets ? mergeById(s.budgets, d.budgets) : s.budgets;
+      const mergedGoals = d.goals ? mergeById(s.goals, d.goals) : s.goals;
+      const mergedRecurring = d.recurring ? mergeById(s.recurring, d.recurring) : s.recurring;
+      const mergedRules = d.rules ? mergeById(s.rules, d.rules) : s.rules;
+      const mergedAccounts = d.accounts ? mergeById(s.accounts, d.accounts) : s.accounts;
+      const mergedActivities = d.activities ? Array.from(new Set([...s.activities, ...d.activities])) : s.activities;
+      const mergedCategoryGroups = d.categoryGroups ? { ...d.categoryGroups, ...s.categoryGroups } : s.categoryGroups;
+      const mergedCategoryScope = d.categoryScope ? { ...d.categoryScope, ...s.categoryScope } : s.categoryScope;
+      const mergedChargeOverrides = d.chargeOverrides ? { ...d.chargeOverrides, ...s.chargeOverrides } : s.chargeOverrides;
+      const mergedCategoryActivity = d.categoryActivity ? { ...d.categoryActivity, ...s.categoryActivity } : s.categoryActivity;
+      const mergedActivityCapital = d.activityCapital ? { ...d.activityCapital, ...s.activityCapital } : s.activityCapital;
+      const mergedCustomDep = d.customDepSubcategories ? { ...d.customDepSubcategories, ...s.customDepSubcategories } : s.customDepSubcategories;
+      const mergedCustomRev = d.customRevSubcategories ? { ...d.customRevSubcategories, ...s.customRevSubcategories } : s.customRevSubcategories;
+
+      const localIsNewer = lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt));
+      const finalEnvelopeCap = localIsNewer || typeof d.envelopeCap !== "number" ? s.envelopeCap : d.envelopeCap;
+      const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? s.monthlyObjective : d.monthlyObjective;
+      const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? s.includeGrundfosVoiture : d.includeGrundfosVoiture;
+
+      const localChanged = !eq(mergedTransactions, s.transactions) || !eq(mergedLoans, s.loans) || !eq(mergedBudgets, s.budgets)
+        || !eq(mergedGoals, s.goals) || !eq(mergedRecurring, s.recurring) || !eq(mergedRules, s.rules) || !eq(mergedAccounts, s.accounts)
+        || !eq(mergedActivities, s.activities) || !eq(mergedCategoryGroups, s.categoryGroups) || !eq(mergedCategoryScope, s.categoryScope)
+        || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
+        || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
+        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture;
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
@@ -10996,98 +11008,105 @@ export default function GrandLivre() {
         setMonthlyObjective(finalMonthlyObjective);
         setIncludeGrundfosVoiture(finalIncludeGrundfos);
         setDeletedTransactionIds(mergedDeletedIds);
+        // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
+        // une synchronisation en attente se déclenche tout de suite après, elle reparte
+        // bien de ce résultat fusionné plutôt que de l'ancien état.
+        syncedRef.current = {
+          transactions: mergedTransactions, loans: mergedLoans, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
+          rules: mergedRules, accounts: mergedAccounts, activities: mergedActivities, categoryGroups: mergedCategoryGroups,
+          categoryScope: mergedCategoryScope, chargeOverrides: mergedChargeOverrides, categoryActivity: mergedCategoryActivity,
+          activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
+          envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
+          deletedTransactionIds: mergedDeletedIds,
+        };
       }
 
       if (!remoteNeedsUpdate) {
         setSyncStatus("synced");
         setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-        return;
+      } else {
+        const ok = await pushRemoteState(code, {
+          transactions: mergedTransactions, categoryGroups: mergedCategoryGroups, categoryScope: mergedCategoryScope, rules: mergedRules,
+          loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
+          activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
+          chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
+          deletedTransactionIds: mergedDeletedIds,
+        });
+        setSyncStatus(ok ? "synced" : "error");
+        if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
       }
-      // Repousse le résultat fusionné — pour que le PROCHAIN appareil qui se connecte
-      // reçoive déjà l'union complète, pas juste la moitié des données.
-      const ok = await pushRemoteState(code, {
-        transactions: mergedTransactions, categoryGroups: mergedCategoryGroups, categoryScope: mergedCategoryScope, rules: mergedRules,
-        loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
-        activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
-        chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
-        deletedTransactionIds: mergedDeletedIds,
-      });
-      setSyncStatus(ok ? "synced" : "error");
-      if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-      return;
+    } catch {
+      setSyncStatus("error");
+    } finally {
+      syncInFlight.current = false;
+      // Une demande est arrivée pendant qu'on synchronisait déjà — on la rejoue une
+      // seule fois, avec les données les plus fraîches (pas d'accumulation infinie).
+      if (syncQueued.current) { syncQueued.current = false; runSync(); }
     }
-    setSyncStatus("synced");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds]);
+  }, []);
 
-  // Corrigé le 11/08/2026 : les relances ci-dessous (online, visibilitychange,
-  // intervalle) étaient configurées une seule fois au démarrage et gardaient donc
-  // captive la version de pullAndHydrate — et surtout des données (transactions, etc.)
-  // — de CE moment précis. Toute transaction saisie ensuite était invisible pour ces
-  // relances, qui fusionnaient silencieusement avec une version périmée. Cette
-  // référence est mise à jour à CHAQUE rendu, donc toujours à jour.
-  const pullAndHydrateRef = useRef(pullAndHydrate);
-  useEffect(() => { pullAndHydrateRef.current = pullAndHydrate; });
-
-  // Tire l'état distant au chargement si un code de synchronisation est défini — via un
-  // code déjà connu, ou via ?sync=... dans l'URL. Si ça résout un démarrage à vide
-  // (écran de blocage), on le débloque automatiquement — pas besoin de repasser par le
-  // choix manuel si la connexion s'est faite toute seule via le lien.
+  // Chargement initial (ou reconnexion via ?sync=... dans l'URL) : synchronise dès que
+  // possible, et débloque l'écran de choix (données de démarrage à vide) si ça réussit.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    let cancelled = false;
     (async () => {
-      if (cancelled) return;
-      await pullAndHydrateRef.current(syncCode);
-      if (!cancelled && txStartedEmpty) setDataGateResolved(true);
+      await runSync();
+      if (txStartedEmpty) setDataGateResolved(true);
     })();
-    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Une transaction saisie hors-ligne restait bien enregistrée localement, mais la
-  // tentative d'envoi vers le serveur avait échoué silencieusement (pas de réseau) — et
-  // rien ne la relançait automatiquement une fois la connexion revenue. On écoute
-  // maintenant l'événement "online" du navigateur pour redéclencher une synchronisation
-  // complète (fusion incluse) dès que le réseau revient, avec toujours les données les
-  // plus fraîches (via la référence ci-dessus, jamais périmée).
+  // Note la date de toute VRAIE modification locale (pas une fusion venue d'ailleurs,
+  // filtrée via skipNextPush, ni le tout premier rendu au chargement) — persistée pour
+  // survivre à un rechargement.
+  useEffect(() => {
+    if (!allLoaded) return;
+    if (!localChangeTrackInit.current) { localChangeTrackInit.current = true; return; }
+    if (skipNextPush.current) { skipNextPush.current = false; return; }
+    const now = new Date().toISOString();
+    lastLocalChangeRef.current = now;
+    try { localStorage.setItem("gl-last-local-change", now); } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, allLoaded]);
+
+  // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
+  // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
+  const editSyncTimer = useRef<any>(null);
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    const onOnline = () => { pullAndHydrateRef.current(syncCode); };
-    // Filet de sécurité supplémentaire : l'événement "online" n'est pas toujours fiable
-    // sur mobile (Safari iOS notamment) — on retente aussi dès que l'app revient au
-    // premier plan, ce qui couvre le cas "reconnecté mais l'app était déjà ouverte".
-    const onVisible = () => { if (document.visibilityState === "visible") pullAndHydrateRef.current(syncCode); };
+    if (editSyncTimer.current) clearTimeout(editSyncTimer.current);
+    editSyncTimer.current = setTimeout(runSync, 500);
+    return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
+
+  // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
+  // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
+  // plan de l'app, et un sondage toutes les 20 secondes en dernier recours.
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    const onOnline = () => runSync();
+    const onVisible = () => { if (document.visibilityState === "visible") runSync(); };
     window.addEventListener("online", onOnline);
     document.addEventListener("visibilitychange", onVisible);
+    const interval = setInterval(runSync, 20000);
     return () => {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Filet de sécurité le plus robuste des trois : indépendant de tout événement
-  // navigateur (qui peut ne pas se déclencher de façon fiable selon l'appareil/OS) — une
-  // synchronisation (avec fusion) est retentée toutes les 20 secondes tant que l'app est
-  // ouverte et qu'un code est configuré. Chaque appel est sans risque : la fusion ne peut
-  // jamais faire disparaître une donnée, seulement en ajouter.
-  useEffect(() => {
-    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    const interval = setInterval(() => { pullAndHydrateRef.current(syncCode); }, 20000);
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allLoaded, syncCode]);
-
-  // Abonnement temps réel : dès qu'un autre appareil modifie la ligne distante, on la
-  // retire immédiatement — sans avoir à recharger la page. Repli silencieux si le canal
-  // temps réel n'est pas disponible (ex: aperçu Claude) ; le pull différé continue seul.
+  // Abonnement temps réel : dès qu'un autre appareil modifie la ligne distante, on
+  // resynchronise immédiatement — sans avoir à recharger la page.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) { setRealtimeConnected(false); return; }
     let unsub: (() => void) | null = null;
     let cancelled = false;
     (async () => {
-      const fn = await subscribeRealtime(syncCode, () => { pullAndHydrateRef.current(syncCode); });
+      const fn = await subscribeRealtime(syncCode, () => runSync());
       if (cancelled) { fn?.(); return; }
       unsub = fn;
       setRealtimeConnected(!!fn);
@@ -11096,54 +11115,15 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Note la date de toute VRAIE modification locale (pas un pull, filtré via
-  // skipNextPush ci-dessous, ni le tout premier rendu au chargement) — persistée pour
-  // survivre à un rechargement, seule façon de savoir après coup si le local était plus
-  // récent que le serveur au moment où l'app s'est fermée.
-  useEffect(() => {
-    if (!allLoaded) return;
-    if (!localChangeTrackInit.current) { localChangeTrackInit.current = true; return; }
-    if (skipNextPush.current) return; // ce changement vient d'un pull, pas d'une saisie
-    const now = new Date().toISOString();
-    lastLocalChangeRef.current = now;
-    try { localStorage.setItem("gl-last-local-change", now); } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, allLoaded]);
-
-  // Pousse l'état local vers le cloud après chaque modification. Délai raccourci à
-  // 500ms (au lieu de 1,5s) le 11/08/2026 pour réduire la fenêtre de risque où une
-  // fermeture rapide de l'app laisse le serveur avec une version périmée — la
-  // comparaison de fraîcheur ci-dessus protège aussi contre ce cas, mais moins
-  // d'attente reste préférable.
-  useEffect(() => {
-    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    if (skipNextPush.current) { skipNextPush.current = false; return; }
-    if (pushTimer.current) clearTimeout(pushTimer.current);
-    pushTimer.current = setTimeout(async () => {
-      setSyncStatus("syncing");
-      const ok = await pushRemoteState(syncCode, {
-        transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-        activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-        deletedTransactionIds,
-      });
-      setSyncStatus(ok ? "synced" : "error");
-      if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-    }, 500);
-    return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
-
-  // Filet de sécurité final : si l'app se ferme/passe en arrière-plan alors qu'un envoi
-  // est encore en attente (fenêtre de 500ms), on tente un envoi immédiat "best effort".
-  // Corrigé le 11/08/2026 : la version précédente utilisait sendBeacon, qui NE PEUT PAS
-  // envoyer d'en-têtes personnalisés (apikey/Authorization) — Supabase rejetait donc
-  // CHAQUE tentative silencieusement, sans jamais avertir de rien. C'est ce qui a causé
-  // la perte de la transaction saisie juste avant fermeture de l'app. fetch avec
-  // keepalive:true fonctionne pendant la fermeture ET supporte les en-têtes complets.
+  // Filet de sécurité final : si l'app se ferme/passe en arrière-plan alors qu'une
+  // synchronisation est encore en attente, tentative d'envoi immédiat "best effort" via
+  // fetch+keepalive (fonctionne pendant la fermeture, contrairement à un fetch normal —
+  // et contrairement à sendBeacon, supporte les en-têtes d'authentification requis).
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
     const flush = () => {
-      if (!pushTimer.current) return;
+      if (!editSyncTimer.current) return;
+      const s = syncedRef.current;
       try {
         fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
           method: "POST",
@@ -11152,10 +11132,7 @@ export default function GrandLivre() {
             apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
             "Content-Type": "application/json", Prefer: "resolution=merge-duplicates",
           },
-          body: JSON.stringify({
-            sync_code: syncCode, updated_at: new Date().toISOString(),
-            data: { transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds },
-          }),
+          body: JSON.stringify({ sync_code: syncCode, updated_at: new Date().toISOString(), data: s }),
         }).catch(() => {});
       } catch {}
     };
@@ -11166,8 +11143,7 @@ export default function GrandLivre() {
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("blur", flush);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
+  }, [allLoaded, syncCode]);
 
   // Réutilisée par le Sauvegarde et par l'écran de choix ci-dessous.
   const restoreFromBackup = (data: any) => {
@@ -11410,17 +11386,7 @@ export default function GrandLivre() {
               syncStatus={syncStatus}
               lastSyncedAt={lastSyncedAt}
               realtimeConnected={realtimeConnected}
-              onForceSync={async () => {
-                if (!syncCode) return;
-                setSyncStatus("syncing");
-                const ok = await pushRemoteState(syncCode, {
-                  transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                  deletedTransactionIds,
-                });
-                setSyncStatus(ok ? "synced" : "error");
-                if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-              }}
+              onForceSync={() => { runSync(); }}
             />
           )}
         </main>
