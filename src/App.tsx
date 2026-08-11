@@ -10967,6 +10967,15 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories]);
 
+  // Corrigé le 11/08/2026 : les relances ci-dessous (online, visibilitychange,
+  // intervalle) étaient configurées une seule fois au démarrage et gardaient donc
+  // captive la version de pullAndHydrate — et surtout des données (transactions, etc.)
+  // — de CE moment précis. Toute transaction saisie ensuite était invisible pour ces
+  // relances, qui fusionnaient silencieusement avec une version périmée. Cette
+  // référence est mise à jour à CHAQUE rendu, donc toujours à jour.
+  const pullAndHydrateRef = useRef(pullAndHydrate);
+  useEffect(() => { pullAndHydrateRef.current = pullAndHydrate; });
+
   // Tire l'état distant au chargement si un code de synchronisation est défini — via un
   // code déjà connu, ou via ?sync=... dans l'URL. Si ça résout un démarrage à vide
   // (écran de blocage), on le débloque automatiquement — pas besoin de repasser par le
@@ -10976,26 +10985,26 @@ export default function GrandLivre() {
     let cancelled = false;
     (async () => {
       if (cancelled) return;
-      await pullAndHydrate(syncCode);
+      await pullAndHydrateRef.current(syncCode);
       if (!cancelled && txStartedEmpty) setDataGateResolved(true);
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Corrigé le 11/08/2026 : une transaction saisie hors-ligne restait bien enregistrée
-  // localement, mais la tentative d'envoi vers le serveur avait échoué silencieusement
-  // (pas de réseau) — et RIEN ne la relançait automatiquement une fois la connexion
-  // revenue. On écoute maintenant l'événement "online" du navigateur pour redéclencher
-  // une synchronisation complète (fusion incluse) dès que le réseau revient, sans
-  // attendre une prochaine modification ou un rechargement de la page.
+  // Une transaction saisie hors-ligne restait bien enregistrée localement, mais la
+  // tentative d'envoi vers le serveur avait échoué silencieusement (pas de réseau) — et
+  // rien ne la relançait automatiquement une fois la connexion revenue. On écoute
+  // maintenant l'événement "online" du navigateur pour redéclencher une synchronisation
+  // complète (fusion incluse) dès que le réseau revient, avec toujours les données les
+  // plus fraîches (via la référence ci-dessus, jamais périmée).
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    const onOnline = () => { pullAndHydrate(syncCode); };
+    const onOnline = () => { pullAndHydrateRef.current(syncCode); };
     // Filet de sécurité supplémentaire : l'événement "online" n'est pas toujours fiable
     // sur mobile (Safari iOS notamment) — on retente aussi dès que l'app revient au
     // premier plan, ce qui couvre le cas "reconnecté mais l'app était déjà ouverte".
-    const onVisible = () => { if (document.visibilityState === "visible") pullAndHydrate(syncCode); };
+    const onVisible = () => { if (document.visibilityState === "visible") pullAndHydrateRef.current(syncCode); };
     window.addEventListener("online", onOnline);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -11012,7 +11021,7 @@ export default function GrandLivre() {
   // jamais faire disparaître une donnée, seulement en ajouter.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    const interval = setInterval(() => { pullAndHydrate(syncCode); }, 20000);
+    const interval = setInterval(() => { pullAndHydrateRef.current(syncCode); }, 20000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
@@ -11025,7 +11034,7 @@ export default function GrandLivre() {
     let unsub: (() => void) | null = null;
     let cancelled = false;
     (async () => {
-      const fn = await subscribeRealtime(syncCode, () => { pullAndHydrate(syncCode); });
+      const fn = await subscribeRealtime(syncCode, () => { pullAndHydrateRef.current(syncCode); });
       if (cancelled) { fn?.(); return; }
       unsub = fn;
       setRealtimeConnected(!!fn);
