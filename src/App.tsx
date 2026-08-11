@@ -7260,6 +7260,11 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       // elle s'affichait comme "/" (ex: "508/111" au lieu de "508 111"). Toute chaîne
       // affichée dans ce PDF passe par ce filtre avant écriture.
       const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
+      // Convertit une couleur hex (ex: cellColors) en triplet RGB pour jsPDF.
+      const hexToRgb = (hex: string): [number, number, number] => {
+        const h = hex.replace("#", "");
+        return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+      };
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
@@ -7304,13 +7309,9 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
             didParseCell: (data: any) => {
               if (b.warnRows?.includes(data.row.index) && data.section === "body") data.cell.styles.textColor = [193, 84, 63];
-              // Colonne "Évolution" (%) : vert si la nature baisse, rouge si elle augmente —
-              // même logique que la colonne colorée à l'écran, rejouée ici sur le signe du
-              // texte affiché plutôt que sur cellColors (non transposable en RGB jsPDF).
-              if (data.section === "body" && b.columns[data.column.index] === "Évolution") {
-                const txt = String(data.cell.raw);
-                if (txt.startsWith("-")) data.cell.styles.textColor = [63, 156, 122];
-                else if (txt.startsWith("+")) data.cell.styles.textColor = [193, 84, 63];
+              if (data.section === "body") {
+                const c = b.cellColors?.[data.row.index]?.[data.column.index];
+                if (c) data.cell.styles.textColor = hexToRgb(c);
               }
             },
           });
@@ -10256,9 +10257,9 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       blocks: [
         {
           kind: "table" as const,
-          columns: ["Nature", curLabelShort, prevLabelShort, "Écart", "Évolution"],
-          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, pctLabelOf(pctOf(d))]),
-          cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, pctColorOf(pctOf(d))]),
+          columns: ["Nature", curLabelShort, prevLabelShort, "Écart"],
+          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)} (${pctLabelOf(pctOf(d))})`]),
+          cellColors: deltas.map((d) => [undefined, undefined, undefined, pctColorOf(pctOf(d))]),
         },
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
