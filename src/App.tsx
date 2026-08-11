@@ -7359,15 +7359,15 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
               </div>
             );
             if (b.kind === "table") return (
-              <div key={i} style={{ marginBottom: 16, overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <div key={i} style={{ marginBottom: 16, overflowX: "auto", maxWidth: "100%" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5, tableLayout: "fixed" }}>
                   <thead>
-                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 8px", color: COLOR.inkMuted, fontWeight: 600, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}>{c}</th>)}</tr>
+                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", color: COLOR.inkMuted, fontWeight: 600, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}>{c}</th>)}</tr>
                   </thead>
                   <tbody>
                     {b.rows.map((row, ri) => (
                       <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
-                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 8px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}` }}>{cell}</td>)}
+                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
                       </tr>
                     ))}
                   </tbody>
@@ -10201,6 +10201,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
     const curLabel = key === "today" ? "Aujourd'hui" : "Mois en cours";
     const prevLabel = `Même ${key === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevMonthKeyVal)})`;
+    // Intitulés courts pour les en-têtes du tableau — la version complète reste dans la
+    // ligne "formula" juste au-dessus, pour ne pas forcer un défilement horizontal sur
+    // mobile avec des en-têtes trop longs, sur demande explicite de l'utilisateur (11/08/2026).
+    const curLabelShort = key === "today" ? "Auj." : "Ce mois";
+    const prevLabelShort = "Mois dernier";
 
     const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
     const valueOf = (rows: typeof curRows, g: string) => rows.find((r) => r.group === g)?.value || 0;
@@ -10232,7 +10237,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
       blocks: [
-        { kind: "table" as const, columns: ["Nature", curLabel, prevLabel, "Écart"], rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`]) },
+        { kind: "table" as const, columns: ["Nature", curLabelShort, prevLabelShort, "Écart"], rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`]) },
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
     };
