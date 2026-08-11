@@ -10169,17 +10169,6 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       .filter((r) => r.value > 0);
   };
   const [kpiDetailKey, setKpiDetailKey] = useState<"today" | "month" | null>(null);
-  const buildKpiGroupDetail = (key: "today" | "month") => {
-    const pred = key === "today" ? (t: any) => t.date === today : (t: any) => dateToMonthKey(t.date) === currentMonthKey;
-    const rows = groupBreakdown(pred);
-    const total = rows.reduce((a, r) => a + r.value, 0);
-    return {
-      title: key === "today" ? "Aujourd'hui — dépenses par nature" : "Mois en cours — dépenses par nature",
-      headline: `${fmt(total)} FCFA`,
-      formula: "Répartition des dépenses de la période selon leur classification Nécessaire / Productif / Non-productif",
-      blocks: [{ kind: "table" as const, columns: ["Nature", "Montant (FCFA)", "%"], rows: rows.map((r) => [r.group, fmt(r.value), `${r.pct.toFixed(0)}%`]) }],
-    };
-  };
 
   // Comparaisons "vs même période le mois dernier" — même logique que la carte déjà
   // existante dans le Conseiller quotidien ("Mieux que le mois dernier à la même date"),
@@ -10194,6 +10183,32 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const todayLastMonthTotals = sumFor((t) => t.date === sameDayLastMonth);
   const weekLastMonthTotals = sumFor((t) => t.date >= weekStartDayLastMonth && t.date <= sameDayLastMonth);
   const monthLastMonthTotals = sumFor((t) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum);
+
+  // Construit la fiche de détail avec la répartition par nature ET, juste en dessous,
+  // la même répartition pour la période comparative — sur demande explicite de
+  // l'utilisateur (11/08/2026) : voir les deux, pas seulement la période en cours.
+  const buildKpiGroupDetail = (key: "today" | "month") => {
+    const curPred = key === "today" ? (t: any) => t.date === today : (t: any) => dateToMonthKey(t.date) === currentMonthKey;
+    const prevPred = key === "today"
+      ? (t: any) => t.date === sameDayLastMonth
+      : (t: any) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum;
+    const curRows = groupBreakdown(curPred);
+    const prevRows = groupBreakdown(prevPred);
+    const curTotal = curRows.reduce((a, r) => a + r.value, 0);
+    const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
+    const curLabel = key === "today" ? "Aujourd'hui" : "Mois en cours";
+    const prevLabel = key === "today" ? `Même jour le mois dernier (${monthLabel(prevMonthKeyVal)})` : `Même période le mois dernier (${monthLabel(prevMonthKeyVal)})`;
+    return {
+      title: key === "today" ? "Aujourd'hui — dépenses par nature" : "Mois en cours — dépenses par nature",
+      headline: `${fmt(curTotal)} FCFA`,
+      formula: "Répartition des dépenses selon leur classification Nécessaire / Productif / Non-productif, période actuelle et période comparative",
+      blocks: [
+        { kind: "table" as const, columns: [curLabel, "Montant (FCFA)", "%"], rows: curRows.map((r) => [r.group, fmt(r.value), `${r.pct.toFixed(0)}%`]) },
+        { kind: "table" as const, columns: [prevLabel, "Montant (FCFA)", "%"], rows: prevRows.length ? prevRows.map((r) => [r.group, fmt(r.value), `${r.pct.toFixed(0)}%`]) : [["Aucune dépense", "0", "—"]] },
+        { kind: "kv" as const, rows: [{ label: "Variation du total", value: `${fmt(curTotal)} → ${fmt(prevTotal)} FCFA`, strong: true }] },
+      ],
+    };
+  };
 
   const pctDelta = (cur: number, prev: number) => (prev !== 0 ? ((cur - prev) / Math.abs(prev)) * 100 : null);
   const vsHint = (cur: number, prev: number, suffix: string) => {
