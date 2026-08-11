@@ -10701,6 +10701,15 @@ export default function GrandLivre() {
   // silencieusement les données de secours en "vraies" données.
   const [dataGateResolved, setDataGateResolved] = useState(false);
   const [transactions, setTransactions, txLoaded, txStartedEmpty] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions, dataGateResolved);
+  // Corrigé le 11/08/2026 : ce verrou (voulu pour bloquer la sauvegarde tant que l'écran
+  // de choix "aucune donnée trouvée" n'est pas résolu) bloquait aussi, par effet de bord,
+  // toute clé fraîchement introduite dans le code (ex: "gl-deleted-tx-ids", qui n'existait
+  // jamais avant) sur un appareil qui a pourtant déjà de vraies données ailleurs. Une
+  // suppression de transaction n'était donc jamais vraiment mémorisée d'une session à
+  // l'autre, et revenait à chaque rechargement de page. Le verrou ne doit s'appliquer que
+  // si CE périphérique démarre vraiment à vide (txStartedEmpty) — jamais pour une clé
+  // simplement nouvelle sur un appareil qui a déjà d'autres données établies.
+  const canSaveGated = !txStartedEmpty || dataGateResolved;
   // Corrigé le 11/08/2026 : une transaction supprimée revenait toute seule après une
   // synchronisation — cause identifiée avec certitude : la fusion (mergeById) ne fait
   // qu'AJOUTER ce qui manque d'un côté, elle ne peut pas distinguer "l'autre appareil a
@@ -10709,7 +10718,7 @@ export default function GrandLivre() {
   // transaction supprimée localement mais encore présente côté serveur revenait à la
   // prochaine synchronisation. On garde donc la liste des identifiants supprimés
   // (jamais oubliée), qui a toujours le dernier mot sur une fusion.
-  const [deletedTransactionIds, setDeletedTransactionIds] = usePersistentState<Record<string, string>>("gl-deleted-tx-ids", {}, dataGateResolved);
+  const [deletedTransactionIds, setDeletedTransactionIds] = usePersistentState<Record<string, string>>("gl-deleted-tx-ids", {}, canSaveGated);
   const setTransactionsTracked = (next: Transaction[]) => {
     const nextIds = new Set(next.map((t) => t.id));
     const removedIds = transactions.filter((t) => !nextIds.has(t.id)).map((t) => t.id);
@@ -10719,20 +10728,20 @@ export default function GrandLivre() {
     }
     setTransactions(next);
   };
-  const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups, dataGateResolved);
-  const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope, dataGateResolved);
-  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities, dataGateResolved);
-  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity, dataGateResolved);
-  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {}, dataGateResolved);
-  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0, dataGateResolved);
-  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, dataGateResolved);
-  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, dataGateResolved);
+  const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups, canSaveGated);
+  const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope, canSaveGated);
+  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities, canSaveGated);
+  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity, canSaveGated);
+  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {}, canSaveGated);
+  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0, canSaveGated);
+  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, canSaveGated);
+  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, canSaveGated);
   const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
   const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
   const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
   const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
-  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories, dataGateResolved);
-  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, dataGateResolved);
+  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories, canSaveGated);
+  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, canSaveGated);
   CUSTOM_DEP_SUBCATS = customDepSubcategories;
   CUSTOM_REV_SUBCATS = customRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
@@ -10777,13 +10786,13 @@ export default function GrandLivre() {
     });
     setCategoryScope(next);
   };
-  const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules, dataGateResolved);
-  const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans, dataGateResolved);
-  const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000, dataGateResolved);
-  const [accounts, setAccounts, accountsLoaded] = usePersistentState<Account[]>("gl-accounts", seedAccounts, dataGateResolved);
-  const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets, dataGateResolved);
-  const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals, dataGateResolved);
-  const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring, dataGateResolved);
+  const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules, canSaveGated);
+  const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans, canSaveGated);
+  const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000, canSaveGated);
+  const [accounts, setAccounts, accountsLoaded] = usePersistentState<Account[]>("gl-accounts", seedAccounts, canSaveGated);
+  const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets, canSaveGated);
+  const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals, canSaveGated);
+  const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring, canSaveGated);
   const [tab, setTab] = useState<Tab>("saisie");
   // Navigation contextuelle entre pages : navigateTo("categoryoverview", { category: "Shopping" })
   // change d'onglet ET transmet un contexte que la page de destination applique à son
