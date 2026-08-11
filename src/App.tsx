@@ -10701,6 +10701,24 @@ export default function GrandLivre() {
   // silencieusement les données de secours en "vraies" données.
   const [dataGateResolved, setDataGateResolved] = useState(false);
   const [transactions, setTransactions, txLoaded, txStartedEmpty] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions, dataGateResolved);
+  // Corrigé le 11/08/2026 : une transaction supprimée revenait toute seule après une
+  // synchronisation — cause identifiée avec certitude : la fusion (mergeById) ne fait
+  // qu'AJOUTER ce qui manque d'un côté, elle ne peut pas distinguer "l'autre appareil a
+  // ajouté ça, je ne le connais pas encore" de "j'ai supprimé ça volontairement, l'autre
+  // appareil n'est pas encore au courant". Sans mémoire des suppressions, toute
+  // transaction supprimée localement mais encore présente côté serveur revenait à la
+  // prochaine synchronisation. On garde donc la liste des identifiants supprimés
+  // (jamais oubliée), qui a toujours le dernier mot sur une fusion.
+  const [deletedTransactionIds, setDeletedTransactionIds] = usePersistentState<Record<string, string>>("gl-deleted-tx-ids", {}, dataGateResolved);
+  const setTransactionsTracked = (next: Transaction[]) => {
+    const nextIds = new Set(next.map((t) => t.id));
+    const removedIds = transactions.filter((t) => !nextIds.has(t.id)).map((t) => t.id);
+    if (removedIds.length) {
+      const now = new Date().toISOString();
+      setDeletedTransactionIds({ ...deletedTransactionIds, ...Object.fromEntries(removedIds.map((id) => [id, now])) });
+    }
+    setTransactions(next);
+  };
   const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups, dataGateResolved);
   const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope, dataGateResolved);
   const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities, dataGateResolved);
@@ -10902,11 +10920,16 @@ export default function GrandLivre() {
     if (remote) {
       const d = remote.data || {};
       const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+      // Union des suppressions connues des deux côtés — une suppression a toujours le
+      // dernier mot, peu importe l'appareil qui l'a faite ou l'ordre de synchronisation.
+      const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...deletedTransactionIds } : deletedTransactionIds;
       // Fusion réelle par identifiant pour toutes les listes — jamais un simple
       // écrasement. Ce qui n'existe que d'un côté (local ou distant) est toujours
       // conservé, y compris si un appareil a ajouté des données hors ligne pendant
-      // qu'un autre appareil en ajoutait d'autres en parallèle.
-      const mergedTransactions = d.transactions ? mergeById(transactions, d.transactions) : transactions;
+      // qu'un autre appareil en ajoutait d'autres en parallèle — SAUF ce qui a été
+      // explicitement supprimé (voir mergedDeletedIds ci-dessus), qui ne revient jamais.
+      const mergedTransactions = (d.transactions ? mergeById(transactions, d.transactions) : transactions)
+        .filter((t) => !mergedDeletedIds[t.id]);
       const mergedLoans = d.loans ? mergeById(loans, d.loans) : loans;
       const mergedBudgets = d.budgets ? mergeById(budgets, d.budgets) : budgets;
       const mergedGoals = d.goals ? mergeById(goals, d.goals) : goals;
@@ -10943,13 +10966,13 @@ export default function GrandLivre() {
         || !eq(mergedGoals, goals) || !eq(mergedRecurring, recurring) || !eq(mergedRules, rules) || !eq(mergedAccounts, accounts)
         || !eq(mergedActivities, activities) || !eq(mergedCategoryGroups, categoryGroups) || !eq(mergedCategoryScope, categoryScope)
         || !eq(mergedChargeOverrides, chargeOverrides) || !eq(mergedCategoryActivity, categoryActivity) || !eq(mergedActivityCapital, activityCapital)
-        || !eq(mergedCustomDep, customDepSubcategories) || !eq(mergedCustomRev, customRevSubcategories)
+        || !eq(mergedCustomDep, customDepSubcategories) || !eq(mergedCustomRev, customRevSubcategories) || !eq(mergedDeletedIds, deletedTransactionIds)
         || finalEnvelopeCap !== envelopeCap || finalMonthlyObjective !== monthlyObjective || finalIncludeGrundfos !== includeGrundfosVoiture;
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
-        || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories)
+        || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
         || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
 
       if (localChanged) {
@@ -10972,6 +10995,7 @@ export default function GrandLivre() {
         setEnvelopeCap(finalEnvelopeCap);
         setMonthlyObjective(finalMonthlyObjective);
         setIncludeGrundfosVoiture(finalIncludeGrundfos);
+        setDeletedTransactionIds(mergedDeletedIds);
       }
 
       if (!remoteNeedsUpdate) {
@@ -10986,6 +11010,7 @@ export default function GrandLivre() {
         loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
         activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
         chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
+        deletedTransactionIds: mergedDeletedIds,
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -10993,7 +11018,7 @@ export default function GrandLivre() {
     }
     setSyncStatus("synced");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds]);
 
   // Corrigé le 11/08/2026 : les relances ci-dessous (online, visibilitychange,
   // intervalle) étaient configurées une seule fois au démarrage et gardaient donc
@@ -11099,13 +11124,14 @@ export default function GrandLivre() {
       const ok = await pushRemoteState(syncCode, {
         transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
         activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+        deletedTransactionIds,
       });
       setSyncStatus(ok ? "synced" : "error");
       if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
     }, 500);
     return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
 
   // Filet de sécurité final : si l'app se ferme/passe en arrière-plan alors qu'un envoi
   // est encore en attente (fenêtre de 500ms), on tente un envoi immédiat "best effort".
@@ -11128,7 +11154,7 @@ export default function GrandLivre() {
           },
           body: JSON.stringify({
             sync_code: syncCode, updated_at: new Date().toISOString(),
-            data: { transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories },
+            data: { transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds },
           }),
         }).catch(() => {});
       } catch {}
@@ -11141,7 +11167,7 @@ export default function GrandLivre() {
       window.removeEventListener("blur", flush);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
 
   // Réutilisée par le Sauvegarde et par l'écran de choix ci-dessous.
   const restoreFromBackup = (data: any) => {
@@ -11309,14 +11335,14 @@ export default function GrandLivre() {
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
+          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} navContext={navContext} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
           {tab === "gestioncategories" && <CategoryManagementTab
-            transactions={transactions} setTransactions={setTransactions}
+            transactions={transactions} setTransactions={setTransactionsTracked}
             customDepSubcategories={customDepSubcategories} setCustomDepSubcategories={setCustomDepSubcategories}
             customRevSubcategories={customRevSubcategories} setCustomRevSubcategories={setCustomRevSubcategories}
             categoryGroups={categoryGroups} setCategoryGroups={setCategoryGroups}
@@ -11336,15 +11362,15 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
+          {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
-          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactions} />}
+          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
-          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
-          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} accounts={accounts} />}
+          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactionsTracked} rules={rules} setRules={setRules} accounts={accounts} />}
           {tab === "export" && <ExportTab filtered={filtered} filters={filters} setFilters={setFilters} allMonths={allMonths} />}
           {tab === "sauvegarde" && (
             <SauvegardeTab
@@ -11389,6 +11415,8 @@ export default function GrandLivre() {
                 setSyncStatus("syncing");
                 const ok = await pushRemoteState(syncCode, {
                   transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+                  deletedTransactionIds,
                 });
                 setSyncStatus(ok ? "synced" : "error");
                 if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -11438,7 +11466,7 @@ export default function GrandLivre() {
       )}
 
       {tab !== "saisie" && (
-        <QuickAddFAB transactions={transactions} setTransactions={setTransactions} accounts={accounts} categoryGroups={resolvedGroups} isMobile={isMobile} />
+        <QuickAddFAB transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} categoryGroups={resolvedGroups} isMobile={isMobile} />
       )}
     </div>
   );
