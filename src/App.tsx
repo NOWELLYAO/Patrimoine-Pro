@@ -10979,27 +10979,37 @@ export default function GrandLivre() {
   }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
 
   // Filet de sécurité final : si l'app se ferme/passe en arrière-plan alors qu'un envoi
-  // est encore en attente (fenêtre de 500ms), on tente un envoi immédiat "best effort"
-  // via sendBeacon (fiable même pendant la fermeture, contrairement à fetch normal).
+  // est encore en attente (fenêtre de 500ms), on tente un envoi immédiat "best effort".
+  // Corrigé le 11/08/2026 : la version précédente utilisait sendBeacon, qui NE PEUT PAS
+  // envoyer d'en-têtes personnalisés (apikey/Authorization) — Supabase rejetait donc
+  // CHAQUE tentative silencieusement, sans jamais avertir de rien. C'est ce qui a causé
+  // la perte de la transaction saisie juste avant fermeture de l'app. fetch avec
+  // keepalive:true fonctionne pendant la fermeture ET supporte les en-têtes complets.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
     const flush = () => {
       if (!pushTimer.current) return;
       try {
-        const body = JSON.stringify({
-          sync_code: syncCode, updated_at: new Date().toISOString(),
-          data: { transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories },
-        });
-        navigator.sendBeacon?.(
-          `${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`,
-          new Blob([body], { type: "application/json" })
-        );
+        fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
+          method: "POST",
+          keepalive: true,
+          headers: {
+            apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+            "Content-Type": "application/json", Prefer: "resolution=merge-duplicates",
+          },
+          body: JSON.stringify({
+            sync_code: syncCode, updated_at: new Date().toISOString(),
+            data: { transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories },
+          }),
+        }).catch(() => {});
       } catch {}
     };
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); });
     window.addEventListener("pagehide", flush);
+    window.addEventListener("blur", flush);
     return () => {
       window.removeEventListener("pagehide", flush);
+      window.removeEventListener("blur", flush);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
