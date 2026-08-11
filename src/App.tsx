@@ -7218,7 +7218,7 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
 type CalcDetailBlock =
   | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
-  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][] }
   | { kind: "note"; text: string; tone?: "warn" | "info" };
 
 // Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
@@ -7304,6 +7304,14 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
             didParseCell: (data: any) => {
               if (b.warnRows?.includes(data.row.index) && data.section === "body") data.cell.styles.textColor = [193, 84, 63];
+              // Colonne "Évolution" (%) : vert si la nature baisse, rouge si elle augmente —
+              // même logique que la colonne colorée à l'écran, rejouée ici sur le signe du
+              // texte affiché plutôt que sur cellColors (non transposable en RGB jsPDF).
+              if (data.section === "body" && b.columns[data.column.index] === "Évolution") {
+                const txt = String(data.cell.raw);
+                if (txt.startsWith("-")) data.cell.styles.textColor = [63, 156, 122];
+                else if (txt.startsWith("+")) data.cell.styles.textColor = [193, 84, 63];
+              }
             },
           });
           y = (doc as any).lastAutoTable.finalY + 10;
@@ -7367,7 +7375,10 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
                   <tbody>
                     {b.rows.map((row, ri) => (
                       <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
-                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
+                        {row.map((cell, ci) => {
+                          const cellColor = b.cellColors?.[ri]?.[ci];
+                          return <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: cellColor || (b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink), fontWeight: cellColor ? 600 : 400, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>;
+                        })}
                       </tr>
                     ))}
                   </tbody>
@@ -10211,6 +10222,12 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const valueOf = (rows: typeof curRows, g: string) => rows.find((r) => r.group === g)?.value || 0;
     const deltas = groups.map((g) => ({ group: g, cur: valueOf(curRows, g), prev: valueOf(prevRows, g), delta: valueOf(curRows, g) - valueOf(prevRows, g) }))
       .filter((d) => d.cur > 0 || d.prev > 0);
+    // Pourcentage de progression par nature — vert si la nature baisse (bonne nouvelle
+    // pour une dépense), rouge si elle augmente. Non calculable si la période précédente
+    // était à zéro (pas de base de comparaison) : affiché en neutre dans ce cas.
+    const pctOf = (d: { cur: number; prev: number; delta: number }) => (d.prev !== 0 ? (d.delta / Math.abs(d.prev)) * 100 : (d.cur !== 0 ? null : 0));
+    const pctColorOf = (pct: number | null) => (pct === null ? COLOR.inkMuted : pct < 0 ? COLOR.emeraldSoft : pct > 0 ? COLOR.claySoft : COLOR.inkMuted);
+    const pctLabelOf = (pct: number | null) => (pct === null ? "—" : `${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%`);
 
     const totalDelta = curTotal - prevTotal;
     // Repère la nature qui explique le plus l'évolution du total (en valeur absolue).
@@ -10237,7 +10254,12 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
       blocks: [
-        { kind: "table" as const, columns: ["Nature", curLabelShort, prevLabelShort, "Écart"], rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`]) },
+        {
+          kind: "table" as const,
+          columns: ["Nature", curLabelShort, prevLabelShort, "Écart", "Évolution"],
+          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, pctLabelOf(pctOf(d))]),
+          cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, pctColorOf(pctOf(d))]),
+        },
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
     };
