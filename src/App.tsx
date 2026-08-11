@@ -10901,6 +10901,7 @@ export default function GrandLivre() {
     const remote = await fetchRemoteState(code);
     if (remote) {
       const d = remote.data || {};
+      const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
       // Fusion réelle par identifiant pour toutes les listes — jamais un simple
       // écrasement. Ce qui n'existe que d'un côté (local ou distant) est toujours
       // conservé, y compris si un appareil a ajouté des données hors ligne pendant
@@ -10931,28 +10932,55 @@ export default function GrandLivre() {
       const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? monthlyObjective : d.monthlyObjective;
       const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? includeGrundfosVoiture : d.includeGrundfosVoiture;
 
-      skipNextPush.current = true;
-      setTransactions(mergedTransactions);
-      setLoans(mergedLoans);
-      setBudgets(mergedBudgets);
-      setGoals(mergedGoals);
-      setRecurring(mergedRecurring);
-      setRules(mergedRules);
-      setAccounts(mergedAccounts);
-      setActivities(mergedActivities);
-      setCategoryGroups(mergedCategoryGroups);
-      setCategoryScope(mergedCategoryScope);
-      setChargeOverrides(mergedChargeOverrides);
-      setCategoryActivity(mergedCategoryActivity);
-      setActivityCapital(mergedActivityCapital);
-      setCustomDepSubcategories(mergedCustomDep);
-      setCustomRevSubcategories(mergedCustomRev);
-      setEnvelopeCap(finalEnvelopeCap);
-      setMonthlyObjective(finalMonthlyObjective);
-      setIncludeGrundfosVoiture(finalIncludeGrundfos);
+      // Corrigé le 11/08/2026 : repousser systématiquement après chaque fusion créait
+      // une boucle infinie avec l'abonnement temps réel — chaque envoi déclenchait une
+      // notification "la ligne distante a changé" sur TOUS les appareils (y compris
+      // celui qui vient d'écrire), qui relançait pullAndHydrate, qui repoussait à
+      // nouveau, indéfiniment ("Synchronisation…" / "Synchronisé" qui s'alternaient en
+      // continu). On ne touche désormais au state local et on ne repousse vers le
+      // serveur QUE si la fusion a réellement changé quelque chose.
+      const localChanged = !eq(mergedTransactions, transactions) || !eq(mergedLoans, loans) || !eq(mergedBudgets, budgets)
+        || !eq(mergedGoals, goals) || !eq(mergedRecurring, recurring) || !eq(mergedRules, rules) || !eq(mergedAccounts, accounts)
+        || !eq(mergedActivities, activities) || !eq(mergedCategoryGroups, categoryGroups) || !eq(mergedCategoryScope, categoryScope)
+        || !eq(mergedChargeOverrides, chargeOverrides) || !eq(mergedCategoryActivity, categoryActivity) || !eq(mergedActivityCapital, activityCapital)
+        || !eq(mergedCustomDep, customDepSubcategories) || !eq(mergedCustomRev, customRevSubcategories)
+        || finalEnvelopeCap !== envelopeCap || finalMonthlyObjective !== monthlyObjective || finalIncludeGrundfos !== includeGrundfosVoiture;
+      const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
+        || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
+        || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
+        || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
+        || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories)
+        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
 
-      // Repousse immédiatement le résultat fusionné — pour que le PROCHAIN appareil qui
-      // se connecte reçoive déjà l'union complète, pas juste la moitié des données.
+      if (localChanged) {
+        skipNextPush.current = true;
+        setTransactions(mergedTransactions);
+        setLoans(mergedLoans);
+        setBudgets(mergedBudgets);
+        setGoals(mergedGoals);
+        setRecurring(mergedRecurring);
+        setRules(mergedRules);
+        setAccounts(mergedAccounts);
+        setActivities(mergedActivities);
+        setCategoryGroups(mergedCategoryGroups);
+        setCategoryScope(mergedCategoryScope);
+        setChargeOverrides(mergedChargeOverrides);
+        setCategoryActivity(mergedCategoryActivity);
+        setActivityCapital(mergedActivityCapital);
+        setCustomDepSubcategories(mergedCustomDep);
+        setCustomRevSubcategories(mergedCustomRev);
+        setEnvelopeCap(finalEnvelopeCap);
+        setMonthlyObjective(finalMonthlyObjective);
+        setIncludeGrundfosVoiture(finalIncludeGrundfos);
+      }
+
+      if (!remoteNeedsUpdate) {
+        setSyncStatus("synced");
+        setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+        return;
+      }
+      // Repousse le résultat fusionné — pour que le PROCHAIN appareil qui se connecte
+      // reçoive déjà l'union complète, pas juste la moitié des données.
       const ok = await pushRemoteState(code, {
         transactions: mergedTransactions, categoryGroups: mergedCategoryGroups, categoryScope: mergedCategoryScope, rules: mergedRules,
         loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
