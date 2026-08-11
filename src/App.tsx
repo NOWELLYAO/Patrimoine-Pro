@@ -10184,9 +10184,12 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const weekLastMonthTotals = sumFor((t) => t.date >= weekStartDayLastMonth && t.date <= sameDayLastMonth);
   const monthLastMonthTotals = sumFor((t) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum);
 
-  // Construit la fiche de détail avec la répartition par nature ET, juste en dessous,
-  // la même répartition pour la période comparative — sur demande explicite de
-  // l'utilisateur (11/08/2026) : voir les deux, pas seulement la période en cours.
+  // Construit la fiche de détail avec, pour chaque nature (Nécessaire/Productif/
+  // Non-productif), l'écart entre la période actuelle et la période comparative — pour
+  // répondre à la vraie question posée par l'utilisateur (11/08/2026) : une progression
+  // ou une régression du total est-elle fondée (portée par le Non-productif, qu'on
+  // maîtrise) ou inquiétante (si elle vient d'une baisse du Nécessaire, ce qui peut
+  // vouloir dire qu'on se prive de l'essentiel plutôt que de vraiment progresser) ?
   const buildKpiGroupDetail = (key: "today" | "month") => {
     const curPred = key === "today" ? (t: any) => t.date === today : (t: any) => dateToMonthKey(t.date) === currentMonthKey;
     const prevPred = key === "today"
@@ -10197,15 +10200,40 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const curTotal = curRows.reduce((a, r) => a + r.value, 0);
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
     const curLabel = key === "today" ? "Aujourd'hui" : "Mois en cours";
-    const prevLabel = key === "today" ? `Même jour le mois dernier (${monthLabel(prevMonthKeyVal)})` : `Même période le mois dernier (${monthLabel(prevMonthKeyVal)})`;
+    const prevLabel = `Même ${key === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevMonthKeyVal)})`;
+
+    const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
+    const valueOf = (rows: typeof curRows, g: string) => rows.find((r) => r.group === g)?.value || 0;
+    const deltas = groups.map((g) => ({ group: g, cur: valueOf(curRows, g), prev: valueOf(prevRows, g), delta: valueOf(curRows, g) - valueOf(prevRows, g) }))
+      .filter((d) => d.cur > 0 || d.prev > 0);
+
+    const totalDelta = curTotal - prevTotal;
+    // Repère la nature qui explique le plus l'évolution du total (en valeur absolue).
+    const biggestMover = [...deltas].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))[0];
+    let verdict = "";
+    if (Math.abs(totalDelta) < 1) {
+      verdict = "Total quasi stable sur les deux périodes — rien de notable à signaler.";
+    } else if (totalDelta < 0) {
+      // Baisse des dépenses = a priori une bonne nouvelle, mais tout dépend d'où elle vient.
+      if (biggestMover?.group === "Non-productif") verdict = `Baisse fondée : elle est portée principalement par le "Non-productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins), le poste le plus facile à maîtriser sans rien sacrifier d'essentiel.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `À surveiller : cette baisse vient surtout du "Nécessaire" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — vérifie qu'il ne s'agit pas d'une privation plutôt que d'une vraie économie.`;
+      else if (biggestMover?.group === "Productif") verdict = `Baisse portée par le "Productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — à vérifier que ce n'est pas un investissement ou un remboursement simplement décalé dans le temps.`;
+      else verdict = "Baisse du total, sans nature clairement dominante.";
+    } else {
+      // Hausse des dépenses = a priori à surveiller, mais peut être un investissement sain.
+      if (biggestMover?.group === "Productif") verdict = `Hausse plutôt saine : elle est portée principalement par le "Productif" (${fmt(biggestMover.delta)} FCFA de plus), donc probablement de l'investissement plutôt que du gaspillage.`;
+      else if (biggestMover?.group === "Non-productif") verdict = `À surveiller : cette hausse vient surtout du "Non-productif" (${fmt(biggestMover.delta)} FCFA de plus) — c'est le premier poste à réduire si besoin.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `Hausse portée par le "Nécessaire" (${fmt(biggestMover.delta)} FCFA de plus) — vérifie si c'est ponctuel (ex: une charge exceptionnelle) ou un vrai changement de rythme.`;
+      else verdict = "Hausse du total, sans nature clairement dominante.";
+    }
+
     return {
       title: key === "today" ? "Aujourd'hui — dépenses par nature" : "Mois en cours — dépenses par nature",
-      headline: `${fmt(curTotal)} FCFA`,
-      formula: "Répartition des dépenses selon leur classification Nécessaire / Productif / Non-productif, période actuelle et période comparative",
+      headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
+      formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
       blocks: [
-        { kind: "table" as const, columns: [curLabel, "Montant (FCFA)", "%"], rows: curRows.map((r) => [r.group, fmt(r.value), `${r.pct.toFixed(0)}%`]) },
-        { kind: "table" as const, columns: [prevLabel, "Montant (FCFA)", "%"], rows: prevRows.length ? prevRows.map((r) => [r.group, fmt(r.value), `${r.pct.toFixed(0)}%`]) : [["Aucune dépense", "0", "—"]] },
-        { kind: "kv" as const, rows: [{ label: "Variation du total", value: `${fmt(curTotal)} → ${fmt(prevTotal)} FCFA`, strong: true }] },
+        { kind: "table" as const, columns: ["Nature", curLabel, prevLabel, "Écart"], rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`]) },
+        { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
     };
   };
