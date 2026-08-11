@@ -7,6 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      injectRegister: false, // enregistrement manuel dans main.tsx, avec rechargement forcé sur mise à jour
       // Précache tout ce que Vite génère (JS, CSS, HTML) — l'app peut donc se lancer
       // hors-ligne même si le téléphone redémarre ou que l'onglet est fermé puis
       // rouvert sans connexion, sur demande explicite de l'utilisateur (11/08/2026).
