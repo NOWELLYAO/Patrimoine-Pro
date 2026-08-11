@@ -10156,6 +10156,31 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const weekTotals = sumFor((t) => t.date >= weekAgo && t.date <= today);
   const monthTotals = sumFor((t) => dateToMonthKey(t.date) === currentMonthKey);
 
+  // Répartition des dépenses par nature (Nécessaire/Productif/Non-productif) pour une
+  // fenêtre donnée — sur demande explicite de l'utilisateur (11/08/2026), pour les
+  // cartes "Aujourd'hui" et "Mois en cours — dépenses".
+  const groupBreakdown = (pred: (t: any) => boolean) => {
+    const dep = withGroup.filter((t) => t.type === "Dépense" && pred(t));
+    const total = dep.reduce((a, t) => a + t.amount, 0) || 1;
+    const byGroup: Record<string, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
+    dep.forEach((t) => { byGroup[t.group] = (byGroup[t.group] || 0) + t.amount; });
+    return (["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const)
+      .map((g) => ({ group: g, value: byGroup[g], pct: (byGroup[g] / total) * 100 }))
+      .filter((r) => r.value > 0);
+  };
+  const [kpiDetailKey, setKpiDetailKey] = useState<"today" | "month" | null>(null);
+  const buildKpiGroupDetail = (key: "today" | "month") => {
+    const pred = key === "today" ? (t: any) => t.date === today : (t: any) => dateToMonthKey(t.date) === currentMonthKey;
+    const rows = groupBreakdown(pred);
+    const total = rows.reduce((a, r) => a + r.value, 0);
+    return {
+      title: key === "today" ? "Aujourd'hui — dépenses par nature" : "Mois en cours — dépenses par nature",
+      headline: `${fmt(total)} FCFA`,
+      formula: "Répartition des dépenses de la période selon leur classification Nécessaire / Productif / Non-productif",
+      blocks: [{ kind: "table" as const, columns: ["Nature", "Montant (FCFA)", "%"], rows: rows.map((r) => [r.group, fmt(r.value), `${r.pct.toFixed(0)}%`]) }],
+    };
+  };
+
   // Comparaisons "vs même période le mois dernier" — même logique que la carte déjà
   // existante dans le Conseiller quotidien ("Mieux que le mois dernier à la même date"),
   // reprise ici pour chacun des 5 indicateurs, sur demande explicite de l'utilisateur.
@@ -10221,12 +10246,17 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} />
+        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetailKey("today")} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
         <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.solde, monthLastMonthTotals.solde), "up")} />
-        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} />
+        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetailKey("month")} />
         <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
+
+      {kpiDetailKey && (() => {
+        const d = buildKpiGroupDetail(kpiDetailKey);
+        return <CalcDetailSheet open={!!kpiDetailKey} onClose={() => setKpiDetailKey(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} />;
+      })()}
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
         {(() => {
