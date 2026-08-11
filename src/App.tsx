@@ -11005,6 +11005,18 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
+  // Filet de sécurité le plus robuste des trois : indépendant de tout événement
+  // navigateur (qui peut ne pas se déclencher de façon fiable selon l'appareil/OS) — une
+  // synchronisation (avec fusion) est retentée toutes les 20 secondes tant que l'app est
+  // ouverte et qu'un code est configuré. Chaque appel est sans risque : la fusion ne peut
+  // jamais faire disparaître une donnée, seulement en ajouter.
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    const interval = setInterval(() => { pullAndHydrate(syncCode); }, 20000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allLoaded, syncCode]);
+
   // Abonnement temps réel : dès qu'un autre appareil modifie la ligne distante, on la
   // retire immédiatement — sans avoir à recharger la page. Repli silencieux si le canal
   // temps réel n'est pas disponible (ex: aperçu Claude) ; le pull différé continue seul.
