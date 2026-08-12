@@ -98,16 +98,24 @@ const SYNC_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 // modifiée gagne (basé sur un éventuel champ "updatedAt" sur l'élément, sinon la version
 // distante — supposée déjà fusionnée par un appareil précédent). Ce qui n'existe QUE
 // d'un côté est toujours conservé : rien n'est jamais perdu par simple écrasement.
-function mergeById<T extends { id: string }>(local: T[], remote: T[]): T[] {
+function mergeById<T extends { id: string; updatedAt?: string }>(local: T[], remote: T[]): T[] {
   const byId = new Map<string, T>();
   local.forEach((item) => byId.set(item.id, item));
   remote.forEach((item) => {
     const existing = byId.get(item.id);
     if (!existing) { byId.set(item.id, item); return; }
-    // Les deux existent : on ne peut pas savoir en toute certitude laquelle est la plus
-    // récente sans horodatage par élément (absent du modèle actuel) — on garde la
-    // version distante en cas de doublon, car elle représente déjà une fusion d'un
-    // appareil précédent, jamais une perte silencieuse d'une donnée locale unique.
+    // Les deux existent : si l'un des deux porte un horodatage de modification, on garde
+    // le plus récent — ce qui permet à une édition locale (pas encore poussée) de
+    // survivre à un cycle de synchronisation qui lirait encore l'ancienne version
+    // distante, au lieu d'être silencieusement écrasée. Une absence d'horodatage est
+    // traitée comme "plus ancien que tout" plutôt que de bloquer la comparaison.
+    if (existing.updatedAt || item.updatedAt) {
+      byId.set(item.id, (item.updatedAt || "") > (existing.updatedAt || "") ? item : existing);
+      return;
+    }
+    // Filet de sécurité historique (aucun horodatage disponible d'aucun côté) : on garde
+    // la version distante, car elle représente déjà une fusion d'un appareil précédent,
+    // jamais une perte silencieuse d'une donnée locale unique.
     byId.set(item.id, item);
   });
   return Array.from(byId.values());
@@ -204,6 +212,11 @@ interface Transaction {
   // réels (qui restent basés sur "account", où l'argent a vraiment bougé).
   onBehalfOf?: string;
   settled?: boolean; // avance entre comptes déjà réglée entre les deux comptes concernés
+  // Horodatage de la dernière modification (posé à chaque édition) — permet à la fusion
+  // de synchronisation de savoir laquelle, entre la version locale et la version distante
+  // d'une même transaction déjà synchronisée, est la plus récente. Absent sur les données
+  // historiques jamais rééditées depuis l'ajout de ce champ.
+  updatedAt?: string;
 }
 interface Account {
   id: string;
@@ -1354,7 +1367,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, updatedAt: new Date().toISOString() });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
