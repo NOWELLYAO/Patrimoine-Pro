@@ -7236,7 +7236,7 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
 type CalcDetailBlock =
   | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
-  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][] }
   | { kind: "note"; text: string; tone?: "warn" | "info" };
 
 // Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
@@ -7322,7 +7322,14 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
             styles: { fontSize: 8 },
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
             didParseCell: (data: any) => {
-              if (b.warnRows?.includes(data.row.index) && data.section === "body") data.cell.styles.textColor = [193, 84, 63];
+              if (data.section !== "body") return;
+              const cellColor = b.cellColors?.[data.row.index]?.[data.column.index];
+              if (cellColor) {
+                const hex = cellColor.replace("#", "");
+                data.cell.styles.textColor = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+              } else if (b.warnRows?.includes(data.row.index)) {
+                data.cell.styles.textColor = [193, 84, 63];
+              }
             },
           });
           y = (doc as any).lastAutoTable.finalY + 10;
@@ -7388,7 +7395,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
                   <tbody>
                     {b.rows.map((row, ri) => (
                       <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
-                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
+                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", fontWeight: b.cellColors?.[ri]?.[ci] ? 600 : 400, color: b.cellColors?.[ri]?.[ci] || (b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink), borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
                       </tr>
                     ))}
                   </tbody>
@@ -10268,7 +10275,14 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
       blocks: [
-        { kind: "table" as const, columns: ["Nature", curLabelShort, prevLabelShort, "Écart"], rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`]) },
+        {
+          kind: "table" as const,
+          columns: ["Nature", curLabelShort, prevLabelShort, "Écart", "Évolution"],
+          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, `${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(0)}%`]),
+          // Vert quand les dépenses de cette nature ont baissé, rouge quand elles ont augmenté —
+          // la vraie lecture (bonne ou mauvaise nouvelle selon la nature) reste dans le verdict ci-dessous.
+          cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, Math.abs(d.delta) < 1 ? COLOR.inkMuted : d.delta < 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
+        },
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
     };
