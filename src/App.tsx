@@ -8,7 +8,7 @@ import {
 import {
   LayoutDashboard, CalendarRange, PiggyBank, Layers, BookOpen, TrendingUp,
   TrendingDown, Filter, X, Plus, Pencil, Trash2, Save, RotateCcw, Search,
-  ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight,
+  ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight, ChevronLeft,
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu, ChevronDown,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail, Rocket, Compass,
@@ -1620,6 +1620,11 @@ function prevMonthKey(mk: string): string {
 function nextMonthKey(mk: string): string {
   const [y, m] = mk.split("_").map(Number);
   return m === 12 ? `${y + 1}_1` : `${y}_${m + 1}`;
+}
+function addDays(dateISO: string, n: number): string {
+  const d = new Date(dateISO + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
 }
 function daysInMonthOf(mk: string): number {
   const [y, m] = mk.split("_").map(Number);
@@ -7248,8 +7253,9 @@ function CalcDetailIcon({ onClick }: { onClick: () => void }) {
   );
 }
 
-function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
+function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
+  onPrev?: () => void; onNext?: () => void;
 }) {
   const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   if (!open) return null;
@@ -7353,6 +7359,8 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
             <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 4, fontStyle: "italic" }}>{formula}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            {onPrev && <button onClick={onPrev} title="Période précédente" style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", padding: 4 }}><ChevronLeft size={18} /></button>}
+            {onNext && <button onClick={onNext} title="Période suivante" style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", padding: 4 }}><ChevronRight size={18} /></button>}
             <button onClick={downloadPdf} disabled={pdfState === "loading"} title="Télécharger cette fiche en PDF" style={{ background: "transparent", border: "none", color: pdfState === "error" ? COLOR.claySoft : COLOR.slateBlueSoft, cursor: pdfState === "loading" ? "default" : "pointer", display: "flex", padding: 4 }}>
               {pdfState === "loading" ? <Loader2 size={17} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={17} />}
             </button>
@@ -10181,7 +10189,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       .map((g) => ({ group: g, value: byGroup[g], pct: (byGroup[g] / total) * 100 }))
       .filter((r) => r.value > 0);
   };
-  const [kpiDetailKey, setKpiDetailKey] = useState<"today" | "month" | null>(null);
+  const [kpiDetail, setKpiDetail] = useState<{ mode: "today" | "month"; anchor: string } | null>(null);
 
   // Comparaisons "vs même période le mois dernier" — même logique que la carte déjà
   // existante dans le Conseiller quotidien ("Mieux que le mois dernier à la même date"),
@@ -10203,21 +10211,28 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   // ou une régression du total est-elle fondée (portée par le Non-productif, qu'on
   // maîtrise) ou inquiétante (si elle vient d'une baisse du Nécessaire, ce qui peut
   // vouloir dire qu'on se prive de l'essentiel plutôt que de vraiment progresser) ?
-  const buildKpiGroupDetail = (key: "today" | "month") => {
-    const curPred = key === "today" ? (t: any) => t.date === today : (t: any) => dateToMonthKey(t.date) === currentMonthKey;
-    const prevPred = key === "today"
-      ? (t: any) => t.date === sameDayLastMonth
-      : (t: any) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum;
+  // "anchor" est navigable (jour ou mois précédent/suivant) — corrigé le 12/08/2026 :
+  // la fiche était figée sur "aujourd'hui" et devenait invisible dès que le jour passait.
+  const buildKpiGroupDetail = (mode: "today" | "month", anchor: string) => {
+    const anchorMonthKey = mode === "today" ? dateToMonthKey(anchor) : anchor;
+    const anchorDayNum = mode === "today" ? new Date(anchor + "T00:00:00").getDate() : dayNum;
+    const prevAnchorMonthKey = prevMonthKey(anchorMonthKey);
+    const anchorSameDayLastMonth = mode === "today" ? mkDate(prevAnchorMonthKey, clampDay(prevAnchorMonthKey, anchorDayNum)) : "";
+
+    const curPred = mode === "today" ? (t: any) => t.date === anchor : (t: any) => dateToMonthKey(t.date) === anchorMonthKey;
+    const prevPred = mode === "today"
+      ? (t: any) => t.date === anchorSameDayLastMonth
+      : (t: any) => dateToMonthKey(t.date) === prevAnchorMonthKey && new Date(t.date + "T00:00:00").getDate() <= anchorDayNum;
     const curRows = groupBreakdown(curPred);
     const prevRows = groupBreakdown(prevPred);
     const curTotal = curRows.reduce((a, r) => a + r.value, 0);
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
-    const curLabel = key === "today" ? "Aujourd'hui" : "Mois en cours";
-    const prevLabel = `Même ${key === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevMonthKeyVal)})`;
+    const curLabel = mode === "today" ? dateLabelFull(anchor) : monthLabel(anchorMonthKey);
+    const prevLabel = `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
     // Intitulés courts pour les en-têtes du tableau — la version complète reste dans la
     // ligne "formula" juste au-dessus, pour ne pas forcer un défilement horizontal sur
     // mobile avec des en-têtes trop longs, sur demande explicite de l'utilisateur (11/08/2026).
-    const curLabelShort = key === "today" ? "Auj." : "Ce mois";
+    const curLabelShort = mode === "today" ? "Ce jour" : "Ce mois";
     const prevLabelShort = "Mois dernier";
 
     const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
@@ -10249,7 +10264,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     }
 
     return {
-      title: key === "today" ? "Aujourd'hui — dépenses par nature" : "Mois en cours — dépenses par nature",
+      title: `${curLabel} — dépenses par nature`,
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
       blocks: [
@@ -10310,16 +10325,22 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetailKey("today")} />
+        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetail({ mode: "today", anchor: today })} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
         <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.solde, monthLastMonthTotals.solde), "up")} />
-        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetailKey("month")} />
+        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
         <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
 
-      {kpiDetailKey && (() => {
-        const d = buildKpiGroupDetail(kpiDetailKey);
-        return <CalcDetailSheet open={!!kpiDetailKey} onClose={() => setKpiDetailKey(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} />;
+      {kpiDetail && (() => {
+        const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor);
+        const goPrev = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, -1) : prevMonthKey(kpiDetail.anchor) });
+        const goNext = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, 1) : nextMonthKey(kpiDetail.anchor) });
+        const atToday = kpiDetail.mode === "today" ? kpiDetail.anchor >= today : kpiDetail.anchor >= currentMonthKey;
+        return (
+          <CalcDetailSheet open={!!kpiDetail} onClose={() => setKpiDetail(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks}
+            onPrev={goPrev} onNext={atToday ? undefined : goNext} />
+        );
       })()}
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
