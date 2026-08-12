@@ -94,28 +94,27 @@ const SYNC_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 // Fusionne deux listes (locale + distante) par identifiant unique, au lieu de laisser
 // l'une écraser l'autre — sur demande explicite de l'utilisateur (11/08/2026) : "je veux
 // une solution qui récupère toutes les transactions saisies et corrige sur tous [les
-// appareils]". Si un même id existe des deux côtés, la version la plus récemment
-// modifiée gagne (basé sur un éventuel champ "updatedAt" sur l'élément, sinon la version
-// distante — supposée déjà fusionnée par un appareil précédent). Ce qui n'existe QUE
-// d'un côté est toujours conservé : rien n'est jamais perdu par simple écrasement.
+// appareils]". Ce qui n'existe QUE d'un côté est toujours conservé : rien n'est jamais
+// perdu par simple écrasement.
+// Corrigé le 12/08/2026 : en cas de conflit (même id des deux côtés — typiquement une
+// transaction MODIFIÉE localement, pas ajoutée), la version distante gagnait toujours,
+// sans condition — une modification pas encore poussée au moment du cycle de
+// synchronisation suivant était donc silencieusement écrasée par l'ancienne version.
+// Comparaison par horodatage INDIVIDUEL par élément (updatedAt, posé automatiquement à
+// chaque création/édition — voir setTransactionsTracked) plutôt qu'un seul verdict
+// global pour toute la synchronisation : plus juste si plusieurs éléments ont été
+// modifiés à des moments différents. Sans horodatage d'aucun côté (données historiques
+// jamais rééditées), on garde la version distante par défaut, comme avant.
 function mergeById<T extends { id: string; updatedAt?: string }>(local: T[], remote: T[]): T[] {
   const byId = new Map<string, T>();
   local.forEach((item) => byId.set(item.id, item));
   remote.forEach((item) => {
     const existing = byId.get(item.id);
     if (!existing) { byId.set(item.id, item); return; }
-    // Les deux existent : si l'un des deux porte un horodatage de modification, on garde
-    // le plus récent — ce qui permet à une édition locale (pas encore poussée) de
-    // survivre à un cycle de synchronisation qui lirait encore l'ancienne version
-    // distante, au lieu d'être silencieusement écrasée. Une absence d'horodatage est
-    // traitée comme "plus ancien que tout" plutôt que de bloquer la comparaison.
     if (existing.updatedAt || item.updatedAt) {
       byId.set(item.id, (item.updatedAt || "") > (existing.updatedAt || "") ? item : existing);
       return;
     }
-    // Filet de sécurité historique (aucun horodatage disponible d'aucun côté) : on garde
-    // la version distante, car elle représente déjà une fusion d'un appareil précédent,
-    // jamais une perte silencieuse d'une donnée locale unique.
     byId.set(item.id, item);
   });
   return Array.from(byId.values());
@@ -212,10 +211,11 @@ interface Transaction {
   // réels (qui restent basés sur "account", où l'argent a vraiment bougé).
   onBehalfOf?: string;
   settled?: boolean; // avance entre comptes déjà réglée entre les deux comptes concernés
-  // Horodatage de la dernière modification (posé à chaque édition) — permet à la fusion
-  // de synchronisation de savoir laquelle, entre la version locale et la version distante
-  // d'une même transaction déjà synchronisée, est la plus récente. Absent sur les données
-  // historiques jamais rééditées depuis l'ajout de ce champ.
+  // Horodatage de la dernière modification — posé automatiquement (via
+  // setTransactionsTracked, pas au cas par cas) à chaque création ou édition, quel que
+  // soit le point de saisie utilisé. Permet à la fusion de synchronisation de départager
+  // deux versions d'une même transaction déjà connue des deux côtés. Absent sur les
+  // données historiques jamais rééditées depuis l'ajout de ce champ.
   updatedAt?: string;
 }
 interface Account {
@@ -1367,7 +1367,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, updatedAt: new Date().toISOString() });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
@@ -7231,7 +7231,7 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
 type CalcDetailBlock =
   | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
-  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[] }
   | { kind: "note"; text: string; tone?: "warn" | "info" };
 
 // Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
@@ -7273,11 +7273,6 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       // elle s'affichait comme "/" (ex: "508/111" au lieu de "508 111"). Toute chaîne
       // affichée dans ce PDF passe par ce filtre avant écriture.
       const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
-      // Convertit une couleur hex (ex: cellColors) en triplet RGB pour jsPDF.
-      const hexToRgb = (hex: string): [number, number, number] => {
-        const h = hex.replace("#", "");
-        return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-      };
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
@@ -7322,10 +7317,6 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
             didParseCell: (data: any) => {
               if (b.warnRows?.includes(data.row.index) && data.section === "body") data.cell.styles.textColor = [193, 84, 63];
-              if (data.section === "body") {
-                const c = b.cellColors?.[data.row.index]?.[data.column.index];
-                if (c) data.cell.styles.textColor = hexToRgb(c);
-              }
             },
           });
           y = (doc as any).lastAutoTable.finalY + 10;
@@ -7389,10 +7380,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
                   <tbody>
                     {b.rows.map((row, ri) => (
                       <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
-                        {row.map((cell, ci) => {
-                          const cellColor = b.cellColors?.[ri]?.[ci];
-                          return <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: cellColor || (b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink), fontWeight: cellColor ? 600 : 400, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>;
-                        })}
+                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
                       </tr>
                     ))}
                   </tbody>
@@ -10234,14 +10222,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
     const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
     const valueOf = (rows: typeof curRows, g: string) => rows.find((r) => r.group === g)?.value || 0;
-    const deltas = groups.map((g) => ({ group: g, cur: valueOf(curRows, g), prev: valueOf(prevRows, g), delta: valueOf(curRows, g) - valueOf(prevRows, g) }))
-      .filter((d) => d.cur > 0 || d.prev > 0);
-    // Pourcentage de progression par nature — vert si la nature baisse (bonne nouvelle
-    // pour une dépense), rouge si elle augmente. Non calculable si la période précédente
-    // était à zéro (pas de base de comparaison) : affiché en neutre dans ce cas.
-    const pctOf = (d: { cur: number; prev: number; delta: number }) => (d.prev !== 0 ? (d.delta / Math.abs(d.prev)) * 100 : (d.cur !== 0 ? null : 0));
-    const pctColorOf = (pct: number | null) => (pct === null ? COLOR.inkMuted : pct < 0 ? COLOR.emeraldSoft : pct > 0 ? COLOR.claySoft : COLOR.inkMuted);
-    const pctLabelOf = (pct: number | null) => (pct === null ? "—" : `${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%`);
+    const deltas = groups.map((g) => {
+      const cur = valueOf(curRows, g), prev = valueOf(prevRows, g), delta = cur - prev;
+      const pct = prev > 0 ? (delta / prev) * 100 : (cur > 0 ? 100 : 0);
+      return { group: g, cur, prev, delta, pct };
+    }).filter((d) => d.cur > 0 || d.prev > 0);
 
     const totalDelta = curTotal - prevTotal;
     // Repère la nature qui explique le plus l'évolution du total (en valeur absolue).
@@ -10268,12 +10253,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
       blocks: [
-        {
-          kind: "table" as const,
-          columns: ["Nature", curLabelShort, prevLabelShort, "Écart"],
-          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)} (${pctLabelOf(pctOf(d))})`]),
-          cellColors: deltas.map((d) => [undefined, undefined, undefined, pctColorOf(pctOf(d))]),
-        },
+        { kind: "table" as const, columns: ["Nature", curLabelShort, prevLabelShort, "Écart"], rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`]) },
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
     };
@@ -10840,7 +10820,23 @@ export default function GrandLivre() {
       const now = new Date().toISOString();
       setDeletedTransactionIds({ ...deletedTransactionIds, ...Object.fromEntries(removedIds.map((id) => [id, now])) });
     }
-    setTransactions(next);
+    // Pose automatiquement un horodatage sur toute transaction NOUVELLE ou dont le
+    // contenu a réellement changé par rapport à ce qu'on connaissait avant — peu importe
+    // le formulaire ou le bouton utilisé pour la modifier. C'est cet horodatage que la
+    // fusion de synchronisation utilise pour départager deux versions d'une même
+    // transaction (voir mergeById) — poser l'horodatage ici, une seule fois, garantit
+    // que ça marche pour TOUS les points de saisie sans avoir à y penser à chaque fois.
+    const now = new Date().toISOString();
+    const prevById = new Map(transactions.map((t) => [t.id, t]));
+    const stamped = next.map((t) => {
+      const prev = prevById.get(t.id);
+      if (!prev) return { ...t, updatedAt: now };
+      const { updatedAt: _p, ...prevRest } = prev;
+      const { updatedAt: _n, ...tRest } = t;
+      if (JSON.stringify(prevRest) !== JSON.stringify(tRest)) return { ...t, updatedAt: now };
+      return t;
+    });
+    setTransactions(stamped);
   };
   const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups, canSaveGated);
   const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope, canSaveGated);
@@ -11076,6 +11072,9 @@ export default function GrandLivre() {
       const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
 
       const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...s.deletedTransactionIds } : s.deletedTransactionIds;
+      // Calculée en premier : décide qui gagne un vrai conflit (même id modifié des deux
+      // côtés) dans les fusions ci-dessous — voir la note sur mergeById plus haut.
+      const localIsNewer = !!(lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt)));
       const mergedTransactions = (d.transactions ? mergeById(s.transactions, d.transactions) : s.transactions).filter((t: Transaction) => !mergedDeletedIds[t.id]);
       const mergedLoans = d.loans ? mergeById(s.loans, d.loans) : s.loans;
       const mergedBudgets = d.budgets ? mergeById(s.budgets, d.budgets) : s.budgets;
@@ -11092,7 +11091,6 @@ export default function GrandLivre() {
       const mergedCustomDep = d.customDepSubcategories ? { ...d.customDepSubcategories, ...s.customDepSubcategories } : s.customDepSubcategories;
       const mergedCustomRev = d.customRevSubcategories ? { ...d.customRevSubcategories, ...s.customRevSubcategories } : s.customRevSubcategories;
 
-      const localIsNewer = lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt));
       const finalEnvelopeCap = localIsNewer || typeof d.envelopeCap !== "number" ? s.envelopeCap : d.envelopeCap;
       const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? s.monthlyObjective : d.monthlyObjective;
       const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? s.includeGrundfosVoiture : d.includeGrundfosVoiture;
