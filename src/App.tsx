@@ -2855,8 +2855,8 @@ function HealthScoreNarrativeSheet({ open, onClose, tauxEpargne, pctNonProd, cv,
   );
 }
 
-function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
-  filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[];
+function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
+  filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[]; categoryGroups: Record<string, Group>;
   chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean; monthlyObjective: number;
 }) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
@@ -2899,8 +2899,100 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
 
   const delta = (a?: number, b?: number) => (a !== undefined && b !== undefined && b !== 0 ? ((a - b) / b) * 100 : null);
 
+  // Rapport mois — synthèse complète du mois choisi (revenus, dépenses, nature, écarts vs
+  // le mois précédent), indépendante des filtres globaux, sur demande explicite de
+  // l'utilisateur (12/08/2026). Navigable (mois précédent/suivant), jamais au-delà du mois en cours.
+  const [monthlyReportOpen, setMonthlyReportOpen] = useState(false);
+  const [reportAnchor, setReportAnchor] = useState(() => dateToMonthKey(todayISO()));
+
+  const buildMonthlyReport = (anchorMonthKey: string) => {
+    const prevKey = prevMonthKey(anchorMonthKey);
+    const withGroupFull = transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : groupFor(t, categoryGroups) }));
+
+    const sumForMonth = (mk: string) => {
+      const arr = withGroupFull.filter((t) => t.month === mk);
+      const rev = arr.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+      const dep = arr.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+      return { rev, dep, solde: rev - dep, tx: arr };
+    };
+    const cur = sumForMonth(anchorMonthKey);
+    const prev = sumForMonth(prevKey);
+
+    const groupsList = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
+    const byGroup = (arr: any[]) => {
+      const byG: Record<string, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
+      arr.filter((t) => t.type === "Dépense").forEach((t) => { byG[t.group] = (byG[t.group] || 0) + t.amount; });
+      return byG;
+    };
+    const curByGroup = byGroup(cur.tx);
+    const prevByGroup = byGroup(prev.tx);
+    const deltas = groupsList.map((g) => {
+      const c = curByGroup[g], p = prevByGroup[g], d = c - p;
+      const pct = p > 0 ? (d / p) * 100 : (c > 0 ? 100 : 0);
+      return { group: g, cur: c, prev: p, delta: d, pct };
+    }).filter((d) => d.cur > 0 || d.prev > 0);
+
+    const depDelta = cur.dep - prev.dep;
+    const depPct = prev.dep > 0 ? (depDelta / prev.dep) * 100 : (cur.dep > 0 ? 100 : 0);
+    const revDelta = cur.rev - prev.rev;
+    const soldeDelta = cur.solde - prev.solde;
+    const curEpargne = cur.rev > 0 ? (cur.solde / cur.rev) * 100 : 0;
+    const prevEpargne = prev.rev > 0 ? (prev.solde / prev.rev) * 100 : 0;
+    const biggestMover = [...deltas].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))[0];
+
+    let verdict = "";
+    if (Math.abs(depDelta) < 1) {
+      verdict = "Dépenses quasi stables par rapport au mois dernier — rien de notable à signaler.";
+    } else if (depDelta < 0) {
+      if (biggestMover?.group === "Non-productif") verdict = `Baisse fondée : elle est portée principalement par le "Non-productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins), le poste le plus facile à maîtriser sans rien sacrifier d'essentiel.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `À surveiller : cette baisse vient surtout du "Nécessaire" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — vérifie qu'il ne s'agit pas d'une privation plutôt que d'une vraie économie.`;
+      else if (biggestMover?.group === "Productif") verdict = `Baisse portée par le "Productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — à vérifier que ce n'est pas un investissement simplement décalé dans le temps.`;
+      else verdict = "Baisse des dépenses, sans nature clairement dominante.";
+    } else {
+      if (biggestMover?.group === "Productif") verdict = `Hausse plutôt saine : elle est portée principalement par le "Productif" (${fmt(biggestMover.delta)} FCFA de plus), donc probablement de l'investissement plutôt que du gaspillage.`;
+      else if (biggestMover?.group === "Non-productif") verdict = `À surveiller : cette hausse vient surtout du "Non-productif" (${fmt(biggestMover.delta)} FCFA de plus) — c'est le premier poste à réduire si besoin.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `Hausse portée par le "Nécessaire" (${fmt(biggestMover.delta)} FCFA de plus) — vérifie si c'est ponctuel ou un vrai changement de rythme.`;
+      else verdict = "Hausse des dépenses, sans nature clairement dominante.";
+    }
+
+    return {
+      title: `Rapport mois — ${monthLabel(anchorMonthKey)}`,
+      headline: `Solde : ${fmt(cur.solde)} FCFA (${soldeDelta >= 0 ? "+" : ""}${fmt(soldeDelta)} FCFA vs ${monthLabel(prevKey)})`,
+      formula: `${monthLabel(anchorMonthKey)} vs ${monthLabel(prevKey)} — synthèse revenus, dépenses et nature`,
+      blocks: [
+        {
+          kind: "kv" as const,
+          rows: [
+            { label: "Revenus", value: `${fmt(cur.rev)} FCFA (${revDelta >= 0 ? "+" : ""}${fmt(revDelta)})` },
+            { label: "Dépenses", value: `${fmt(cur.dep)} FCFA (${depDelta >= 0 ? "+" : ""}${fmt(depDelta)})`, warn: depDelta > 0 },
+            { label: "Solde", value: `${fmt(cur.solde)} FCFA (${soldeDelta >= 0 ? "+" : ""}${fmt(soldeDelta)})`, strong: true, warn: cur.solde < 0 },
+            { label: "Taux d'épargne", value: `${curEpargne.toFixed(1)}% (${curEpargne - prevEpargne >= 0 ? "+" : ""}${(curEpargne - prevEpargne).toFixed(1)} pts)` },
+          ],
+        },
+        {
+          kind: "table" as const,
+          columns: ["Nature", "Ce mois", "Mois dernier", "Écart", "Évolution"],
+          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, `${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(0)}%`]),
+          cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, Math.abs(d.delta) < 1 ? COLOR.inkMuted : d.delta < 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
+          footerRow: ["Total", fmt(cur.dep), fmt(prev.dep), `${depDelta >= 0 ? "+" : ""}${fmt(depDelta)}`, `${depPct >= 0 ? "+" : ""}${depPct.toFixed(0)}%`],
+          footerColors: [undefined, undefined, undefined, undefined, Math.abs(depDelta) < 1 ? COLOR.inkMuted : depDelta < 0 ? COLOR.emeraldSoft : COLOR.claySoft],
+        },
+        { kind: "note" as const, tone: ((depDelta < 0 && biggestMover?.group === "Nécessaire") || (depDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
+      ],
+    };
+  };
+
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button onClick={() => { setReportAnchor(dateToMonthKey(todayISO())); setMonthlyReportOpen(true); }} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
+          borderRadius: 8, color: COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer", fontFamily: "'Inter', sans-serif", fontWeight: 600,
+        }}>
+          <CalendarRange size={14} /> Rapport mois
+        </button>
+      </div>
       <SignauxClesPanel transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Revenus (période)" value={fmt(totalRevenus)} tone={COLOR.emeraldSoft} icon={TrendingUp} />
@@ -3047,6 +3139,17 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
           </div>
         ) : <EmptyState />}
       </PanelWithHelp>
+
+      {monthlyReportOpen && (() => {
+        const d = buildMonthlyReport(reportAnchor);
+        const atCurrent = monthSortKey(reportAnchor) >= monthSortKey(dateToMonthKey(todayISO()));
+        return (
+          <CalcDetailSheet open={monthlyReportOpen} onClose={() => setMonthlyReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks}
+            onPrev={() => setReportAnchor(prevMonthKey(reportAnchor))}
+            onNext={atCurrent ? undefined : () => setReportAnchor(nextMonthKey(reportAnchor))}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -7411,8 +7514,14 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
                   </tbody>
                   {b.footerRow && (
                     <tfoot>
-                      <tr>
-                        {b.footerRow.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "7px 4px", fontFamily: ci === 0 ? "'Inter', sans-serif" : "'IBM Plex Mono', monospace", fontWeight: 700, color: b.footerColors?.[ci] || COLOR.ink, borderTop: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
+                      <tr style={{ background: "rgba(91,126,166,0.08)" }}>
+                        {b.footerRow.map((cell, ci) => <td key={ci} style={{
+                          textAlign: ci === 0 ? "left" : "right", padding: "7px 4px", fontFamily: ci === 0 ? "'Inter', sans-serif" : "'IBM Plex Mono', monospace",
+                          fontWeight: 700, color: b.footerColors?.[ci] || COLOR.ink, whiteSpace: "normal", wordBreak: "break-word",
+                          borderTop: `1.5px solid ${COLOR.slateBlue}`, borderBottom: `1.5px solid ${COLOR.slateBlue}`,
+                          borderLeft: ci === 0 ? `1.5px solid ${COLOR.slateBlue}` : "none",
+                          borderRight: ci === (b.footerRow!.length - 1) ? `1.5px solid ${COLOR.slateBlue}` : "none",
+                        }}>{cell}</td>)}
                       </tr>
                     </tfoot>
                   )}
@@ -11486,7 +11595,7 @@ export default function GrandLivre() {
             </div>
           )}
 
-          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
+          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} categoryGroups={resolvedGroups} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
           {tab === "valeurnette" && <NetWorthTab accounts={accounts} transactions={transactions} filters={filters} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
