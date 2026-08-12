@@ -7236,7 +7236,7 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
 type CalcDetailBlock =
   | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
-  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][]; footerRow?: (string | number)[]; footerColors?: (string | undefined)[] }
   | { kind: "note"; text: string; tone?: "warn" | "info" };
 
 // Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
@@ -7318,10 +7318,20 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
             startY: y,
             head: [b.columns.map(ps)],
             body: b.rows.map((row) => row.map((c) => ps(c))),
+            foot: b.footerRow ? [b.footerRow.map(ps)] : undefined,
             headStyles: { fillColor: [26, 43, 76] },
+            footStyles: { fillColor: [255, 255, 255], textColor: [20, 20, 20], fontStyle: "bold", lineWidth: 0.3 },
             styles: { fontSize: 8 },
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
             didParseCell: (data: any) => {
+              if (data.section === "foot") {
+                const footColor = b.footerColors?.[data.column.index];
+                if (footColor) {
+                  const hex = footColor.replace("#", "");
+                  data.cell.styles.textColor = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+                }
+                return;
+              }
               if (data.section !== "body") return;
               const cellColor = b.cellColors?.[data.row.index]?.[data.column.index];
               if (cellColor) {
@@ -7399,6 +7409,13 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
                       </tr>
                     ))}
                   </tbody>
+                  {b.footerRow && (
+                    <tfoot>
+                      <tr>
+                        {b.footerRow.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "7px 4px", fontFamily: ci === 0 ? "'Inter', sans-serif" : "'IBM Plex Mono', monospace", fontWeight: 700, color: b.footerColors?.[ci] || COLOR.ink, borderTop: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               </div>
             );
@@ -10270,6 +10287,8 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       else verdict = "Hausse du total, sans nature clairement dominante.";
     }
 
+    const totalPct = prevTotal > 0 ? (totalDelta / prevTotal) * 100 : (curTotal > 0 ? 100 : 0);
+
     return {
       title: `${curLabel} — dépenses par nature`,
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
@@ -10282,6 +10301,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           // Vert quand les dépenses de cette nature ont baissé, rouge quand elles ont augmenté —
           // la vraie lecture (bonne ou mauvaise nouvelle selon la nature) reste dans le verdict ci-dessous.
           cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, Math.abs(d.delta) < 1 ? COLOR.inkMuted : d.delta < 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
+          // Ligne de totaux (toutes natures confondues) en bas du tableau, pour lire le
+          // solde global sans avoir à additionner les lignes soi-même — demande explicite
+          // de l'utilisateur (12/08/2026).
+          footerRow: ["Total", fmt(curTotal), fmt(prevTotal), `${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)}`, `${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(0)}%`],
+          footerColors: [undefined, undefined, undefined, undefined, Math.abs(totalDelta) < 1 ? COLOR.inkMuted : totalDelta < 0 ? COLOR.emeraldSoft : COLOR.claySoft],
         },
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
