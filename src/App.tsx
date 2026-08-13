@@ -10924,8 +10924,11 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
             overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
             {/* Header : fermer + sélecteur de type — sticky pour rester joignable même en
-                plein défilement du formulaire (le bouton fermer ne doit jamais sortir de l'écran) */}
-            <div className="gl-safe-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
+                plein défilement du formulaire. paddingTop géré en inline (pas via la classe
+                gl-safe-top) car un style inline React écrase toujours une classe CSS : c'est
+                justement ce qui rendait le bouton fermer inatteignable sous l'encoche/la
+                Dynamic Island sur iPhone (13/08/2026). */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingLeft: 20, paddingRight: 20, paddingBottom: 8, paddingTop: "max(20px, env(safe-area-inset-top))", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
               <button onClick={() => setOpen(false)} style={{
                 width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
                 color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
@@ -11645,7 +11648,7 @@ export default function GrandLivre() {
             zIndex: isMobile ? 220 : "auto", background: isMobile ? COLOR.bg : "transparent",
             WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
-            <div className="gl-safe-top" style={{ width: isMobile ? 268 : 226, padding: "24px 16px" }}>
+            <div className="gl-safe-top" style={{ width: isMobile ? 268 : 226, paddingLeft: 16, paddingRight: 16, paddingBottom: 24, paddingTop: isMobile ? "max(24px, env(safe-area-inset-top))" : 24 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.16em", color: COLOR.gold, textTransform: "uppercase", paddingLeft: 8 }}>XOF</div>
                 {isMobile && (
@@ -11681,7 +11684,7 @@ export default function GrandLivre() {
 
       {/* MAIN */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <header className="gl-safe-top" style={{ borderBottom: `1px solid ${COLOR.hairline}`, padding: isMobile ? "16px 16px" : "20px 32px" }}>
+        <header className="gl-safe-top" style={{ borderBottom: `1px solid ${COLOR.hairline}`, paddingLeft: isMobile ? 16 : 32, paddingRight: isMobile ? 16 : 32, paddingBottom: isMobile ? 16 : 20, paddingTop: isMobile ? "max(16px, env(safe-area-inset-top))" : 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", flexWrap: "wrap", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <button className="gl-noprint" onClick={() => (isMobile ? setMobileMenuOpen(true) : setSidebarOpen((s) => !s))} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: 7, cursor: "pointer", display: "flex" }}>
