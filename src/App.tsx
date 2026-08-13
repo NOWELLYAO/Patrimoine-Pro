@@ -47,6 +47,9 @@ const fontImport = `
 }
 .gl-scroll::-webkit-scrollbar { height: 5px; width: 5px; }
 .gl-scroll::-webkit-scrollbar-thumb { background: #2a362e; border-radius: 4px; }
+.gl-journal-row { transition: background 0.1s ease; }
+.gl-journal-row:hover { background: rgba(201,162,39,0.06) !important; }
+.gl-journal-row:hover td { border-color: rgba(201,162,39,0.25) !important; }
 @supports (padding: max(0px)) {
   .gl-safe-bottom { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   .gl-safe-top { padding-top: max(0px, env(safe-area-inset-top)); }
@@ -506,6 +509,13 @@ function dateLabelShort(date: string) {
     const d = new Date(date + "T00:00:00");
     return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
   } catch { return date; }
+}
+function weekdayLabel(date: string) {
+  try {
+    const d = new Date(date + "T00:00:00");
+    const s = d.toLocaleDateString("fr-FR", { weekday: "long" });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  } catch { return ""; }
 }
 function addInterval(date: string, freq: "Hebdomadaire" | "Mensuelle" | "Annuelle") {
   const d = new Date(date + "T00:00:00");
@@ -9586,6 +9596,26 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = sorted.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
+  // Regroupement par jour pour les bandeaux "rupture" (date + sous-total), à la manière
+  // d'un journal comptable classique / grille WinDev — demande explicite de l'utilisateur
+  // (13/08/2026). Regroupe seulement les lignes déjà présentes sur la page affichée : un
+  // jour dont les écritures sont réparties sur deux pages aura un sous-total par page.
+  const pageGroups = useMemo(() => {
+    const groups: { date: string; rows: typeof pageRows }[] = [];
+    pageRows.forEach((t) => {
+      const last = groups[groups.length - 1];
+      if (last && last.date === t.date) last.rows.push(t);
+      else groups.push({ date: t.date, rows: [t] });
+    });
+    return groups;
+  }, [pageRows]);
+  const dayTotals = (rows: typeof pageRows) => {
+    const rev = rows.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+    const dep = rows.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+    return { rev, dep, solde: rev - dep };
+  };
+
+
   const toggleSelect = (id: string) => setSelected((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const allPageSelected = pageRows.length > 0 && pageRows.every((t) => selected.has(t.id));
   const toggleSelectAllPage = () => setSelected((prev) => {
@@ -9756,51 +9786,76 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           </div>
         )}
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead><tr>
-              <th style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+        <div className="gl-scroll" style={{ overflowX: "auto", border: `1px solid ${COLOR.hairline}`, borderRadius: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+            <thead><tr style={{ background: "linear-gradient(180deg, #1c2a22, #182119)" }}>
+              <th style={{ padding: "10px 10px", borderBottom: `2px solid ${COLOR.gold}`, borderRight: `1px solid ${COLOR.hairline}` }}>
                 <button onClick={toggleSelectAllPage} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}>
                   {allPageSelected ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
                 </button>
               </th>
-              {["Date", "Catégorie", "Type", "Groupe", "Montant", ""].map((h, i) => (
-              <th key={h} style={{ textAlign: i === 4 ? "right" : "left", padding: "8px 10px", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: `1px solid ${COLOR.hairline}` }}>{h}</th>
+              {["Heure", "Catégorie", "Type", "Groupe", "Montant", ""].map((h, i) => (
+              <th key={h} style={{ textAlign: i === 4 ? "right" : "left", padding: "10px 10px", fontSize: 10.5, color: COLOR.goldSoft, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, borderBottom: `2px solid ${COLOR.gold}`, borderRight: i < 5 ? `1px solid ${COLOR.hairline}` : "none" }}>{h}</th>
             ))}</tr></thead>
             <tbody>
-              {pageRows.map((t) => {
+              {pageGroups.map((g) => {
+                const dt = dayTotals(g.rows);
                 return (
-                  <tr key={t.id}>
-                    <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
-                      <button onClick={() => toggleSelect(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}>
-                        {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
-                      </button>
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>
-                      {dateLabelFull(t.date)}{t.time && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.time}</div>}
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, maxWidth: 260 }}>
-                      {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
-                      {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
-                      {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</div>}
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
-                    <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
-                      {t.group}
-                      {t.account ? (
-                        <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
-                      ) : (
-                        <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
-                      )}
-                      {t.onBehalfOf && (
-                        <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }} title="Avance entre comptes">
-                          <ArrowRight size={9} /> pour {t.onBehalfOf}
+                  <React.Fragment key={g.date}>
+                    <tr>
+                      <td colSpan={7} style={{ padding: "8px 12px", background: "rgba(201,162,39,0.09)", borderTop: `1px solid ${COLOR.hairline}`, borderBottom: `1px solid ${COLOR.hairline}`, borderLeft: `3px solid ${COLOR.gold}` }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 13.5, color: COLOR.goldSoft, fontWeight: 600 }}>{weekdayLabel(g.date)} {dateLabelFull(g.date)}</span>
+                          <span style={{ fontSize: 10.5, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "1px 9px" }}>{g.rows.length} écriture{g.rows.length > 1 ? "s" : ""}</span>
                         </div>
-                      )}
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
-                    <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
-                  </tr>
+                      </td>
+                    </tr>
+                    {g.rows.map((t, ri) => (
+                      <tr key={t.id} className="gl-journal-row" style={{ background: ri % 2 === 1 ? "rgba(255,255,255,0.015)" : "transparent" }}>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}` }}>
+                          <button onClick={() => toggleSelect(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}>
+                            {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
+                          </button>
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>
+                          {t.time || "—"}
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, maxWidth: 260 }}>
+                          {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
+                          {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
+                          {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</div>}
+                        </td>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}` }}>
+                          <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 9px", borderRadius: 20, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, background: t.type === "Revenu" ? "rgba(63,156,122,0.12)" : "rgba(193,84,63,0.12)" }}>{t.type}</span>
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
+                          {t.group}
+                          {t.account ? (
+                            <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
+                          ) : (
+                            <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                          )}
+                          {t.onBehalfOf && (
+                            <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }} title="Avance entre comptes">
+                              <ArrowRight size={9} /> pour {t.onBehalfOf}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type === "Revenu" ? "+" : "−"}{fmt(t.amount)}</td>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td colSpan={7} style={{ padding: "7px 12px", background: "rgba(91,126,166,0.09)", borderBottom: `2px solid ${COLOR.slateBlue}`, borderLeft: `3px solid ${COLOR.slateBlue}` }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 18, flexWrap: "wrap", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
+                          <span style={{ color: COLOR.slateBlueSoft, fontFamily: "'Inter', sans-serif", fontWeight: 600, marginRight: "auto" }}>Sous-total du jour</span>
+                          <span style={{ color: COLOR.inkMuted }}>Revenus <b style={{ color: COLOR.emeraldSoft }}>{fmt(dt.rev)}</b></span>
+                          <span style={{ color: COLOR.inkMuted }}>Dépenses <b style={{ color: COLOR.claySoft }}>{fmt(dt.dep)}</b></span>
+                          <span style={{ color: COLOR.inkMuted }}>Solde <b style={{ color: dt.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(dt.solde)}</b></span>
+                        </div>
+                      </td>
+                    </tr>
+                  </React.Fragment>
                 );
               })}
               {!pageRows.length && <tr><td colSpan={7}><EmptyState /></td></tr>}
