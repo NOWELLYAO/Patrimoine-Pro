@@ -9567,6 +9567,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
   rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void; accounts: Account[];
 }) {
+  const isMobile = useIsMobile();
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions, accounts));
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -9786,6 +9787,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           </div>
         )}
 
+        {!isMobile && (
         <div className="gl-scroll" style={{ overflowX: "auto", border: `1px solid ${COLOR.hairline}`, borderRadius: 10 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
             <thead><tr style={{ background: "linear-gradient(180deg, #1c2a22, #182119)" }}>
@@ -9862,6 +9864,69 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
             </tbody>
           </table>
         </div>
+        )}
+
+        {isMobile && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {pageGroups.map((g) => {
+              const dt = dayTotals(g.rows);
+              return (
+                <div key={g.date} style={{ border: `1px solid ${COLOR.hairline}`, borderRadius: 12, overflow: "hidden" }}>
+                  <div style={{ padding: "10px 12px", background: "rgba(201,162,39,0.09)", borderLeft: `3px solid ${COLOR.gold}`, borderBottom: `1px solid ${COLOR.hairline}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontFamily: "'Fraunces', serif", fontSize: 13, color: COLOR.goldSoft, fontWeight: 600 }}>{weekdayLabel(g.date)} {dateLabelFull(g.date)}</span>
+                    <span style={{ fontSize: 10, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "1px 8px", flexShrink: 0 }}>{g.rows.length} écriture{g.rows.length > 1 ? "s" : ""}</span>
+                  </div>
+                  <div>
+                    {g.rows.map((t, ri) => (
+                      <div key={t.id} className="gl-journal-row" style={{ padding: "10px 12px", background: ri % 2 === 1 ? "rgba(255,255,255,0.015)" : "transparent", borderBottom: `1px solid ${COLOR.hairline}`, display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <button onClick={() => toggleSelect(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex", marginTop: 2, flexShrink: 0 }}>
+                          {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
+                        </button>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted, fontWeight: 400 }}> · {t.subcategory}</span>}
+                            </span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, flexShrink: 0 }}>
+                              {t.type === "Revenu" ? "+" : "−"}{fmt(t.amount)}
+                            </span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                            <span style={{ fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 20, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, background: t.type === "Revenu" ? "rgba(63,156,122,0.12)" : "rgba(193,84,63,0.12)" }}>{t.type}</span>
+                            <span style={{ fontSize: 11, color: groupColor[t.group] }}>{t.group}</span>
+                            {t.time && <span style={{ fontSize: 10.5, color: COLOR.inkMuted, fontFamily: "'IBM Plex Mono', monospace" }}>· {t.time}</span>}
+                            {t.account && <span style={{ fontSize: 10.5, color: COLOR.inkMuted }}>· {t.account}</span>}
+                          </div>
+                          {!t.account && (
+                            <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                          )}
+                          {t.onBehalfOf && (
+                            <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><ArrowRight size={9} /> pour {t.onBehalfOf}</div>
+                          )}
+                          {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginTop: 3 }}>{t.payee}</div>}
+                          {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", marginTop: 2 }}>« {t.note} »</div>}
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+                          <button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
+                          <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ padding: "8px 12px", background: "rgba(91,126,166,0.09)", borderTop: `2px solid ${COLOR.slateBlue}` }}>
+                    <div style={{ fontSize: 10.5, color: COLOR.slateBlueSoft, fontWeight: 600, marginBottom: 3 }}>Sous-total du jour</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+                      <span style={{ color: COLOR.inkMuted }}>Revenus <b style={{ color: COLOR.emeraldSoft }}>{fmt(dt.rev)}</b></span>
+                      <span style={{ color: COLOR.inkMuted }}>Dépenses <b style={{ color: COLOR.claySoft }}>{fmt(dt.dep)}</b></span>
+                      <span style={{ color: COLOR.inkMuted }}>Solde <b style={{ color: dt.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(dt.solde)}</b></span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {!pageRows.length && <EmptyState />}
+          </div>
+        )}
         {pageCount > 1 && (
           <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 16 }}>
             <button disabled={safePage === 0} onClick={() => setPage((p) => p - 1)} style={pagerBtn(safePage === 0)}>Précédent</button>
