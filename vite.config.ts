@@ -18,6 +18,12 @@ export default defineConfig({
         // localStorage, qui reste la source de vérité locale immédiate.
         navigateFallback: "index.html",
         cleanupOutdatedCaches: true,
+        // Ajouté le 13/08/2026 : le nouveau service worker prend le contrôle de la
+        // page dès son activation (clientsClaim), au lieu d'attendre la prochaine
+        // navigation — indispensable pour que le rechargement forcé côté main.tsx
+        // serve bien le NOUVEAU code juste après, et pas l'ancien encore actif.
+        clientsClaim: true,
+        skipWaiting: true,
       },
       manifest: {
         name: "Grand Livre",
