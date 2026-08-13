@@ -10845,16 +10845,31 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
 
+  // Verrou de scroll du fond — 12/08/2026 : `overflow: hidden` sur html/body ne suffit
+  // pas sur iOS Safari (le fond continue de scroller sous la modale au doigt). La
+  // technique fiable sur iOS est de figer le body en `position: fixed` à sa position de
+  // scroll actuelle, puis de la restaurer exactement à la fermeture.
   useEffect(() => {
     if (open) {
-      setTime(nowTime());
-      const prevHtmlOverflow = document.documentElement.style.overflow;
+      const scrollY = window.scrollY;
+      const prevBodyPosition = document.body.style.position;
+      const prevBodyTop = document.body.style.top;
+      const prevBodyWidth = document.body.style.width;
       const prevBodyOverflow = document.body.style.overflow;
-      document.documentElement.style.overflow = "hidden";
+      const prevHtmlOverflow = document.documentElement.style.overflow;
+      document.body.style.position = "fixed";
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.width = "100%";
       document.body.style.overflow = "hidden";
+      document.documentElement.style.overflow = "hidden";
+      setTime(nowTime());
       return () => {
-        document.documentElement.style.overflow = prevHtmlOverflow;
+        document.body.style.position = prevBodyPosition;
+        document.body.style.top = prevBodyTop;
+        document.body.style.width = prevBodyWidth;
         document.body.style.overflow = prevBodyOverflow;
+        document.documentElement.style.overflow = prevHtmlOverflow;
+        window.scrollTo(0, scrollY);
       };
     }
   }, [open]);
@@ -10900,15 +10915,17 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
         <div style={{
           position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg,
           display: "flex", justifyContent: "center", alignItems: isMobile ? "stretch" : "center",
+          height: isMobile ? "100dvh" : "100%",
         }}>
           <div style={{
-            width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100%" : "min(720px, 92vh)",
+            width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100dvh" : "min(720px, 92vh)",
             display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
             borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`,
             overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
-            {/* Header : fermer + sélecteur de type */}
-            <div className="gl-safe-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px" }}>
+            {/* Header : fermer + sélecteur de type — sticky pour rester joignable même en
+                plein défilement du formulaire (le bouton fermer ne doit jamais sortir de l'écran) */}
+            <div className="gl-safe-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
               <button onClick={() => setOpen(false)} style={{
                 width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
                 color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
@@ -10953,7 +10970,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                 fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
               }}>FCFA</div>
               <input
-                type="number" inputMode="numeric" value={amount} placeholder="0" autoFocus
+                type="number" inputMode="numeric" value={amount} placeholder="0" autoFocus={!isMobile}
                 onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
                 onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                 style={{
