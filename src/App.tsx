@@ -2917,6 +2917,8 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
 
   const buildMonthlyReport = (anchorMonthKey: string) => {
     const prevKey = prevMonthKey(anchorMonthKey);
+    const isCurrentPeriod = anchorMonthKey === dateToMonthKey(todayISO());
+    const curColLabel = isCurrentPeriod ? "Ce mois" : monthLabel(anchorMonthKey);
     const withGroupFull = transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : groupFor(t, categoryGroups) }));
 
     const sumForMonth = (mk: string) => {
@@ -2969,6 +2971,7 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
       title: `Rapport mois — ${monthLabel(anchorMonthKey)}`,
       headline: `Solde : ${fmt(cur.solde)} FCFA (${soldeDelta >= 0 ? "+" : ""}${fmt(soldeDelta)} FCFA vs ${monthLabel(prevKey)})`,
       formula: `${monthLabel(anchorMonthKey)} vs ${monthLabel(prevKey)} — synthèse revenus, dépenses et nature`,
+      badge: { text: isCurrentPeriod ? "Mois en cours" : "Période passée", tone: (isCurrentPeriod ? "live" : "past") as "live" | "past" },
       blocks: [
         {
           kind: "kv" as const,
@@ -2981,7 +2984,8 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
         },
         {
           kind: "table" as const,
-          columns: ["Nature", "Ce mois", "Mois dernier", "Écart", "Évolution"],
+          columns: ["Nature", curColLabel, "Mois dernier", "Écart", "Évolution"],
+          highlightCol: isCurrentPeriod ? 1 : undefined,
           rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, `${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(0)}%`]),
           cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, Math.abs(d.delta) < 1 ? COLOR.inkMuted : d.delta < 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
           footerRow: ["Total", fmt(cur.dep), fmt(prev.dep), `${depDelta >= 0 ? "+" : ""}${fmt(depDelta)}`, `${depPct >= 0 ? "+" : ""}${depPct.toFixed(0)}%`],
@@ -3154,7 +3158,7 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
         const d = buildMonthlyReport(reportAnchor);
         const atCurrent = monthSortKey(reportAnchor) >= monthSortKey(dateToMonthKey(todayISO()));
         return (
-          <CalcDetailSheet open={monthlyReportOpen} onClose={() => setMonthlyReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks}
+          <CalcDetailSheet open={monthlyReportOpen} onClose={() => setMonthlyReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} badge={d.badge}
             onPrev={() => setReportAnchor(prevMonthKey(reportAnchor))}
             onNext={atCurrent ? undefined : () => setReportAnchor(nextMonthKey(reportAnchor))}
           />
@@ -7349,7 +7353,7 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
 type CalcDetailBlock =
   | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
-  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][]; footerRow?: (string | number)[]; footerColors?: (string | undefined)[] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][]; footerRow?: (string | number)[]; footerColors?: (string | undefined)[]; highlightCol?: number }
   | { kind: "note"; text: string; tone?: "warn" | "info" };
 
 // Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
@@ -7366,9 +7370,9 @@ function CalcDetailIcon({ onClick }: { onClick: () => void }) {
   );
 }
 
-function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext }: {
+function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext, badge }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
-  onPrev?: () => void; onNext?: () => void;
+  onPrev?: () => void; onNext?: () => void; badge?: { text: string; tone: "live" | "past" };
 }) {
   const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   if (!open) return null;
@@ -7446,6 +7450,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
                 return;
               }
               if (data.section !== "body") return;
+              if (data.column.index === b.highlightCol) data.cell.styles.fillColor = [252, 246, 224];
               const cellColor = b.cellColors?.[data.row.index]?.[data.column.index];
               if (cellColor) {
                 const hex = cellColor.replace("#", "");
@@ -7484,7 +7489,17 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
           <div>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>{title}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>{title}</span>
+              {badge && (
+                <span style={{
+                  fontSize: 10, fontWeight: 700, letterSpacing: "0.03em", textTransform: "uppercase", padding: "2px 9px", borderRadius: 20,
+                  color: badge.tone === "live" ? COLOR.goldSoft : COLOR.inkMuted,
+                  background: badge.tone === "live" ? "rgba(201,162,39,0.14)" : "rgba(255,255,255,0.06)",
+                  border: `1px solid ${badge.tone === "live" ? "rgba(201,162,39,0.4)" : COLOR.hairline}`,
+                }}>{badge.text}</span>
+              )}
+            </div>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, color: COLOR.goldSoft, marginTop: 4 }}>{headline}</div>
             <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 4, fontStyle: "italic" }}>{formula}</div>
           </div>
@@ -7513,12 +7528,12 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
               <div key={i} style={{ marginBottom: 16, overflowX: "auto", maxWidth: "100%" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5, tableLayout: "fixed" }}>
                   <thead>
-                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", color: COLOR.inkMuted, fontWeight: 600, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}>{c}</th>)}</tr>
+                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", color: ci === b.highlightCol ? COLOR.goldSoft : COLOR.inkMuted, fontWeight: ci === b.highlightCol ? 700 : 600, background: ci === b.highlightCol ? "rgba(201,162,39,0.10)" : "transparent", borderBottom: ci === b.highlightCol ? `2px solid ${COLOR.gold}` : `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}>{c}</th>)}</tr>
                   </thead>
                   <tbody>
                     {b.rows.map((row, ri) => (
                       <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
-                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", fontWeight: b.cellColors?.[ri]?.[ci] ? 600 : 400, color: b.cellColors?.[ri]?.[ci] || (b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink), borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
+                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", fontWeight: b.cellColors?.[ri]?.[ci] ? 600 : 400, color: b.cellColors?.[ri]?.[ci] || (b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink), background: ci === b.highlightCol ? "rgba(201,162,39,0.05)" : "transparent", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
                       </tr>
                     ))}
                   </tbody>
@@ -10482,10 +10497,20 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
     const curLabel = mode === "today" ? dateLabelFull(anchor) : monthLabel(anchorMonthKey);
     const prevLabel = `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
+    // Distingue la vraie période en cours (aujourd'hui / mois civil actuel) d'une période
+    // passée qu'on consulte via les flèches ◀▶ — demande explicite de l'utilisateur
+    // (13/08/2026) : le libellé de colonne "Ce mois" ne changeait jamais en naviguant,
+    // ce qui rendait impossible de savoir si on regardait bien le mois actuel ou un
+    // mois révolu. Sur une période passée, la colonne affiche maintenant le nom du mois
+    // lui-même (ex. "juil 26") au lieu du générique "Ce mois", et perd le surlignage doré
+    // réservé à la période réellement en cours.
+    const isCurrentPeriod = mode === "today" ? anchor === today : anchorMonthKey === currentMonthKey;
     // Intitulés courts pour les en-têtes du tableau — la version complète reste dans la
     // ligne "formula" juste au-dessus, pour ne pas forcer un défilement horizontal sur
     // mobile avec des en-têtes trop longs, sur demande explicite de l'utilisateur (11/08/2026).
-    const curLabelShort = mode === "today" ? "Ce jour" : "Ce mois";
+    const curLabelShort = isCurrentPeriod
+      ? (mode === "today" ? "Ce jour" : "Ce mois")
+      : (mode === "today" ? dateLabelShort(anchor) : monthLabel(anchorMonthKey));
     const prevLabelShort = "Mois dernier";
 
     const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
@@ -10522,10 +10547,12 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       title: `${curLabel} — dépenses par nature`,
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
+      badge: { text: isCurrentPeriod ? (mode === "today" ? "Aujourd'hui" : "Mois en cours") : "Période passée", tone: (isCurrentPeriod ? "live" : "past") as "live" | "past" },
       blocks: [
         {
           kind: "table" as const,
           columns: ["Nature", curLabelShort, prevLabelShort, "Écart", "Évolution"],
+          highlightCol: isCurrentPeriod ? 1 : undefined,
           rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, `${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(0)}%`]),
           // Vert quand les dépenses de cette nature ont baissé, rouge quand elles ont augmenté —
           // la vraie lecture (bonne ou mauvaise nouvelle selon la nature) reste dans le verdict ci-dessous.
@@ -10605,7 +10632,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         const goNext = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, 1) : nextMonthKey(kpiDetail.anchor) });
         const atToday = kpiDetail.mode === "today" ? kpiDetail.anchor >= today : kpiDetail.anchor >= currentMonthKey;
         return (
-          <CalcDetailSheet open={!!kpiDetail} onClose={() => setKpiDetail(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks}
+          <CalcDetailSheet open={!!kpiDetail} onClose={() => setKpiDetail(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} badge={d.badge}
             onPrev={goPrev} onNext={atToday ? undefined : goNext} />
         );
       })()}
