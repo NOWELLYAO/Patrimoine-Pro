@@ -9395,6 +9395,25 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
   const [status, setStatus] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [codeInput, setCodeInput] = useState(syncCode);
+  // Les 3 dernières sauvegardes automatiques tournantes (une par jour calendaire où
+  // l'app a été ouverte, la plus récente écrasant la plus ancienne au-delà de 3) —
+  // écrites par runAutoBackupIfNeeded() au niveau racine, simplement lues ici.
+  const [autoBackups, setAutoBackups] = useState<{ date: string; savedAt: string; data: any }[]>(() => {
+    try { return JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    const refresh = () => { try { setAutoBackups(JSON.parse(localStorage.getItem("gl-auto-backups") || "[]")); } catch {} };
+    document.addEventListener("visibilitychange", refresh);
+    return () => document.removeEventListener("visibilitychange", refresh);
+  }, []);
+  const downloadAutoBackup = (entry: { date: string; data: any }) => {
+    const blob = new Blob([JSON.stringify(entry.data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `grand-livre-sauvegarde-auto-${entry.date}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const download = () => {
     const data = getSnapshot();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -9527,6 +9546,33 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
         <button onClick={download} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
           <Download size={15} /> Télécharger une sauvegarde complète (.json)
         </button>
+
+        <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ fontSize: 12.5, color: COLOR.ink, fontWeight: 600, marginBottom: 3 }}>Sauvegardes automatiques (3 dernières)</div>
+          <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12, lineHeight: 1.5 }}>
+            Capturées automatiquement dans ce navigateur dès l'ouverture de l'app un nouveau jour — la plus récente remplace la plus ancienne au-delà de 3. Pas besoin de cliquer sur Télécharger : tu peux venir récupérer l'une d'elles ici à tout moment.
+          </div>
+          {autoBackups.length === 0 ? (
+            <div style={{ fontSize: 12, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune sauvegarde automatique pour l'instant — la première sera prise à ta prochaine ouverture de l'app.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {autoBackups.map((entry) => (
+                <div key={entry.date} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "9px 12px", background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <CalendarRange size={14} color={COLOR.slateBlueSoft} />
+                    <div>
+                      <div style={{ fontSize: 12.5, color: COLOR.ink }}>{dateLabelFull(entry.date)}</div>
+                      <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{entry.data?.transactions?.length ?? 0} transactions · sauvegardé à {new Date(entry.savedAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</div>
+                    </div>
+                  </div>
+                  <button onClick={() => downloadAutoBackup(entry)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer", flexShrink: 0 }}>
+                    <Download size={12} /> Télécharger
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </Panel>
       <Panel title="Restauration" subtitle="Remplace toutes les données actuelles par celles du fichier importé">
         <label style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
@@ -11380,6 +11426,56 @@ export default function GrandLivre() {
   });
   const syncCodeRef = useRef(syncCode);
   useEffect(() => { syncCodeRef.current = syncCode; }, [syncCode]);
+
+  // Sauvegardes automatiques tournantes (max 3, la plus récente écrase la plus
+  // ancienne) — remplace le besoin de cliquer "Télécharger" chaque jour, sur demande
+  // explicite de l'utilisateur (13/08/2026). Important : un navigateur ne peut pas
+  // s'exécuter à minuit pile si l'app n'est pas ouverte — ce n'est donc PAS un vrai
+  // "tous les jours à 00:00", mais une capture dès l'ouverture/le retour au premier
+  // plan sur un nouveau jour calendaire, équivalent en pratique pour une app ouverte au
+  // moins une fois par jour. Vit dans localStorage comme le reste des données : ni iOS
+  // Safari ni la plupart des navigateurs ne permettent d'écrire des fichiers sur le
+  // disque du téléphone sans interaction manuelle à chaque fois.
+  const runAutoBackupIfNeeded = React.useCallback(() => {
+    try {
+      const todayKey = todayISO();
+      if (localStorage.getItem("gl-auto-backup-last-date") === todayKey) return;
+      const snap = syncedRef.current;
+      if (!snap.transactions || !snap.transactions.length) return; // rien à sauvegarder tant que le DataRecoveryGate n'a pas résolu
+      const data = {
+        transactions: snap.transactions, categoryGroups: snap.categoryGroups, categoryScope: snap.categoryScope,
+        rules: snap.rules, loans: snap.loans, envelopeCap: snap.envelopeCap, accounts: snap.accounts,
+        budgets: snap.budgets, goals: snap.goals, recurring: snap.recurring, activities: snap.activities,
+        categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
+        chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
+        customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
+      };
+      let list: { date: string; savedAt: string; data: any }[] = [];
+      try { list = JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { list = []; }
+      list = list.filter((b) => b.date !== todayKey);
+      list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
+      list = list.slice(0, 3);
+      localStorage.setItem("gl-auto-backups", JSON.stringify(list));
+      localStorage.setItem("gl-auto-backup-last-date", todayKey);
+    } catch {
+      // Quota localStorage dépassé ou autre — on retentera au prochain déclencheur,
+      // sans jamais faire échouer le reste de l'app pour ça.
+    }
+  }, []);
+
+  useEffect(() => {
+    runAutoBackupIfNeeded();
+    const onVisible = () => { if (document.visibilityState === "visible") runAutoBackupIfNeeded(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", runAutoBackupIfNeeded);
+    const interval = setInterval(runAutoBackupIfNeeded, 60 * 60 * 1000); // filet de sécurité si l'app reste ouverte en continu sans jamais repasser en arrière-plan
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", runAutoBackupIfNeeded);
+      clearInterval(interval);
+    };
+  }, [runAutoBackupIfNeeded]);
+
   // Retient la date de la dernière VRAIE modification locale (persistée, pour survivre à
   // un rechargement) — comparée à la date de dernière mise à jour distante pour les
   // réglages scalaires (pas de fusion possible pour un simple nombre ou booléen) :
