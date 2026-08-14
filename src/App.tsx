@@ -123,10 +123,28 @@ function mergeById<T extends { id: string; updatedAt?: string }>(local: T[], rem
   return Array.from(byId.values());
 }
 
+// Timeout explicite sur les appels réseau vers Supabase — corrigé le 14/08/2026. Sans
+// ça, un fetch() qui reste "en attente" sur une connexion capricieuse (wifi/4G
+// instable, fréquent sur mobile) pouvait ne jamais échouer ni réussir pendant une
+// bonne minute ou deux avant que le système ne l'abandonne de lui-même. Pendant tout ce
+// temps, runSync restait verrouillé "en cours" (syncInFlight), bloquant TOUS les autres
+// déclencheurs derrière lui — y compris le temps réel — ce qui explique un délai de
+// synchronisation observé de 1 à 2 minutes entre deux appareils malgré un canal temps
+// réel actif des deux côtés.
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 20000): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function fetchRemoteState(syncCode: string): Promise<{ data: any; updatedAt: string } | null> {
   if (!SYNC_ENABLED || !syncCode) return null;
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
     });
     if (!res.ok) return null;
@@ -138,7 +156,7 @@ async function fetchRemoteState(syncCode: string): Promise<{ data: any; updatedA
 async function pushRemoteState(syncCode: string, data: any): Promise<boolean> {
   if (!SYNC_ENABLED || !syncCode) return false;
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
       method: "POST",
       headers: {
         apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
@@ -8995,8 +9013,8 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
 // ============================================================
 // BUDGETS PAR CATÉGORIE (avec reconduction, transfert)
 // ============================================================
-function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCategories }: {
-  transactions: Transaction[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void; allCategories: string[];
+function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCategories, recurring }: {
+  transactions: Transaction[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void; allCategories: string[]; recurring: RecurringTemplate[];
 }) {
   const [adding, setAdding] = useState(false);
   const [budgetNarrativeOpen, setBudgetNarrativeOpen] = useState(false);
@@ -9025,6 +9043,69 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
     setTransferFrom(null); setTransferAmount(0); setTransferTo("");
   };
 
+  // --------------------------------------------------------------------------
+  // Budget suggéré du mois — sur demande explicite de l'utilisateur (14/08/2026).
+  // Logique en deux couches, comme le ferait un conseiller qui regarde d'abord ce qui
+  // est engagé, puis ce qui varie :
+  //  1) Récurrences ("Récurrences" du menu) : ce sont des engagements déjà connus
+  //     (loyer, abonnements, salaire...) — converties en équivalent mensuel selon leur
+  //     fréquence et prises telles quelles, catégorie par catégorie.
+  //  2) Catégories sans récurrence : moyenne des 3 derniers mois CALENDAIRES complets
+  //     (le mois en cours, encore partiel, est exclu pour ne pas sous-estimer) — une
+  //     base réaliste plutôt qu'un chiffre inventé.
+  // Intelligence de gestion, dans l'esprit du "verdict" déjà utilisé ailleurs dans
+  // l'app : compare le total suggéré aux revenus récurrents prévus, et alerte si le
+  // budget suggéré dépasserait les revenus, ou si le "Non-productif" prend une part
+  // jugée excessive (>35% des revenus, seuil indicatif inspiré du 50/30/20).
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestEdits, setSuggestEdits] = useState<Record<string, number>>({});
+  useEffect(() => { if (suggestOpen) setSuggestEdits({}); }, [suggestOpen]);
+  const buildBudgetSuggestion = () => {
+    const monthlyEquivalent = (r: RecurringTemplate) =>
+      r.frequency === "Mensuelle" ? r.amount : r.frequency === "Hebdomadaire" ? r.amount * (52 / 12) : r.amount / 12;
+
+    const recurringIncome = recurring.filter((r) => r.type === "Revenu").reduce((a, r) => a + monthlyEquivalent(r), 0);
+    const recurringByCategory: Record<string, number> = {};
+    recurring.filter((r) => r.type === "Dépense").forEach((r) => { recurringByCategory[r.category] = (recurringByCategory[r.category] || 0) + monthlyEquivalent(r); });
+
+    // 3 derniers mois calendaires complets (hors mois en cours)
+    const monthKeys: string[] = [];
+    const cursor = new Date(); cursor.setDate(1);
+    for (let i = 1; i <= 3; i++) {
+      const d = new Date(cursor); d.setMonth(d.getMonth() - i);
+      monthKeys.push(dateToMonthKey(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-01`));
+    }
+    const histCategories = categoriesForType(transactions, "Dépense").filter((c) => !recurringByCategory[c]);
+    const histAverage: Record<string, number> = {};
+    histCategories.forEach((c) => {
+      const total = monthKeys.reduce((a, mk) => a + spentInMonth(c, mk), 0);
+      const monthsWithData = monthKeys.filter((mk) => transactions.some((t) => t.type === "Dépense" && t.category === c && dateToMonthKey(t.date) === mk)).length || 1;
+      histAverage[c] = Math.round(total / monthsWithData);
+    });
+
+    const suggestions = [
+      ...Object.entries(recurringByCategory).map(([category, amount]) => ({ category, amount: Math.round(amount), source: "Récurrent" as const })),
+      ...Object.entries(histAverage).filter(([, amount]) => amount > 0).map(([category, amount]) => ({ category, amount, source: "Moyenne 3 mois" as const })),
+    ].sort((a, b) => b.amount - a.amount);
+
+    const total = suggestions.reduce((a, s) => a + s.amount, 0);
+    const nonProductifTotal = suggestions.filter((s) => (categoryGroups[s.category] || "Non classifié") === "Non-productif").reduce((a, s) => a + s.amount, 0);
+    const nonProductifShare = recurringIncome > 0 ? (nonProductifTotal / recurringIncome) * 100 : 0;
+
+    let advice = "";
+    if (recurringIncome === 0) {
+      advice = "Aucun revenu récurrent enregistré (voir Récurrences) — impossible d'évaluer si ce budget est tenable par rapport à tes rentrées d'argent prévisibles.";
+    } else if (total > recurringIncome) {
+      advice = `Ce budget suggéré (${fmt(total)} FCFA) dépasse tes revenus récurrents prévus (${fmt(recurringIncome)} FCFA) de ${fmt(total - recurringIncome)} FCFA. Commence par revoir les catégories "Non-productif" les plus élevées ci-dessous avant d'appliquer.`;
+    } else if (nonProductifShare > 35) {
+      advice = `Le "Non-productif" représenterait ${nonProductifShare.toFixed(0)}% de tes revenus prévus — au-delà du seuil indicatif de bon sens (~35%). Le budget reste tenable, mais il y a probablement de la marge à réorienter vers l'épargne ou l'investissement ("Productif").`;
+    } else {
+      advice = `Budget tenable : ${fmt(total)} FCFA suggérés pour ${fmt(recurringIncome)} FCFA de revenus récurrents prévus, soit ${fmt(recurringIncome - total)} FCFA de marge avant même de compter les dépenses variables imprévues.`;
+    }
+
+    return { suggestions, total, recurringIncome, advice };
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Budgets par catégorie" subtitle="Limite mensuelle, reconduction du solde non utilisé, transfert entre catégories"
@@ -9035,6 +9116,9 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
                 <BookOpen size={13} /> Rapport détaillé
               </button>
             )}
+            <button onClick={() => setSuggestOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(139,123,194,0.14)", border: `1px solid ${COLOR.violet}`, borderRadius: 6, color: COLOR.violetSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <TrendingUp size={13} /> Suggérer un budget
+            </button>
             <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
               {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Nouveau budget"}
             </button>
@@ -9113,6 +9197,75 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
         return <CalcDetailSheet open={budgetNarrativeOpen} onClose={() => setBudgetNarrativeOpen(false)}
           title="Budgets — analyse détaillée" headline={`${rows.filter((r) => r.overCount > 0).length} budget(s) dépassé(s) au moins une fois sur 6 mois`}
           formula="Comparaison dépense réelle vs limite, mois par mois, sur les 6 derniers mois" blocks={blocks} />;
+      })()}
+
+      {suggestOpen && (() => {
+        const s = buildBudgetSuggestion();
+        const editedTotal = s.suggestions.reduce((a, x) => a + (suggestEdits[x.category] ?? x.amount), 0);
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.5)", display: "flex", justifyContent: "center", alignItems: "center", padding: 16 }} onClick={() => setSuggestOpen(false)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 560, maxHeight: "88vh", display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, overflow: "hidden" }}>
+              <div style={{ padding: "18px 20px 12px 20px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                  <div>
+                    <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Budget suggéré du mois</div>
+                    <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 3, fontStyle: "italic" }}>Basé sur tes récurrences (engagements connus) et la moyenne de tes 3 derniers mois pour le reste — modifiable avant d'appliquer</div>
+                  </div>
+                  <button onClick={() => setSuggestOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+                </div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>
+                  <span style={{ color: COLOR.inkMuted }}>Revenus récurrents prévus <b style={{ color: COLOR.emeraldSoft }}>{fmt(s.recurringIncome)}</b></span>
+                  <span style={{ color: COLOR.inkMuted }}>Total suggéré <b style={{ color: editedTotal > s.recurringIncome && s.recurringIncome > 0 ? COLOR.claySoft : COLOR.goldSoft }}>{fmt(editedTotal)}</b></span>
+                </div>
+              </div>
+
+              <div style={{ padding: "14px 20px", overflowY: "auto", flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 12, borderRadius: 8, background: "rgba(139,123,194,0.10)", border: `1px solid rgba(139,123,194,0.35)`, marginBottom: 16 }}>
+                  <TrendingUp size={14} color={COLOR.violetSoft} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span style={{ fontSize: 12, color: COLOR.ink, lineHeight: 1.5 }}>{s.advice}</span>
+                </div>
+
+                {s.suggestions.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Pas assez d'historique ni de récurrences pour proposer un budget — ajoute quelques transactions ou récurrences d'abord.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {s.suggestions.map((x) => (
+                      <div key={x.category} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 10px", background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, flexWrap: "wrap" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, color: COLOR.ink }}>{x.category}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                            <span style={{ fontSize: 10, color: groupColor[categoryGroups[x.category] || "Non classifié"] }}>{categoryGroups[x.category] || "Non classifié"}</span>
+                            <span style={{ fontSize: 9.5, color: x.source === "Récurrent" ? COLOR.slateBlueSoft : COLOR.inkMuted, border: `1px solid ${x.source === "Récurrent" ? COLOR.slateBlue : COLOR.hairline}`, borderRadius: 10, padding: "1px 7px" }}>{x.source}</span>
+                          </div>
+                        </div>
+                        <input type="number" inputMode="numeric" value={suggestEdits[x.category] ?? x.amount}
+                          onChange={(e) => setSuggestEdits({ ...suggestEdits, [x.category]: Number(e.target.value) || 0 })}
+                          style={{ ...inputStyle, width: 120, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: 10, padding: "14px 20px", borderTop: `1px solid ${COLOR.hairline}` }}>
+                <button onClick={() => setSuggestOpen(false)} style={{ flex: 1, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+                <button onClick={() => {
+                  const updated = [...budgets];
+                  s.suggestions.forEach((x) => {
+                    const amount = suggestEdits[x.category] ?? x.amount;
+                    const idx = updated.findIndex((b) => b.category === x.category);
+                    if (idx >= 0) updated[idx] = { ...updated[idx], amount };
+                    else updated.push({ id: uid("b"), category: x.category, amount, rollover: false });
+                  });
+                  setBudgets(updated);
+                  setSuggestOpen(false);
+                }} disabled={!s.suggestions.length} style={{ flex: 2, background: s.suggestions.length ? COLOR.violet : COLOR.hairline, border: "none", borderRadius: 8, color: s.suggestions.length ? "#0e1611" : COLOR.inkMuted, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: s.suggestions.length ? "pointer" : "default" }}>
+                  Appliquer ce budget ({s.suggestions.length} catégorie{s.suggestions.length > 1 ? "s" : ""})
+                </button>
+              </div>
+            </div>
+          </div>
+        );
       })()}
     </div>
   );
@@ -11899,7 +12052,7 @@ export default function GrandLivre() {
           />}
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
           {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
-          {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} />}
+          {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} recurring={recurring} />}
           {tab === "simulateur" && <SimulateurTab filtered={filtered} accounts={accounts} transactions={transactions} />}
           {tab === "objectif" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
