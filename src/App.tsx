@@ -11439,9 +11439,18 @@ export default function GrandLivre() {
   const runAutoBackupIfNeeded = React.useCallback(() => {
     try {
       const todayKey = todayISO();
-      if (localStorage.getItem("gl-auto-backup-last-date") === todayKey) return;
       const snap = syncedRef.current;
       if (!snap.transactions || !snap.transactions.length) return; // rien à sauvegarder tant que le DataRecoveryGate n'a pas résolu
+      let list: { date: string; savedAt: string; data: any }[] = [];
+      try { list = JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { list = []; }
+      const existingToday = list.find((b) => b.date === todayKey);
+      // Ré-écrit l'entrée du jour tant que le nombre de transactions vu diffère de la
+      // dernière sauvegarde du jour (nouvelles écritures locales OU arrivées par synchro
+      // depuis un autre appareil) — pas juste "une fois par jour". Corrige le bug du
+      // 13/08/2026 : une première capture prise avant la fin de la synchro du jour
+      // restait figée sur un état incomplet (3046 transactions sauvegardées contre 3103
+      // réellement présentes une fois la synchro terminée) jusqu'au lendemain.
+      if (existingToday && existingToday.data?.transactions?.length === snap.transactions.length) return;
       const data = {
         transactions: snap.transactions, categoryGroups: snap.categoryGroups, categoryScope: snap.categoryScope,
         rules: snap.rules, loans: snap.loans, envelopeCap: snap.envelopeCap, accounts: snap.accounts,
@@ -11450,13 +11459,10 @@ export default function GrandLivre() {
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
       };
-      let list: { date: string; savedAt: string; data: any }[] = [];
-      try { list = JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { list = []; }
       list = list.filter((b) => b.date !== todayKey);
       list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
       list = list.slice(0, 3);
       localStorage.setItem("gl-auto-backups", JSON.stringify(list));
-      localStorage.setItem("gl-auto-backup-last-date", todayKey);
     } catch {
       // Quota localStorage dépassé ou autre — on retentera au prochain déclencheur,
       // sans jamais faire échouer le reste de l'app pour ça.
@@ -11464,17 +11470,30 @@ export default function GrandLivre() {
   }, []);
 
   useEffect(() => {
-    runAutoBackupIfNeeded();
+    // Ne PAS capturer dès le montage : au premier chargement, la synchro avec les
+    // autres appareils (déclenchée par le trigger "chargement" de runSync) n'a pas
+    // encore fini de fusionner les transactions distantes — une sauvegarde prise trop
+    // tôt "photographiait" un état local incomplet, avant l'arrivée des écritures faites
+    // sur l'autre appareil (13/08/2026 : 3046 transactions sauvegardées contre 3103
+    // réellement présentes une fois la synchro terminée). On attend donc soit une synchro
+    // réussie (lastSyncedAt), soit un court délai de secours si la synchro n'est pas
+    // configurée sur cet appareil.
+    const t = setTimeout(runAutoBackupIfNeeded, 8000);
     const onVisible = () => { if (document.visibilityState === "visible") runAutoBackupIfNeeded(); };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", runAutoBackupIfNeeded);
     const interval = setInterval(runAutoBackupIfNeeded, 60 * 60 * 1000); // filet de sécurité si l'app reste ouverte en continu sans jamais repasser en arrière-plan
     return () => {
+      clearTimeout(t);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", runAutoBackupIfNeeded);
       clearInterval(interval);
     };
   }, [runAutoBackupIfNeeded]);
+  // Redéclenche la vérification après chaque synchro réussie — c'est le signal le plus
+  // fiable que syncedRef.current reflète bien l'état fusionné le plus à jour (donc le
+  // vrai déclencheur normal, le setTimeout ci-dessus n'étant qu'un filet de secours).
+  useEffect(() => { if (lastSyncedAt) runAutoBackupIfNeeded(); }, [lastSyncedAt, runAutoBackupIfNeeded]);
 
   // Retient la date de la dernière VRAIE modification locale (persistée, pour survivre à
   // un rechargement) — comparée à la date de dernière mise à jour distante pour les
