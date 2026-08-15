@@ -2132,7 +2132,14 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
 //     dettes en cours, dépassement de budget déjà en cours sur cette catégorie...),
 //     qui affine la réponse quand la contrainte dure est respectée.
 // ============================================================
-interface SpendingCheckAnswers { essentiel: boolean; prevu: boolean; sansDette: boolean; ponctuelle: boolean; budgetDepasse: boolean; }
+interface SpendingCheckAnswers {
+  nature: "essentiel" | "envie_reflechie" | "envie_impulsive";
+  anticipation: "prevue" | "decidee_aujourdhui" | "derniere_minute";
+  dette: "aucune" | "en_cours" | "en_retard";
+  ressenti: "serein" | "coupable" | "sait_que_non";
+  ponctuelle: boolean;
+  budgetTendu: boolean;
+}
 interface SpendingCheckResult {
   verdict: "oui" | "attends" | "non";
   headline: string;
@@ -2187,26 +2194,42 @@ function evaluateSpendingCheck(
     return { verdict: "attends", headline: "Attends — l'argent est déjà engagé ailleurs", reasons, waitUntil: nextIncome?.nextDate, soldeDisponible, argentReelDisponible };
   }
 
-  // Contrainte dure respectée — on affine avec le jugement (cases cochées)
+  // Contrainte dure respectée — on affine avec le jugement, sur des critères graduels
+  // (pas de simples oui/non) pour un diagnostic plus honnête qu'une case à cocher.
   let score = 0;
-  if (answers.essentiel) score += 2; else { score -= 1; reasons.push("Ce n'est pas un besoin essentiel — une envie assumée coûte plus cher qu'un besoin, sois honnête avec toi-même sur ce point."); }
-  if (answers.prevu) score += 2; else reasons.push("Cette dépense n'était pas prévue à l'avance — c'est le genre de dépense qui, répétée, fait dérailler un budget sans qu'on s'en rende compte.");
-  if (answers.sansDette) score += 1; else { score -= 2; reasons.push("Tu as des dettes ou impayés en cours — toute dépense non essentielle pendant cette période retarde le moment où tu t'en sors vraiment."); }
+
+  if (answers.nature === "essentiel") { score += 3; }
+  else if (answers.nature === "envie_reflechie") { score += 0; reasons.push("C'est une envie, pas un besoin — assumée et réfléchie, ce qui est déjà mieux que la moyenne, mais ça reste une envie."); }
+  else { score -= 3; reasons.push("Tu as toi-même qualifié ça d'envie impulsive — c'est précisément le genre de décision qu'on regrette une fois le compte en banque consulté le lendemain."); }
+
+  if (answers.anticipation === "prevue") { score += 2; }
+  else if (answers.anticipation === "decidee_aujourdhui") { score -= 1; reasons.push("Décidée aujourd'hui seulement — pas forcément grave une fois de temps en temps, mais si ce schéma se répète, c'est le signe d'un budget qui se pilote au jour le jour plutôt qu'à l'avance."); }
+  else { score -= 3; reasons.push("Décidée dans la dernière heure — une dépense prise dans l'instant, sans recul, est statistiquement celle qu'on regrette le plus souvent."); }
+
+  if (answers.dette === "aucune") { score += 1; }
+  else if (answers.dette === "en_cours") { score -= 2; reasons.push("Tu as des dettes en cours — même à jour, chaque FCFA dépensé ailleurs est un FCFA de moins pour t'en libérer plus vite."); }
+  else { score -= 4; reasons.push("Tu as des dettes ou impayés EN RETARD — c'est la priorité absolue avant toute dépense non essentielle, sans exception."); }
+
+  if (answers.ressenti === "serein") { score += 1; }
+  else if (answers.ressenti === "coupable") { score -= 2; reasons.push("Tu as coché \"un peu coupable\" — ce ressenti n'est pas anodin : ton instinct financier te met déjà en garde avant même le calcul."); }
+  else { score -= 4; reasons.push("Tu sais toi-même que tu ne devrais pas la faire — la question n'est plus financière à ce stade, elle est déjà tranchée. Écoute-toi."); }
+
   if (answers.ponctuelle) score += 1; else { score -= 1; reasons.push("Elle risque de se reproduire — une dépense ponctuelle et une habitude n'ont pas le même impact sur 6 mois."); }
-  if (answers.budgetDepasse) { score -= 3; reasons.push(`Tu as coché que le budget de cette catégorie est déjà dépassé ce mois-ci${budgetInfo ? ` (${fmt(budgetInfo.spent)} FCFA dépensés pour une limite de ${fmt(budgetInfo.limit)} FCFA)` : ""} — l'ajouter maintenant, c'est creuser un dépassement déjà réel.`); }
+
+  if (answers.budgetTendu) { score -= 3; reasons.push(`Tu as toi-même signalé que ce poste est déjà tendu ce mois-ci${budgetInfo ? ` (${fmt(budgetInfo.spent)} FCFA dépensés pour une limite de ${fmt(budgetInfo.limit)} FCFA)` : ""} — l'ajouter maintenant, c'est creuser un trou déjà réel.`); }
   else if (budgetInfo && budgetInfo.spent + amount > budgetInfo.limit) {
     score -= 2; reasons.push(`Cette dépense ferait dépasser le budget "${category}" : ${fmt(budgetInfo.spent + amount)} FCFA contre une limite de ${fmt(budgetInfo.limit)} FCFA ce mois-ci.`);
   }
 
-  if (score <= -3) {
-    reasons.unshift(`Tu as les fonds sur le papier (${fmt(argentReelDisponible)} FCFA de marge réelle), mais trop de signaux sont défavorables pour que ce soit une bonne décision maintenant.`);
-    return { verdict: "attends", headline: "Attends un autre jour — l'argent est là, pas les bonnes conditions", reasons, soldeDisponible, argentReelDisponible };
+  if (score <= -5) {
+    reasons.unshift(`Tu as les fonds sur le papier (${fmt(argentReelDisponible)} FCFA de marge réelle), mais les réponses ci-dessus s'accumulent contre cette dépense — ce n'est pas une question de moyens, c'est une question de moment.`);
+    return { verdict: "non", headline: "Non — pas dans ces conditions", reasons, soldeDisponible, argentReelDisponible };
   }
   if (score < 0) {
-    reasons.unshift(`Marge réelle disponible : ${fmt(argentReelDisponible)} FCFA. Faisable, mais pas sans réserve.`);
-    return { verdict: "attends", headline: "Tu peux, mais réfléchis encore une fois avant", reasons, soldeDisponible, argentReelDisponible };
+    reasons.unshift(`Marge réelle disponible : ${fmt(argentReelDisponible)} FCFA. Faisable financièrement, mais les réponses penchent du mauvais côté.`);
+    return { verdict: "attends", headline: "Attends un autre jour — l'argent est là, pas les bonnes conditions", reasons, soldeDisponible, argentReelDisponible };
   }
-  reasons.unshift(`Marge réelle disponible après charges fixes à venir : ${fmt(argentReelDisponible)} FCFA — largement suffisant, et les réponses cochées vont dans le bon sens.`);
+  reasons.unshift(`Marge réelle disponible après charges fixes à venir : ${fmt(argentReelDisponible)} FCFA — largement suffisant, et les réponses vont dans le bon sens.`);
   return { verdict: "oui", headline: "Oui, tu peux le faire", reasons, soldeDisponible, argentReelDisponible };
 }
 
@@ -2285,6 +2308,28 @@ function buildCriticalAdvice(transactions: Transaction[], categoryGroups: Record
     items.push({ severity: "critique", title: `"${key}" te coûte plus cher que tu ne le penses`, text: `${v.count} écritures en ${monthKeys.length} mois (~${perMonth.toFixed(1)} fois par mois) pour un total de ${fmt(v.total)} FCFA — ce n'est pas un extra occasionnel, c'est une habitude installée. Sur une année pleine, ça représenterait environ ${fmt(Math.round(v.total / monthKeys.length * 12))} FCFA.` });
   }
 
+  // 3bis) Grosses dépenses individuelles — celles qui pèsent lourd à elles seules, pas
+  // par répétition mais par leur montant unitaire. Seuil : 10% du revenu mensuel moyen,
+  // avec un plancher de 50 000 FCFA pour rester pertinent même si le revenu est faible.
+  const bigTxThreshold = Math.max(monthlyRev * 0.10, 50000);
+  const bigTx = personal.filter((t) => t.type === "Dépense" && t.amount >= bigTxThreshold && (categoryGroups[t.category] || "Non classifié") !== "Nécessaire").sort((a, b) => b.amount - a.amount);
+  if (bigTx.length) {
+    const bigTxTotal = bigTx.reduce((a, t) => a + t.amount, 0);
+    const bigTxShare = totalDep > 0 ? (bigTxTotal / totalDep) * 100 : 0;
+    const top = bigTx[0];
+    const topLabel = top.subcategory ? `${top.category} · ${top.subcategory}` : top.category;
+    const severity: "critique" | "attention" = (bigTx.length >= 3 || bigTxShare >= 25) ? "critique" : "attention";
+    items.push({
+      severity,
+      title: `Ta plus grosse dépense individuelle sur 6 mois : ${fmt(top.amount)} FCFA`,
+      text: `"${topLabel}" le ${dateLabelFull(top.date)}${top.note ? ` ("${top.note}")` : " — sans aucune note pour expliquer pourquoi"}. Au total, ${bigTx.length} dépense${bigTx.length > 1 ? "s" : ""} isolée${bigTx.length > 1 ? "s" : ""} au-delà de ${fmt(Math.round(bigTxThreshold))} FCFA représentent ${fmt(bigTxTotal)} FCFA sur la période (${bigTxShare.toFixed(0)}% de tes dépenses totales) — ce sont elles, pas tes petites dépenses du quotidien, qui pèsent le plus lourd sur ton solde.`,
+    });
+    const undocumented = bigTx.filter((t) => !t.note || !t.note.trim()).length;
+    if (bigTx.length >= 3 && undocumented / bigTx.length >= 0.5) {
+      items.push({ severity: "critique", title: "Tu ne documentes même pas tes plus grosses dépenses", text: `${undocumented} de tes ${bigTx.length} grosses dépenses individuelles (≥ ${fmt(Math.round(bigTxThreshold))} FCFA) n'ont aucune note. Sur une petite dépense, passe encore — sur une grosse, l'absence de justification écrite est un signal d'alarme sur le sérieux avec lequel tu les décides.` });
+    }
+  }
+
   // 4) Concentration excessive sur une seule catégorie de dépense
   const byCategory: Record<string, { total: number; group: Group }> = {};
   window.filter((t) => t.type === "Dépense").forEach((t) => {
@@ -2294,7 +2339,9 @@ function buildCriticalAdvice(transactions: Transaction[], categoryGroups: Record
   const topCat = Object.entries(byCategory).sort((a, b) => b[1].total - a[1].total)[0];
   if (topCat && totalDep > 0) {
     const share = (topCat[1].total / totalDep) * 100;
-    if (share >= 35 && topCat[1].group !== "Nécessaire") {
+    if (share >= 50 && topCat[1].group !== "Nécessaire") {
+      items.push({ severity: "critique", title: `"${topCat[0]}" avale plus de la moitié de tes dépenses`, text: `${fmt(topCat[1].total)} FCFA sur 6 mois (${share.toFixed(0)}% du total) dans une seule catégorie (${topCat[1].group}) — ce n'est plus de la concentration, c'est une dépendance budgétaire à un seul poste. Le jour où cette dépense change (hausse de prix, imprévu), tout ton équilibre financier vacille avec elle.` });
+    } else if (share >= 35 && topCat[1].group !== "Nécessaire") {
       items.push({ severity: "attention", title: `"${topCat[0]}" concentre à elle seule ${share.toFixed(0)}% de tes dépenses`, text: `${fmt(topCat[1].total)} FCFA sur 6 mois dans une seule catégorie (${topCat[1].group}) — au-delà de 30-35% dans une seule ligne, un budget devient fragile : le moindre dérapage sur ce poste précis fait dérailler tout le mois.` });
     }
   }
@@ -3174,8 +3221,10 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
   const [spendAmount, setSpendAmount] = useState<number>(0);
   const [spendCategory, setSpendCategory] = useState<string>("");
   const [spendAccount, setSpendAccount] = useState<string>("");
-  const [spendAnswers, setSpendAnswers] = useState<SpendingCheckAnswers>({ essentiel: false, prevu: false, sansDette: false, ponctuelle: false, budgetDepasse: false });
+  const [spendAnswers, setSpendAnswers] = useState<SpendingCheckAnswers>({ nature: "essentiel", anticipation: "prevue", dette: "aucune", ressenti: "serein", ponctuelle: true, budgetTendu: false });
   const [spendResult, setSpendResult] = useState<SpendingCheckResult | null>(null);
+  const [spendCatPickerOpen, setSpendCatPickerOpen] = useState(false);
+  const [spendSubcategory, setSpendSubcategory] = useState("");
 
   const buildMonthlyReport = (anchorMonthKey: string) => {
     const prevKey = prevMonthKey(anchorMonthKey);
@@ -3433,59 +3482,112 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
         );
       })()}
 
-      {spendCheckOpen && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.5)", display: "flex", justifyContent: "center", alignItems: "center", padding: 16 }} onClick={() => setSpendCheckOpen(false)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, maxHeight: "88vh", overflowY: "auto", display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`, border: `1px solid ${COLOR.hairline}`, borderRadius: 16 }}>
-            <div style={{ padding: "18px 20px 12px 20px", borderBottom: `1px solid ${COLOR.hairline}`, position: "sticky", top: 0, background: COLOR.surfaceRaised, zIndex: 2 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
-                <div>
-                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Puis-je dépenser ça ?</div>
-                  <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 3, fontStyle: "italic" }}>Réponse basée sur ton solde réel, tes charges fixes à venir, et les cases cochées ci-dessous</div>
-                </div>
-                <button onClick={() => setSpendCheckOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+      {spendCheckOpen && (() => {
+        const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
+        const nakedSelect: React.CSSProperties = {
+          background: "transparent", border: "none", color: COLOR.ink, fontSize: 14.5, fontWeight: 600,
+          fontFamily: "'Fraunces', serif", padding: 0, cursor: "pointer", width: "100%", appearance: "none", WebkitAppearance: "none",
+        };
+        return (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg, display: "flex", justifyContent: "center", alignItems: "center" }}>
+          <div style={{
+            width: "100%", maxWidth: 460, maxHeight: "92vh", display: "flex", flexDirection: "column",
+            background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
+            borderRadius: 20, border: `1px solid ${COLOR.hairline}`, overflowY: "auto", overflowX: "hidden",
+          }}>
+            {/* Header — même langage visuel que la Saisie rapide (bouton fermer circulaire,
+                pastille centrale), sur demande explicite de l'utilisateur (14/08/2026) */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
+              <button onClick={() => setSpendCheckOpen(false)} style={{
+                width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
+                color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+              }}>
+                <X size={18} />
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: COLOR.surface, borderRadius: 24, padding: "8px 16px", border: `1px solid ${COLOR.hairline}` }}>
+                <AlertTriangle size={15} color={COLOR.violetSoft} />
+                <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: COLOR.ink }}>Puis-je dépenser ça ?</span>
               </div>
+              <div style={{ width: 40 }} />
             </div>
 
-            <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 140 }}>
-                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant à dépenser</label>
-                  <input type="number" inputMode="numeric" value={spendAmount || ""} onChange={(e) => setSpendAmount(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace" }} autoFocus />
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 140 }}>
-                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie (optionnel)</label>
-                  <select value={spendCategory} onChange={(e) => setSpendCategory(e.target.value)} style={inputStyle}>
-                    <option value="">—</option>
-                    {categoriesForType(transactions, "Dépense").map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte concerné (optionnel — sinon tous les comptes)</label>
-                <select value={spendAccount} onChange={(e) => setSpendAccount(e.target.value)} style={inputStyle}>
+            {/* Montant — zone centrale, identique en esprit à la Saisie rapide */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", position: "relative", padding: "14px 24px 6px 24px" }}>
+              <div style={{ position: "absolute", top: 8, fontSize: 60, fontWeight: 700, color: COLOR.violet, opacity: 0.07, fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none" }}>FCFA</div>
+              <input type="number" inputMode="numeric" value={spendAmount || ""} placeholder="0" autoFocus
+                onChange={(e) => setSpendAmount(Number(e.target.value) || 0)}
+                style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 44, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 280 }} />
+              <span style={{ position: "relative", fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>Montant à dépenser</span>
+            </div>
+
+            {/* Compte / Catégorie — même style pilule que la Saisie rapide */}
+            <div style={{ padding: "8px 20px 16px 20px", display: "flex", gap: 20 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={fieldLabel}>Compte</div>
+                <select value={spendAccount} onChange={(e) => setSpendAccount(e.target.value)} style={nakedSelect}>
                   <option value="">Tous les comptes</option>
                   {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
                 </select>
               </div>
+              <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
+                <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
+                <button onClick={() => setSpendCatPickerOpen(true)} style={{ ...nakedSelect, textAlign: "right", cursor: "pointer", display: "block" }}>
+                  {spendCategory || "Choisir…"}
+                </button>
+                {spendSubcategory && <div style={{ textAlign: "right", fontSize: 12, color: COLOR.inkMuted, marginTop: 3 }}>{spendSubcategory}</div>}
+              </div>
+            </div>
+            <CategoryPickerSheet open={spendCatPickerOpen} onClose={() => setSpendCatPickerOpen(false)} transactions={transactions} type="Dépense"
+              value={spendCategory} subvalue={spendSubcategory} onSelect={(c, s) => { setSpendCategory(c); setSpendSubcategory(s); }} />
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {[
-                  { key: "essentiel" as const, label: "C'est un besoin essentiel, pas juste une envie" },
-                  { key: "prevu" as const, label: "Cette dépense était déjà prévue / budgétée à l'avance" },
-                  { key: "sansDette" as const, label: "Je n'ai aucune dette ni impayé en cours" },
-                  { key: "ponctuelle" as const, label: "C'est ponctuel — ça ne se reproduira pas ce mois-ci" },
-                  { key: "budgetDepasse" as const, label: "Le budget de cette catégorie est déjà dépassé ce mois-ci" },
-                ].map((q) => (
-                  <label key={q.key} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
-                    <input type="checkbox" checked={spendAnswers[q.key]} onChange={(e) => setSpendAnswers({ ...spendAnswers, [q.key]: e.target.checked })} style={{ width: 16, height: 16, accentColor: COLOR.violet }} />
-                    {q.label}
-                  </label>
-                ))}
+            {/* Questions — zone basse, façon fiche de saisie WinDev : listes déroulantes
+                pour les critères graduels, cases à cocher pour les binaires simples */}
+            <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 20px", background: COLOR.surface, display: "flex", flexDirection: "column", gap: 14 }}>
+              {[
+                { key: "nature" as const, label: "Nature de la dépense", options: [
+                  { value: "essentiel", label: "Besoin essentiel" },
+                  { value: "envie_reflechie", label: "Envie réfléchie, assumée" },
+                  { value: "envie_impulsive", label: "Envie impulsive, là maintenant" },
+                ]},
+                { key: "anticipation" as const, label: "Anticipation", options: [
+                  { value: "prevue", label: "Prévue depuis plus d'une semaine" },
+                  { value: "decidee_aujourdhui", label: "Décidée aujourd'hui" },
+                  { value: "derniere_minute", label: "Décidée dans la dernière heure" },
+                ]},
+                { key: "dette", label: "Situation d'endettement actuelle", options: [
+                  { value: "aucune", label: "Aucune dette en cours" },
+                  { value: "en_cours", label: "Dettes en cours, mais à jour" },
+                  { value: "en_retard", label: "Dettes ou impayés en retard" },
+                ]},
+                { key: "ressenti" as const, label: "Comment tu te sens en la faisant", options: [
+                  { value: "serein", label: "Serein(e), aucune hésitation" },
+                  { value: "coupable", label: "Un peu coupable" },
+                  { value: "sait_que_non", label: "Je sais que je ne devrais pas" },
+                ]},
+              ].map((q) => (
+                <div key={q.key}>
+                  <div style={fieldLabel}>{q.label}</div>
+                  <select value={(spendAnswers as any)[q.key]} onChange={(e) => setSpendAnswers({ ...spendAnswers, [q.key]: e.target.value })}
+                    style={{ ...inputStyle, width: "100%", fontFamily: "'Inter', sans-serif" }}>
+                    {q.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
+              ))}
+
+              <div style={{ paddingTop: 4, borderTop: `1px dashed ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 10, marginTop: 4 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
+                  <input type="checkbox" checked={spendAnswers.ponctuelle} onChange={(e) => setSpendAnswers({ ...spendAnswers, ponctuelle: e.target.checked })} style={{ width: 16, height: 16, accentColor: COLOR.violet }} />
+                  C'est ponctuel — ça ne se reproduira pas ce mois-ci
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
+                  <input type="checkbox" checked={spendAnswers.budgetTendu} onChange={(e) => setSpendAnswers({ ...spendAnswers, budgetTendu: e.target.checked })} style={{ width: 16, height: 16, accentColor: COLOR.violet }} />
+                  Ce poste est déjà tendu ce mois-ci, budget ou pas
+                </label>
               </div>
 
               <button onClick={() => setSpendResult(evaluateSpendingCheck(spendAmount, spendCategory || null, spendAccount || null, spendAnswers, transactions, accounts, recurring, budgets))}
                 disabled={spendAmount <= 0}
-                style={{ background: spendAmount > 0 ? COLOR.violet : COLOR.hairline, border: "none", borderRadius: 8, color: spendAmount > 0 ? "#0e1611" : COLOR.inkMuted, padding: "11px 14px", fontSize: 13.5, fontWeight: 700, cursor: spendAmount > 0 ? "pointer" : "default" }}>
+                style={{ width: "100%", marginTop: 4, padding: "15px 0", borderRadius: 14, border: "none", background: spendAmount > 0 ? COLOR.violet : COLOR.hairline, color: spendAmount > 0 ? "#0e1611" : COLOR.inkMuted, fontSize: 15.5, fontWeight: 700, cursor: spendAmount > 0 ? "pointer" : "default" }}>
                 Vérifier
               </button>
 
@@ -3512,7 +3614,8 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -8359,7 +8462,11 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <Panel title="Conseils critiques" subtitle="Lecture des 6 derniers mois glissants — catégories, sous-catégories, bénéficiaires et notes — pas de complaisance">
+      <PanelWithHelp title="Conseils critiques" subtitle="Lecture des 6 derniers mois glissants — catégories, sous-catégories, bénéficiaires et notes — pas de complaisance"
+        explain="Analyse 100% automatique sur tes 6 derniers mois glissants : taux d'épargne, dérive du Non-productif, habitudes de dépenses répétées, grosses dépenses individuelles, concentration excessive, argent non classifié, effet week-end, mots-clés répétés dans tes notes, et doublons de saisie probables. Recalculée à chaque ouverture, jamais un texte figé."
+        collapsible defaultOpen={false}
+        badge={criticalAdvice.items.filter((i) => i.severity === "critique").length > 0 ? `${criticalAdvice.items.filter((i) => i.severity === "critique").length} point(s) critique(s)` : undefined}
+        badgeColor={COLOR.claySoft}>
         <div style={{ fontSize: 13, color: COLOR.ink, lineHeight: 1.5, marginBottom: criticalAdvice.items.length ? 16 : 0, fontStyle: "italic" }}>{criticalAdvice.opening}</div>
         {criticalAdvice.items.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -8379,7 +8486,7 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
             })}
           </div>
         )}
-      </Panel>
+      </PanelWithHelp>
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
