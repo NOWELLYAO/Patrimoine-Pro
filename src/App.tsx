@@ -2119,6 +2119,241 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
 }
 
 // ============================================================
+// CONSEILS CRITIQUES DU JOUR — "Puis-je dépenser ça ?" — sur demande explicite de
+// l'utilisateur (14/08/2026) : avant une dépense, poser quelques questions à cocher +
+// le montant, et répondre franchement "oui / attends / non", avec une date précise
+// quand il faut patienter. Deux couches, comme un conseiller le ferait :
+//  1) Une contrainte DURE, calculée sur les vraies données (pas déclarative) : l'argent
+//     réellement disponible avant le prochain revenu récurrent connu — solde des
+//     comptes moins les charges fixes à venir avant cette date. Si le montant demandé
+//     dépasse ça, la réponse est "attends" quels que soient les cases cochées : on ne
+//     peut pas dépenser de l'argent qu'on n'a pas, peu importe les bonnes intentions.
+//  2) Un score de jugement basé sur les cases cochées (besoin réel, prévu à l'avance,
+//     dettes en cours, dépassement de budget déjà en cours sur cette catégorie...),
+//     qui affine la réponse quand la contrainte dure est respectée.
+// ============================================================
+interface SpendingCheckAnswers { essentiel: boolean; prevu: boolean; sansDette: boolean; ponctuelle: boolean; budgetDepasse: boolean; }
+interface SpendingCheckResult {
+  verdict: "oui" | "attends" | "non";
+  headline: string;
+  reasons: string[];
+  waitUntil?: string; // date ISO suggérée si "attends"
+  soldeDisponible: number;
+  argentReelDisponible: number;
+}
+
+function evaluateSpendingCheck(
+  amount: number, category: string | null, accountName: string | null,
+  answers: SpendingCheckAnswers, transactions: Transaction[], accounts: Account[],
+  recurring: RecurringTemplate[], budgets: CategoryBudget[]
+): SpendingCheckResult {
+  const today = todayISO();
+  const relevantAccounts = accountName ? accounts.filter((a) => a.name === accountName) : accounts;
+  const soldeDisponible = relevantAccounts.reduce((a, acc) => a + accountBalance(acc, transactions), 0);
+
+  // Prochain revenu récurrent connu (le plus proche dans le futur)
+  const upcomingIncomes = recurring.filter((r) => r.type === "Revenu" && r.nextDate >= today).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
+  const nextIncome = upcomingIncomes[0] || null;
+
+  // Charges fixes récurrentes attendues avant ce revenu (ou dans les 30 jours si aucun
+  // revenu récurrent n'est déclaré — fenêtre de précaution par défaut)
+  const horizonDate = nextIncome ? nextIncome.nextDate : (() => { const d = new Date(today); d.setDate(d.getDate() + 30); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  const upcomingFixedCharges = recurring
+    .filter((r) => r.type === "Dépense" && r.nextDate >= today && r.nextDate <= horizonDate)
+    .reduce((a, r) => a + r.amount, 0);
+
+  const argentReelDisponible = soldeDisponible - upcomingFixedCharges;
+
+  // Statut du budget de la catégorie ce mois-ci, si elle est budgétée
+  const currentMonth = dateToMonthKey(today);
+  const budget = category ? budgets.find((b) => b.category === category) : undefined;
+  let budgetInfo: { spent: number; limit: number } | null = null;
+  if (budget) {
+    const spent = transactions.filter((t) => t.type === "Dépense" && t.category === category && dateToMonthKey(t.date) === currentMonth).reduce((a, t) => a + t.amount, 0);
+    budgetInfo = { spent, limit: budget.amount };
+  }
+
+  const reasons: string[] = [];
+
+  // Contrainte dure : l'argent n'existe tout simplement pas
+  if (amount > soldeDisponible) {
+    reasons.push(`Ton solde disponible (${fmt(soldeDisponible)} FCFA${accountName ? ` sur ${accountName}` : ""}) est inférieur au montant demandé (${fmt(amount)} FCFA) — ce n'est pas une question de discipline, l'argent n'y est simplement pas.`);
+    return { verdict: "non", headline: "Non — le solde ne couvre pas la dépense", reasons, soldeDisponible, argentReelDisponible };
+  }
+  if (amount > argentReelDisponible) {
+    const waitLabel = nextIncome ? `ton prochain revenu prévu (${monthLabel(dateToMonthKey(nextIncome.nextDate))}, le ${dateLabelFull(nextIncome.nextDate)})` : "d'ici environ 30 jours, une fois tes charges fixes passées";
+    reasons.push(`Ton solde couvre le montant sur le papier (${fmt(soldeDisponible)} FCFA), mais ${fmt(upcomingFixedCharges)} FCFA de charges fixes récurrentes sont encore à venir avant ${nextIncome ? "ton prochain revenu" : "un mois"} — il ne reste réellement que ${fmt(argentReelDisponible)} FCFA de marge, insuffisant pour ${fmt(amount)} FCFA.`);
+    reasons.push(`Attends ${waitLabel} pour refaire le point.`);
+    return { verdict: "attends", headline: "Attends — l'argent est déjà engagé ailleurs", reasons, waitUntil: nextIncome?.nextDate, soldeDisponible, argentReelDisponible };
+  }
+
+  // Contrainte dure respectée — on affine avec le jugement (cases cochées)
+  let score = 0;
+  if (answers.essentiel) score += 2; else { score -= 1; reasons.push("Ce n'est pas un besoin essentiel — une envie assumée coûte plus cher qu'un besoin, sois honnête avec toi-même sur ce point."); }
+  if (answers.prevu) score += 2; else reasons.push("Cette dépense n'était pas prévue à l'avance — c'est le genre de dépense qui, répétée, fait dérailler un budget sans qu'on s'en rende compte.");
+  if (answers.sansDette) score += 1; else { score -= 2; reasons.push("Tu as des dettes ou impayés en cours — toute dépense non essentielle pendant cette période retarde le moment où tu t'en sors vraiment."); }
+  if (answers.ponctuelle) score += 1; else { score -= 1; reasons.push("Elle risque de se reproduire — une dépense ponctuelle et une habitude n'ont pas le même impact sur 6 mois."); }
+  if (answers.budgetDepasse) { score -= 3; reasons.push(`Tu as coché que le budget de cette catégorie est déjà dépassé ce mois-ci${budgetInfo ? ` (${fmt(budgetInfo.spent)} FCFA dépensés pour une limite de ${fmt(budgetInfo.limit)} FCFA)` : ""} — l'ajouter maintenant, c'est creuser un dépassement déjà réel.`); }
+  else if (budgetInfo && budgetInfo.spent + amount > budgetInfo.limit) {
+    score -= 2; reasons.push(`Cette dépense ferait dépasser le budget "${category}" : ${fmt(budgetInfo.spent + amount)} FCFA contre une limite de ${fmt(budgetInfo.limit)} FCFA ce mois-ci.`);
+  }
+
+  if (score <= -3) {
+    reasons.unshift(`Tu as les fonds sur le papier (${fmt(argentReelDisponible)} FCFA de marge réelle), mais trop de signaux sont défavorables pour que ce soit une bonne décision maintenant.`);
+    return { verdict: "attends", headline: "Attends un autre jour — l'argent est là, pas les bonnes conditions", reasons, soldeDisponible, argentReelDisponible };
+  }
+  if (score < 0) {
+    reasons.unshift(`Marge réelle disponible : ${fmt(argentReelDisponible)} FCFA. Faisable, mais pas sans réserve.`);
+    return { verdict: "attends", headline: "Tu peux, mais réfléchis encore une fois avant", reasons, soldeDisponible, argentReelDisponible };
+  }
+  reasons.unshift(`Marge réelle disponible après charges fixes à venir : ${fmt(argentReelDisponible)} FCFA — largement suffisant, et les réponses cochées vont dans le bon sens.`);
+  return { verdict: "oui", headline: "Oui, tu peux le faire", reasons, soldeDisponible, argentReelDisponible };
+}
+
+// ============================================================
+// CONSEILS CRITIQUES — lecture des 6 derniers mois de transactions (catégorie,
+// sous-catégorie, bénéficiaire, ET notes/descriptions) pour produire des constats
+// précis, chiffrés et volontairement sans complaisance — demande explicite de
+// l'utilisateur (14/08/2026) : "des conseils sérieux, précis et très critiques".
+// 100% déterministe (pas d'appel à un modèle de langage depuis l'app déployée) :
+// chaque règle ci-dessous encode un réflexe concret de conseiller financier —
+// repérer les petites fuites répétées, la concentration excessive, l'argent non
+// classifié, la dérive dans le temps — puis chiffre son impact plutôt que de rester
+// vague. `scope` (Personnel/Business) est respecté : les dépenses professionnelles ne
+// sont jamais présentées comme du gaspillage de train de vie personnel.
+// ============================================================
+interface CriticalAdvice { severity: "critique" | "attention" | "positif"; title: string; text: string; }
+
+const STOPWORDS_FR = new Set(["le","la","les","de","des","du","un","une","et","à","au","aux","pour","avec","sur","dans","ce","cette","ces","mon","ma","mes","son","sa","ses","en","par","chez","vers","the","of","for"]);
+
+function buildCriticalAdvice(transactions: Transaction[], categoryGroups: Record<string, Group>, categoryScope: Record<string, Scope>, recurring: RecurringTemplate[]): { opening: string; items: CriticalAdvice[] } {
+  const today = todayISO();
+  const cutoff = new Date(today); cutoff.setMonth(cutoff.getMonth() - 6);
+  const cutoffStr = `${cutoff.getFullYear()}-${pad2(cutoff.getMonth() + 1)}-${pad2(cutoff.getDate())}`;
+  const window = transactions.filter((t) => t.date >= cutoffStr && t.date <= today);
+  const isPersonal = (t: Transaction) => (categoryScope[t.category] || "Personnel") === "Personnel";
+  const personal = window.filter(isPersonal);
+  const monthKeys = Array.from(new Set(window.map((t) => dateToMonthKey(t.date)))).sort();
+
+  if (window.length < 10 || monthKeys.length < 2) {
+    return { opening: "Pas assez d'historique sur les 6 derniers mois pour un diagnostic sérieux — reviens ici une fois que tu auras saisi davantage de transactions.", items: [] };
+  }
+
+  const items: CriticalAdvice[] = [];
+  const totalRev = window.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+  const totalDep = window.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+  const monthlyRev = totalRev / monthKeys.length;
+  const monthlyDep = totalDep / monthKeys.length;
+  const savingsRate = totalRev > 0 ? ((totalRev - totalDep) / totalRev) * 100 : -100;
+
+  // 1) Taux d'épargne réel sur 6 mois
+  if (savingsRate < 0) {
+    items.push({ severity: "critique", title: "Tu vis au-dessus de tes moyens", text: `Sur les 6 derniers mois, tes dépenses (${fmt(totalDep)} FCFA) dépassent tes revenus (${fmt(totalRev)} FCFA) de ${fmt(totalDep - totalRev)} FCFA au total — soit ${fmt(Math.round((totalDep - totalRev) / monthKeys.length))} FCFA de déficit par mois en moyenne. Ce n'est pas un mois difficile isolé, c'est une tendance sur un semestre entier.` });
+  } else if (savingsRate < 10) {
+    items.push({ severity: "attention", title: "Marge d'épargne trop faible pour absorber un imprévu", text: `Tu épargnes ${savingsRate.toFixed(1)}% de tes revenus sur 6 mois (${fmt(totalRev - totalDep)} FCFA au total) — en dessous du seuil de 10% généralement considéré comme le minimum vital. Une seule dépense imprévue de plus qu'un mois normal, et tu repasses dans le rouge.` });
+  } else {
+    items.push({ severity: "positif", title: "Taux d'épargne sain sur 6 mois", text: `${savingsRate.toFixed(1)}% de tes revenus mis de côté sur la période (${fmt(totalRev - totalDep)} FCFA) — au-dessus du seuil de 10%. Ne relâche pas l'effort pour autant.` });
+  }
+
+  // 2) Dérive du Non-productif dans le temps (premier vs dernier mois complet de la fenêtre)
+  const nonProdByMonth = monthKeys.map((mk) => {
+    const dep = window.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === mk);
+    const total = dep.reduce((a, t) => a + t.amount, 0) || 1;
+    const nonProd = dep.filter((t) => (t.type === "Revenu" ? "Revenu" : categoryGroups[t.category] || "Non classifié") === "Non-productif").reduce((a, t) => a + t.amount, 0);
+    return { mk, share: (nonProd / total) * 100 };
+  });
+  if (nonProdByMonth.length >= 3) {
+    const first = nonProdByMonth[0].share, last = nonProdByMonth[nonProdByMonth.length - 1].share;
+    if (last - first >= 12) {
+      items.push({ severity: "critique", title: "Le \"Non-productif\" grignote une part croissante de ton budget", text: `Il représentait ${first.toFixed(0)}% de tes dépenses en ${monthLabel(nonProdByMonth[0].mk)}, contre ${last.toFixed(0)}% en ${monthLabel(nonProdByMonth[nonProdByMonth.length - 1].mk)} — une dérive de +${(last - first).toFixed(0)} points en ${monthKeys.length} mois. Ce n'est pas une variation ponctuelle, c'est une trajectoire.` });
+    }
+  }
+
+  // 3) "Mort à petit feu" — sous-catégorie ou bénéficiaire non récurrent avec le plus grand
+  // nombre d'écritures (fréquence), révélateur d'une habitude plutôt qu'une dépense isolée
+  const recurringCats = new Set(recurring.map((r) => r.category));
+  const freqMap: Record<string, { count: number; total: number; group: Group }> = {};
+  personal.filter((t) => t.type === "Dépense" && !recurringCats.has(t.category)).forEach((t) => {
+    const key = t.subcategory ? `${t.category} · ${t.subcategory}` : t.category;
+    if (!freqMap[key]) freqMap[key] = { count: 0, total: 0, group: categoryGroups[t.category] || "Non classifié" };
+    freqMap[key].count += 1; freqMap[key].total += t.amount;
+  });
+  const leaks = Object.entries(freqMap).filter(([, v]) => v.count >= 10 && v.group !== "Nécessaire").sort((a, b) => b[1].total - a[1].total);
+  if (leaks.length) {
+    const [key, v] = leaks[0];
+    const perMonth = v.count / monthKeys.length;
+    items.push({ severity: "critique", title: `"${key}" te coûte plus cher que tu ne le penses`, text: `${v.count} écritures en ${monthKeys.length} mois (~${perMonth.toFixed(1)} fois par mois) pour un total de ${fmt(v.total)} FCFA — ce n'est pas un extra occasionnel, c'est une habitude installée. Sur une année pleine, ça représenterait environ ${fmt(Math.round(v.total / monthKeys.length * 12))} FCFA.` });
+  }
+
+  // 4) Concentration excessive sur une seule catégorie de dépense
+  const byCategory: Record<string, { total: number; group: Group }> = {};
+  window.filter((t) => t.type === "Dépense").forEach((t) => {
+    if (!byCategory[t.category]) byCategory[t.category] = { total: 0, group: categoryGroups[t.category] || "Non classifié" };
+    byCategory[t.category].total += t.amount;
+  });
+  const topCat = Object.entries(byCategory).sort((a, b) => b[1].total - a[1].total)[0];
+  if (topCat && totalDep > 0) {
+    const share = (topCat[1].total / totalDep) * 100;
+    if (share >= 35 && topCat[1].group !== "Nécessaire") {
+      items.push({ severity: "attention", title: `"${topCat[0]}" concentre à elle seule ${share.toFixed(0)}% de tes dépenses`, text: `${fmt(topCat[1].total)} FCFA sur 6 mois dans une seule catégorie (${topCat[1].group}) — au-delà de 30-35% dans une seule ligne, un budget devient fragile : le moindre dérapage sur ce poste précis fait dérailler tout le mois.` });
+    }
+  }
+
+  // 5) Argent dont la destination réelle est inconnue (Non classifié + sans compte)
+  const nonClasse = window.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Non classifié").reduce((a, t) => a + t.amount, 0);
+  const sansCompte = window.filter((t) => t.type === "Dépense" && !t.account).reduce((a, t) => a + t.amount, 0);
+  if (nonClasse + sansCompte > monthlyDep * 0.05) {
+    items.push({ severity: "attention", title: "Une partie de ton argent est un angle mort", text: `${fmt(nonClasse)} FCFA en catégories "Non classifié" et ${fmt(sansCompte)} FCFA sans compte associé sur 6 mois. Tant que ce n'est pas classé, aucun ratio de cette page (ni aucun conseil ci-dessus) ne peut vraiment être fiable pour cette part-là — c'est une dette de rigueur avant d'être une dette financière.` });
+  }
+
+  // 6) Effet week-end sur le Non-productif
+  const nonProdTx = window.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Non-productif");
+  const nonProdTotal = nonProdTx.reduce((a, t) => a + t.amount, 0);
+  const weekendTotal = nonProdTx.filter((t) => { const d = new Date(t.date + "T00:00:00").getDay(); return d === 0 || d === 5 || d === 6; }).reduce((a, t) => a + t.amount, 0);
+  if (nonProdTotal > 0) {
+    const weekendShare = (weekendTotal / nonProdTotal) * 100;
+    if (weekendShare >= 55) {
+      items.push({ severity: "attention", title: "Le week-end fait le plus gros des dégâts sur le \"Non-productif\"", text: `${weekendShare.toFixed(0)}% de tes dépenses non-productives (${fmt(weekendTotal)} FCFA sur ${fmt(nonProdTotal)} FCFA) tombent vendredi-samedi-dimanche. Si tu veux réduire ce poste, c'est là qu'il faut agir en priorité — pas sur les dépenses de semaine, marginales en comparaison.` });
+    }
+  }
+
+  // 7) Fouille des notes/descriptions — mot le plus fréquent qui n'apparaît dans aucune
+  // catégorie/sous-catégorie/bénéficiaire déjà connue (potentiel signal manqué)
+  const wordCounts: Record<string, { count: number; total: number }> = {};
+  personal.filter((t) => t.type === "Dépense" && t.note && t.note.trim()).forEach((t) => {
+    const words = t.note!.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !STOPWORDS_FR.has(w));
+    const seen = new Set(words);
+    seen.forEach((w) => {
+      if (t.category.toLowerCase().includes(w) || (t.subcategory || "").toLowerCase().includes(w) || (t.payee || "").toLowerCase().includes(w)) return; // déjà capté ailleurs
+      if (!wordCounts[w]) wordCounts[w] = { count: 0, total: 0 };
+      wordCounts[w].count += 1; wordCounts[w].total += t.amount;
+    });
+  });
+  const topWord = Object.entries(wordCounts).filter(([, v]) => v.count >= 8).sort((a, b) => b[1].total - a[1].total)[0];
+  if (topWord) {
+    const [word, v] = topWord;
+    items.push({ severity: "attention", title: `Le mot "${word}" revient sans arrêt dans tes notes`, text: `${v.count} fois sur 6 mois pour un total de ${fmt(v.total)} FCFA, sans que ça corresponde à une catégorie ou un bénéficiaire dédié — c'est le genre de motif que les catégories seules ne montrent pas. Vaut le coup d'aller relire ces transactions une par une pour voir si un vrai poste de dépense se cache derrière.` });
+  }
+
+  // 8) Doublons probables — même date, même montant, même catégorie (erreur de saisie possible)
+  const dupKey = (t: Transaction) => `${t.date}|${t.amount}|${t.category}|${t.type}`;
+  const dupCounts: Record<string, number> = {};
+  window.forEach((t) => { dupCounts[dupKey(t)] = (dupCounts[dupKey(t)] || 0) + 1; });
+  const dupCount = Object.values(dupCounts).filter((c) => c >= 2).length;
+  if (dupCount >= 3) {
+    items.push({ severity: "attention", title: "Doublons de saisie probables", text: `${dupCount} groupes de transactions identiques (même date, même montant, même catégorie) détectés sur 6 mois — certaines sont peut-être légitimes (deux achats similaires le même jour), mais ça vaut une relecture rapide dans le Journal : une saisie en double fausse tous tes totaux sans que tu t'en rendes compte.` });
+  }
+
+  const critiqueCount = items.filter((i) => i.severity === "critique").length;
+  const opening = critiqueCount === 0
+    ? "Rien d'alarmant sur les 6 derniers mois — les points ci-dessous sont surtout des marges de progression, pas des urgences."
+    : `${critiqueCount} point${critiqueCount > 1 ? "s" : ""} sérieux sur les 6 derniers mois — pas de complaisance, voici ce qui mérite vraiment ton attention.`;
+
+  items.sort((a, b) => { const order = { critique: 0, attention: 1, positif: 2 }; return order[a.severity] - order[b.severity]; });
+  return { opening, items };
+}
+
+// ============================================================
 // RAPPORT NARRATIF DÉTAILLÉ — transforme les chiffres bruts des indicateurs
 // asiatiques en un vrai texte explicatif : définition de chaque catégorie,
 // exemples concrets, comparaison chiffrée à l'objectif, verdict dynamique,
@@ -2883,9 +3118,10 @@ function HealthScoreNarrativeSheet({ open, onClose, tauxEpargne, pctNonProd, cv,
   );
 }
 
-function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
+function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, chargeOverrides, includeGrundfosVoiture, monthlyObjective, recurring, budgets }: {
   filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[]; categoryGroups: Record<string, Group>;
   chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean; monthlyObjective: number;
+  recurring: RecurringTemplate[]; budgets: CategoryBudget[];
 }) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
@@ -2932,6 +3168,14 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
   // l'utilisateur (12/08/2026). Navigable (mois précédent/suivant), jamais au-delà du mois en cours.
   const [monthlyReportOpen, setMonthlyReportOpen] = useState(false);
   const [reportAnchor, setReportAnchor] = useState(() => dateToMonthKey(todayISO()));
+
+  // "Puis-je dépenser ça ?" — sur demande explicite de l'utilisateur (14/08/2026).
+  const [spendCheckOpen, setSpendCheckOpen] = useState(false);
+  const [spendAmount, setSpendAmount] = useState<number>(0);
+  const [spendCategory, setSpendCategory] = useState<string>("");
+  const [spendAccount, setSpendAccount] = useState<string>("");
+  const [spendAnswers, setSpendAnswers] = useState<SpendingCheckAnswers>({ essentiel: false, prevu: false, sansDette: false, ponctuelle: false, budgetDepasse: false });
+  const [spendResult, setSpendResult] = useState<SpendingCheckResult | null>(null);
 
   const buildMonthlyReport = (anchorMonthKey: string) => {
     const prevKey = prevMonthKey(anchorMonthKey);
@@ -3017,7 +3261,13 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+        <button onClick={() => { setSpendResult(null); setSpendCheckOpen(true); }} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "rgba(139,123,194,0.14)", border: `1px solid ${COLOR.violet}`,
+          borderRadius: 8, color: COLOR.violetSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer", fontFamily: "'Inter', sans-serif", fontWeight: 600,
+        }}>
+          <AlertTriangle size={14} /> Puis-je dépenser ça ?
+        </button>
         <button onClick={() => { setReportAnchor(dateToMonthKey(todayISO())); setMonthlyReportOpen(true); }} style={{
           display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
           borderRadius: 8, color: COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer", fontFamily: "'Inter', sans-serif", fontWeight: 600,
@@ -3182,6 +3432,87 @@ function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, 
           />
         );
       })()}
+
+      {spendCheckOpen && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.5)", display: "flex", justifyContent: "center", alignItems: "center", padding: 16 }} onClick={() => setSpendCheckOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, maxHeight: "88vh", overflowY: "auto", display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`, border: `1px solid ${COLOR.hairline}`, borderRadius: 16 }}>
+            <div style={{ padding: "18px 20px 12px 20px", borderBottom: `1px solid ${COLOR.hairline}`, position: "sticky", top: 0, background: COLOR.surfaceRaised, zIndex: 2 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                <div>
+                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Puis-je dépenser ça ?</div>
+                  <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 3, fontStyle: "italic" }}>Réponse basée sur ton solde réel, tes charges fixes à venir, et les cases cochées ci-dessous</div>
+                </div>
+                <button onClick={() => setSpendCheckOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+              </div>
+            </div>
+
+            <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 140 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant à dépenser</label>
+                  <input type="number" inputMode="numeric" value={spendAmount || ""} onChange={(e) => setSpendAmount(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace" }} autoFocus />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 140 }}>
+                  <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Catégorie (optionnel)</label>
+                  <select value={spendCategory} onChange={(e) => setSpendCategory(e.target.value)} style={inputStyle}>
+                    <option value="">—</option>
+                    {categoriesForType(transactions, "Dépense").map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte concerné (optionnel — sinon tous les comptes)</label>
+                <select value={spendAccount} onChange={(e) => setSpendAccount(e.target.value)} style={inputStyle}>
+                  <option value="">Tous les comptes</option>
+                  {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[
+                  { key: "essentiel" as const, label: "C'est un besoin essentiel, pas juste une envie" },
+                  { key: "prevu" as const, label: "Cette dépense était déjà prévue / budgétée à l'avance" },
+                  { key: "sansDette" as const, label: "Je n'ai aucune dette ni impayé en cours" },
+                  { key: "ponctuelle" as const, label: "C'est ponctuel — ça ne se reproduira pas ce mois-ci" },
+                  { key: "budgetDepasse" as const, label: "Le budget de cette catégorie est déjà dépassé ce mois-ci" },
+                ].map((q) => (
+                  <label key={q.key} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
+                    <input type="checkbox" checked={spendAnswers[q.key]} onChange={(e) => setSpendAnswers({ ...spendAnswers, [q.key]: e.target.checked })} style={{ width: 16, height: 16, accentColor: COLOR.violet }} />
+                    {q.label}
+                  </label>
+                ))}
+              </div>
+
+              <button onClick={() => setSpendResult(evaluateSpendingCheck(spendAmount, spendCategory || null, spendAccount || null, spendAnswers, transactions, accounts, recurring, budgets))}
+                disabled={spendAmount <= 0}
+                style={{ background: spendAmount > 0 ? COLOR.violet : COLOR.hairline, border: "none", borderRadius: 8, color: spendAmount > 0 ? "#0e1611" : COLOR.inkMuted, padding: "11px 14px", fontSize: 13.5, fontWeight: 700, cursor: spendAmount > 0 ? "pointer" : "default" }}>
+                Vérifier
+              </button>
+
+              {spendResult && (() => {
+                const tone = spendResult.verdict === "oui" ? COLOR.emerald : spendResult.verdict === "attends" ? COLOR.gold : COLOR.clay;
+                const toneSoft = spendResult.verdict === "oui" ? COLOR.emeraldSoft : spendResult.verdict === "attends" ? COLOR.goldSoft : COLOR.claySoft;
+                const Icon = spendResult.verdict === "oui" ? CheckSquare : spendResult.verdict === "attends" ? AlertTriangle : X;
+                return (
+                  <div style={{ padding: 14, borderRadius: 10, background: `${tone}14`, border: `1px solid ${tone}55`, borderLeft: `3px solid ${tone}` }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <Icon size={16} color={toneSoft} />
+                      <span style={{ fontSize: 13.5, fontWeight: 700, color: COLOR.ink }}>{spendResult.headline}</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      {spendResult.reasons.map((r, i) => (
+                        <div key={i} style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.5, display: "flex", gap: 6 }}>
+                          <span style={{ color: toneSoft, flexShrink: 0 }}>—</span><span>{r}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -7726,9 +8057,10 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
   );
 }
 
-function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange }: {
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange, categoryGroups, categoryScope, recurring }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
   setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
+  categoryGroups: Record<string, Group>; categoryScope: Record<string, Scope>; recurring: RecurringTemplate[];
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
@@ -7743,6 +8075,14 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
   const windowMonths = useMemo(() => monthsSinceInception(transactions), [transactions]);
   const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange]);
   const asian = useMemo(() => computeAsianIndicators(transactions, chargeOverrides, includeGrundfosVoiture, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, periodRange]);
+  // Conseils critiques : toujours calculés sur les 6 derniers mois glissants à partir
+  // d'aujourd'hui, indépendamment du filtre "Du mois / Au mois" — un diagnostic de
+  // comportement financier n'a de sens que sur une fenêtre récente et fixe, pas sur une
+  // période arbitraire que l'utilisateur pourrait avoir sélectionnée pour autre chose.
+  const criticalAdvice = useMemo(
+    () => buildCriticalAdvice(transactions, categoryGroups, categoryScope, recurring),
+    [transactions, categoryGroups, categoryScope, recurring]
+  );
   // Nombre réel de mois couverts par l'analyse ci-dessous (respecte le filtre global
   // "Du mois / Au mois" quand il restreint la période, sinon = tout l'historique).
   const effectiveMonths = charges.lookback.length;
@@ -8019,6 +8359,28 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <Panel title="Conseils critiques" subtitle="Lecture des 6 derniers mois glissants — catégories, sous-catégories, bénéficiaires et notes — pas de complaisance">
+        <div style={{ fontSize: 13, color: COLOR.ink, lineHeight: 1.5, marginBottom: criticalAdvice.items.length ? 16 : 0, fontStyle: "italic" }}>{criticalAdvice.opening}</div>
+        {criticalAdvice.items.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {criticalAdvice.items.map((item, i) => {
+              const tone = item.severity === "critique" ? COLOR.clay : item.severity === "attention" ? COLOR.gold : COLOR.emerald;
+              const toneSoft = item.severity === "critique" ? COLOR.claySoft : item.severity === "attention" ? COLOR.goldSoft : COLOR.emeraldSoft;
+              const Icon = item.severity === "critique" ? AlertTriangle : item.severity === "attention" ? AlertTriangle : TrendingUp;
+              return (
+                <div key={i} style={{ display: "flex", gap: 10, padding: "12px 14px", borderRadius: 10, background: `${tone}14`, border: `1px solid ${tone}55`, borderLeft: `3px solid ${tone}` }}>
+                  <Icon size={15} color={toneSoft} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: COLOR.ink, marginBottom: 3 }}>{item.title}</div>
+                    <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{item.text}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
+
       <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
           <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
@@ -12030,7 +12392,7 @@ export default function GrandLivre() {
             </div>
           )}
 
-          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} categoryGroups={resolvedGroups} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
+          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} categoryGroups={resolvedGroups} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} recurring={recurring} budgets={budgets} />}
           {tab === "valeurnette" && <NetWorthTab accounts={accounts} transactions={transactions} filters={filters} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
@@ -12064,7 +12426,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} />}
