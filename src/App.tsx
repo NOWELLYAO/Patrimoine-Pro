@@ -2351,6 +2351,41 @@ function buildCriticalAdvice(transactions: Transaction[], categoryGroups: Record
     items.push({ severity: "critique", title: `"${key}" — ce n'est plus une dépense, c'est une habitude`, text: `${v.count} fois en ${monthKeys.length} mois (~${perMonth.toFixed(1)} fois par mois), ${fmt(v.total)} FCFA au total, et zéro utilité réelle dans ta vie. Sur une année pleine au même rythme, ça ferait ${fmt(Math.round(v.total / monthKeys.length * 12))} FCFA — le prix d'un objectif que tu n'atteindras jamais tant que tu continues à financer celle-ci en premier.` });
   }
 
+  // "Nécessaire" ne veut pas dire optimisé — le Non-productif n'a pas le monopole de la
+  // critique : une grosse dépense étiquetée "Nécessaire" mérite aussi qu'on se demande
+  // si elle a été achetée intelligemment ou juste payée sans réfléchir, parce que
+  // "de toute façon c'est nécessaire" est la meilleure excuse pour ne rien comparer.
+  const necessaireWindow = personal.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Nécessaire");
+  const necGrosses = necessaireWindow.filter((t) => t.amount >= grosseSeuil).sort((a, b) => b.amount - a.amount);
+  if (necGrosses.length) {
+    const top = necGrosses[0];
+    const topLabel = top.subcategory ? `${top.category} · ${top.subcategory}` : top.category;
+    const necTotal = sumAmt(necGrosses);
+    items.push({
+      severity: "attention",
+      title: `${fmt(necTotal)} FCFA de grosses dépenses "Nécessaire" — utile ne veut pas dire optimisé`,
+      text: `La plus lourde : "${topLabel}", ${fmt(top.amount)} FCFA le ${dateLabelFull(top.date)}. Nécessaire ne veut pas dire qu'il fallait payer ce prix précis. As-tu vraiment comparé, négocié, cherché une alternative — ou pris l'option la plus simple parce que "de toute façon il fallait le faire" ? C'est justement la catégorie où on arrête le plus souvent de réfléchir, en se cachant derrière le mot "nécessaire".`,
+    });
+  }
+
+  // "Productif" n'est pas un totem d'immunité — une dépense isolée, jamais répétée,
+  // rangée dans "Productif" mérite d'être questionnée : un vrai investissement se suit
+  // et se répète dans le temps, il ne se contente pas d'une étiquette rassurante.
+  const productifByCat: Record<string, { count: number; total: number }> = {};
+  personal.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Productif").forEach((t) => {
+    if (!productifByCat[t.category]) productifByCat[t.category] = { count: 0, total: 0 };
+    productifByCat[t.category].count += 1; productifByCat[t.category].total += t.amount;
+  });
+  const suspectProductif = Object.entries(productifByCat).filter(([, v]) => v.count <= 1 && v.total >= grosseSeuil).sort((a, b) => b[1].total - a[1].total)[0];
+  if (suspectProductif) {
+    const [cat, v] = suspectProductif;
+    items.push({
+      severity: "attention",
+      title: `"${cat}" classée "Productif" — vraiment un investissement, ou une dépense qui se donne bonne conscience ?`,
+      text: `${fmt(v.total)} FCFA en une seule fois sur 6 mois, aucune récurrence avant ni après. Un vrai investissement se suit, se répète, produit un retour mesurable dans le temps. Une dépense isolée rangée dans "Productif" ressemble surtout à un achat comme un autre, habillé pour peser moins lourd sur la conscience — vérifie honnêtement laquelle des deux c'était.`,
+    });
+  }
+
   // 4) Concentration excessive sur une seule catégorie de dépense
   const byCategory: Record<string, { total: number; group: Group }> = {};
   window.filter((t) => t.type === "Dépense").forEach((t) => {
