@@ -2292,42 +2292,63 @@ function buildCriticalAdvice(transactions: Transaction[], categoryGroups: Record
     }
   }
 
-  // 3) "Mort à petit feu" — sous-catégorie ou bénéficiaire non récurrent avec le plus grand
-  // nombre d'écritures (fréquence), révélateur d'une habitude plutôt qu'une dépense isolée
-  const recurringCats = new Set(recurring.map((r) => r.category));
-  const freqMap: Record<string, { count: number; total: number; group: Group }> = {};
-  personal.filter((t) => t.type === "Dépense" && !recurringCats.has(t.category)).forEach((t) => {
-    const key = t.subcategory ? `${t.category} · ${t.subcategory}` : t.category;
-    if (!freqMap[key]) freqMap[key] = { count: 0, total: 0, group: categoryGroups[t.category] || "Non classifié" };
-    freqMap[key].count += 1; freqMap[key].total += t.amount;
-  });
-  const leaks = Object.entries(freqMap).filter(([, v]) => v.count >= 10 && v.group !== "Nécessaire").sort((a, b) => b[1].total - a[1].total);
-  if (leaks.length) {
-    const [key, v] = leaks[0];
-    const perMonth = v.count / monthKeys.length;
-    items.push({ severity: "critique", title: `"${key}" te coûte plus cher que tu ne le penses`, text: `${v.count} écritures en ${monthKeys.length} mois (~${perMonth.toFixed(1)} fois par mois) pour un total de ${fmt(v.total)} FCFA — ce n'est pas un extra occasionnel, c'est une habitude installée. Sur une année pleine, ça représenterait environ ${fmt(Math.round(v.total / monthKeys.length * 12))} FCFA.` });
+  // 3) Trois paliers de dépenses "non utiles" (= groupe Non-productif de l'app) —
+  // grosses, moyennes, petites — chacune avec son propre mécanisme de déni à
+  // déconstruire, sur demande explicite de l'utilisateur (14/08/2026) : "des paroles
+  // humaines dures pour me faire changer de comportement". Le seuil de chaque palier
+  // est relatif au revenu mensuel moyen (avec un plancher FCFA), pour rester pertinent
+  // quel que soit le niveau de revenu.
+  const nonProdWindow = personal.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Non-productif");
+  const grosseSeuil = Math.max(monthlyRev * 0.08, 40000);
+  const petiteSeuil = Math.max(monthlyRev * 0.015, 5000);
+  const grosses = nonProdWindow.filter((t) => t.amount >= grosseSeuil).sort((a, b) => b.amount - a.amount);
+  const moyennes = nonProdWindow.filter((t) => t.amount >= petiteSeuil && t.amount < grosseSeuil);
+  const petites = nonProdWindow.filter((t) => t.amount < petiteSeuil);
+  const sumAmt = (arr: Transaction[]) => arr.reduce((a, t) => a + t.amount, 0);
+  const grossesTotal = sumAmt(grosses), moyennesTotal = sumAmt(moyennes), petitesTotal = sumAmt(petites);
+
+  if (grosses.length) {
+    const top = grosses[0];
+    const topLabel = top.subcategory ? `${top.category} · ${top.subcategory}` : top.category;
+    const share = totalDep > 0 ? (grossesTotal / totalDep) * 100 : 0;
+    items.push({
+      severity: "critique",
+      title: `${fmt(grossesTotal)} FCFA de GROSSES dépenses non-productives en 6 mois`,
+      text: `La plus lourde : "${topLabel}", ${fmt(top.amount)} FCFA le ${dateLabelFull(top.date)}${top.note ? ` ("${top.note}")` : ", sans une ligne pour expliquer pourquoi"}. ${grosses.length} dépense${grosses.length > 1 ? "s" : ""} de ce calibre en 6 mois, ${share.toFixed(0)}% de tout ce que tu as dépensé — sur du non essentiel. Chacune a probablement semblé justifiée sur le moment. Sois honnête : combien d'entre elles referais-tu si tu devais les repayer aujourd'hui, cash, en main propre ?`,
+    });
+  }
+  if (moyennes.length >= 5) {
+    const avg = moyennesTotal / moyennes.length;
+    items.push({
+      severity: moyennesTotal > monthlyRev * 0.25 ? "critique" : "attention",
+      title: `${fmt(moyennesTotal)} FCFA de dépenses non-productives "moyennes" — celles que tu ne comptes jamais`,
+      text: `${moyennes.length} dépenses en 6 mois, ${fmt(Math.round(avg))} FCFA en moyenne chacune — jamais assez grosses individuellement pour te faire réagir, jamais assez petites pour être anodines. C'est exactement le piège : aucune ne ressemble à un excès sur le moment, et pourtant leur somme dépasse largement ce que tu estimerais si on te demandait, là, maintenant, sans regarder.`,
+    });
+  }
+  if (petites.length >= 10) {
+    const perMonth = petitesTotal / monthKeys.length;
+    items.push({
+      severity: petitesTotal > monthlyRev * 0.15 ? "critique" : "attention",
+      title: "Tu te mens sur tes \"petites\" dépenses non-productives",
+      text: `${petites.length} petites dépenses non-productives en 6 mois, aucune au-delà de ${fmt(Math.round(petiteSeuil))} FCFA — le genre qu'on paie sans y penser et qu'on oublie dans la minute. Ensemble : ${fmt(petitesTotal)} FCFA, soit ${fmt(Math.round(perMonth))} FCFA par mois. Arrête de te dire "c'est rien" à chaque fois — prises une par une elles ne pèsent rien, additionnées ce sont elles qui sabotent le plus silencieusement ton épargne, précisément parce que tu ne les vois jamais venir.`,
+    });
   }
 
-  // 3bis) Grosses dépenses individuelles — celles qui pèsent lourd à elles seules, pas
-  // par répétition mais par leur montant unitaire. Seuil : 10% du revenu mensuel moyen,
-  // avec un plancher de 50 000 FCFA pour rester pertinent même si le revenu est faible.
-  const bigTxThreshold = Math.max(monthlyRev * 0.10, 50000);
-  const bigTx = personal.filter((t) => t.type === "Dépense" && t.amount >= bigTxThreshold && (categoryGroups[t.category] || "Non classifié") !== "Nécessaire").sort((a, b) => b.amount - a.amount);
-  if (bigTx.length) {
-    const bigTxTotal = bigTx.reduce((a, t) => a + t.amount, 0);
-    const bigTxShare = totalDep > 0 ? (bigTxTotal / totalDep) * 100 : 0;
-    const top = bigTx[0];
-    const topLabel = top.subcategory ? `${top.category} · ${top.subcategory}` : top.category;
-    const severity: "critique" | "attention" = (bigTx.length >= 3 || bigTxShare >= 25) ? "critique" : "attention";
-    items.push({
-      severity,
-      title: `Ta plus grosse dépense individuelle sur 6 mois : ${fmt(top.amount)} FCFA`,
-      text: `"${topLabel}" le ${dateLabelFull(top.date)}${top.note ? ` ("${top.note}")` : " — sans aucune note pour expliquer pourquoi"}. Au total, ${bigTx.length} dépense${bigTx.length > 1 ? "s" : ""} isolée${bigTx.length > 1 ? "s" : ""} au-delà de ${fmt(Math.round(bigTxThreshold))} FCFA représentent ${fmt(bigTxTotal)} FCFA sur la période (${bigTxShare.toFixed(0)}% de tes dépenses totales) — ce sont elles, pas tes petites dépenses du quotidien, qui pèsent le plus lourd sur ton solde.`,
-    });
-    const undocumented = bigTx.filter((t) => !t.note || !t.note.trim()).length;
-    if (bigTx.length >= 3 && undocumented / bigTx.length >= 0.5) {
-      items.push({ severity: "critique", title: "Tu ne documentes même pas tes plus grosses dépenses", text: `${undocumented} de tes ${bigTx.length} grosses dépenses individuelles (≥ ${fmt(Math.round(bigTxThreshold))} FCFA) n'ont aucune note. Sur une petite dépense, passe encore — sur une grosse, l'absence de justification écrite est un signal d'alarme sur le sérieux avec lequel tu les décides.` });
-    }
+  // Habitude nommée — la sous-catégorie/bénéficiaire non-productif qui revient le plus
+  // souvent (fréquence, pas montant) : donne un nom précis à combattre plutôt qu'un
+  // chiffre abstrait
+  const recurringCats = new Set(recurring.map((r) => r.category));
+  const freqMap: Record<string, { count: number; total: number }> = {};
+  nonProdWindow.filter((t) => !recurringCats.has(t.category)).forEach((t) => {
+    const key = t.subcategory ? `${t.category} · ${t.subcategory}` : t.category;
+    if (!freqMap[key]) freqMap[key] = { count: 0, total: 0 };
+    freqMap[key].count += 1; freqMap[key].total += t.amount;
+  });
+  const habit = Object.entries(freqMap).filter(([, v]) => v.count >= 10).sort((a, b) => b[1].total - a[1].total)[0];
+  if (habit) {
+    const [key, v] = habit;
+    const perMonth = v.count / monthKeys.length;
+    items.push({ severity: "critique", title: `"${key}" — ce n'est plus une dépense, c'est une habitude`, text: `${v.count} fois en ${monthKeys.length} mois (~${perMonth.toFixed(1)} fois par mois), ${fmt(v.total)} FCFA au total, et zéro utilité réelle dans ta vie. Sur une année pleine au même rythme, ça ferait ${fmt(Math.round(v.total / monthKeys.length * 12))} FCFA — le prix d'un objectif que tu n'atteindras jamais tant que tu continues à financer celle-ci en premier.` });
   }
 
   // 4) Concentration excessive sur une seule catégorie de dépense
