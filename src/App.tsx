@@ -8278,7 +8278,7 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
           budgets: budgets.map((b) => `${b.category}: limite ${fmt(b.amount)} FCFA/mois`),
           recurring: recurring.map((r) => `${r.type} — ${r.category} — ${fmt(r.amount)} FCFA (${r.frequency}, prochaine échéance ${r.nextDate})`),
         }),
-      }, 55000);
+      }, 65000); // légèrement au-dessus des 60s alloués à la fonction serveur (vercel.json), pour ne jamais abandonner avant elle
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || `Erreur serveur (${res.status})`);
