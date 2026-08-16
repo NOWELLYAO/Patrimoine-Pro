@@ -1,4 +1,7 @@
 {
+  "functions": {
+    "api/chat.ts": { "maxDuration": 60 }
+  },
   "headers": [
     {
       "source": "/sw.js",
