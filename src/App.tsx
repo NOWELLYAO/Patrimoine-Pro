@@ -8250,13 +8250,24 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
 
-  // Plafond de sécurité : borne le coût/la latence par message même sur un très gros
-  // historique. Les transactions les plus RÉCENTES sont prioritaires (les plus
-  // pertinentes pour la majorité des questions).
-  const MAX_TX = 4000;
+  // Fenêtre de contexte envoyée à l'IA — corrigé le 16/08/2026 : envoyer TOUT
+  // l'historique (jusqu'à 4000 transactions) sur chaque message, même pour une
+  // question courte, faisait systématiquement dépasser le délai (le temps de
+  // traitement d'un très gros contexte s'ajoute avant même que l'IA commence à
+  // répondre). Par défaut, seuls les 12 derniers mois sont envoyés — largement
+  // suffisant pour la grande majorité des questions — avec une option pour inclure
+  // tout l'historique quand une question le justifie vraiment (plus lent).
+  const [fullHistory, setFullHistory] = useState(false);
+  const MAX_TX = 2000;
   const sortedForContext = useMemo(() => [...transactions].sort((a, b) => b.date.localeCompare(a.date)), [transactions]);
-  const truncated = sortedForContext.length > MAX_TX;
-  const csv = useMemo(() => transactionsToCompactCSV(sortedForContext.slice(0, MAX_TX)), [sortedForContext]);
+  const windowedForContext = useMemo(() => {
+    if (fullHistory) return sortedForContext;
+    const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 12);
+    const cutoffStr = `${cutoff.getFullYear()}-${pad2(cutoff.getMonth() + 1)}-${pad2(cutoff.getDate())}`;
+    return sortedForContext.filter((t) => t.date >= cutoffStr);
+  }, [sortedForContext, fullHistory]);
+  const truncated = windowedForContext.length > MAX_TX;
+  const csv = useMemo(() => transactionsToCompactCSV(windowedForContext.slice(0, MAX_TX)), [windowedForContext]);
 
   const send = async () => {
     const text = input.trim();
@@ -8273,6 +8284,7 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
         body: JSON.stringify({
           messages: nextMessages,
           context: csv,
+          contextWindow: fullHistory ? "historique complet" : "12 derniers mois glissants uniquement",
           today: todayISO(),
           accounts: accounts.map((a) => `${a.name} : solde actuel ${fmt(accountBalance(a, transactions))} FCFA`),
           budgets: budgets.map((b) => `${b.category}: limite ${fmt(b.amount)} FCFA/mois`),
@@ -8307,9 +8319,13 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
           <AlertTriangle size={13} color={COLOR.claySoft} style={{ flexShrink: 0, marginTop: 1 }} />
           <span>
             Contrairement au reste de l'app, chaque message envoie tes transactions à un service externe (API Anthropic) pour générer la réponse — ces données quittent ton navigateur, et chaque message a un coût réel sur ta clé API.
-            {truncated && ` Limité aux ${MAX_TX} transactions les plus récentes sur ${sortedForContext.length} au total.`}
+            {" "}Par défaut, seuls les 12 derniers mois sont envoyés (plus rapide) — {fullHistory ? `historique complet activé, ${sortedForContext.length} transaction(s)` : `${windowedForContext.length} transaction(s) sur cette fenêtre`}{truncated && `, limité à ${MAX_TX}`}.
           </span>
         </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11.5, color: COLOR.inkMuted, marginTop: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={fullHistory} onChange={(e) => setFullHistory(e.target.checked)} style={{ width: 14, height: 14, accentColor: COLOR.gold }} />
+          Inclure tout l'historique plutôt que les 12 derniers mois (plus lent, utile seulement pour une question qui porte vraiment sur d'anciennes transactions)
+        </label>
       </div>
 
       <div ref={scrollRef} className="gl-scroll" style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "4px 4px 4px 4px" }}>
