@@ -8285,8 +8285,8 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
       }
       const data = await res.json();
       if (!data.reply) {
-        const debugInfo = data.debug ? ` (stop_reason: ${data.debug.stop_reason || "?"}, tokens: ${data.debug.usage?.output_tokens ?? "?"})` : "";
-        throw new Error(`L'assistant a répondu sans texte exploitable${debugInfo}. Réessaie avec une question un peu différente, ou regarde les logs Vercel (Deployments → Functions → /api/chat) pour le détail complet.`);
+        const debugInfo = data.debug ? ` (stop_reason: ${data.debug.stop_reason || "?"}, tokens: ${data.debug.usage?.output_tokens ?? "?"}, blocs reçus: ${(data.debug.content_types || []).join(", ") || "aucun"})` : "";
+        throw new Error(`L'assistant a répondu sans texte exploitable${debugInfo}. Réessaie avec une question un peu plus ciblée, ou regarde les logs Vercel (Deployments → Functions → /api/chat) pour le détail complet.`);
       }
       setMessages((m) => [...m, { role: "assistant", content: data.reply }]);
     } catch (e: any) {
