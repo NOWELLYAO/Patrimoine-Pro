@@ -8228,6 +8228,44 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
 // 100% local. Les transactions sont sérialisées en CSV compact (bien plus économe en
 // tokens qu'un JSON) plutôt qu'envoyées telles quelles.
 // ============================================================
+// Détection de période mentionnée dans une question libre (français) — pour ne
+// transmettre à l'IA que les mois réellement concernés au lieu d'une fenêtre fixe,
+// sur remarque justifiée de l'utilisateur (16/08/2026) : une question sur un seul
+// mois n'a aucune raison de traîner 12 mois de données. Reconnaît les noms de mois
+// (avec ou sans accent/abréviation) et un éventuel "ce mois(-ci)"/"mois dernier".
+// Retourne null si aucune période claire n'est détectée (fenêtre par défaut utilisée).
+const FR_MONTHS: Record<string, number> = {
+  "janvier": 1, "jan": 1, "fevrier": 2, "fev": 2, "mars": 3,
+  "avril": 4, "avr": 4, "mai": 5, "juin": 6, "juillet": 7, "juil": 7,
+  "aout": 8, "septembre": 9, "sept": 9, "octobre": 10, "oct": 10,
+  "novembre": 11, "nov": 11, "decembre": 12, "dec": 12,
+};
+function detectMonthKeysInQuestion(question: string, today: string): string[] | null {
+  const q = question.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const currentKey = dateToMonthKey(today);
+  const found = new Set<string>();
+
+  if (/\bce mois\b|\bmois en cours\b|\bmois-ci\b/.test(q)) found.add(currentKey);
+  if (/\bmois dernier\b|\bmois precedent\b/.test(q)) found.add(prevMonthKey(currentKey));
+
+  // Recherche "nom_du_mois [année]" (accents déjà retirés des deux côtés) — l'année
+  // est optionnelle ; si absente, on prend l'occurrence la plus récente de ce mois
+  // (cette année, sinon l'an dernier).
+  const monthNamesPattern = Object.keys(FR_MONTHS).sort((a, b) => b.length - a.length).join("|");
+  const re = new RegExp(`\\b(${monthNamesPattern})\\b\\s*(\\d{4})?`, "g");
+  let m: RegExpExecArray | null;
+  const [todayY] = today.split("-").map(Number);
+  while ((m = re.exec(q))) {
+    const monthNum = FR_MONTHS[m[1]];
+    if (!monthNum) continue;
+    const year = m[2] ? parseInt(m[2], 10) : (monthNum <= new Date(today).getMonth() + 1 ? todayY : todayY - 1);
+    found.add(`${year}_${monthNum}`);
+  }
+
+  if (!found.size) return null;
+  return Array.from(found);
+}
+
 function transactionsToCompactCSV(transactions: Transaction[]): string {
   const esc = (s: string) => (s || "").replace(/[\n\r;]/g, " ").trim();
   const header = "date;type;categorie;sous_categorie;montant;compte;beneficiaire;note";
@@ -8267,7 +8305,6 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
     return sortedForContext.filter((t) => t.date >= cutoffStr);
   }, [sortedForContext, fullHistory]);
   const truncated = windowedForContext.length > MAX_TX;
-  const csv = useMemo(() => transactionsToCompactCSV(windowedForContext.slice(0, MAX_TX)), [windowedForContext]);
 
   const send = async () => {
     const text = input.trim();
@@ -8277,14 +8314,36 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
     setInput("");
     setLoading(true);
     setError(null);
+
+    // Si la question mentionne un mois précis ("août 2026", "ce mois-ci"...), on
+    // n'envoie QUE ce(s) mois (+ le précédent, pour permettre une comparaison
+    // naturelle) au lieu de la fenêtre par défaut — beaucoup plus rapide pour le cas
+    // le plus courant : une question ciblée sur une période précise.
+    const detectedMonths = fullHistory ? null : detectMonthKeysInQuestion(text, todayISO());
+    let contextTx: Transaction[];
+    let windowLabel: string;
+    if (fullHistory) {
+      contextTx = sortedForContext;
+      windowLabel = "historique complet";
+    } else if (detectedMonths) {
+      const monthSet = new Set(detectedMonths);
+      detectedMonths.forEach((mk) => monthSet.add(prevMonthKey(mk)));
+      contextTx = sortedForContext.filter((t) => monthSet.has(dateToMonthKey(t.date)));
+      windowLabel = `${detectedMonths.map((mk) => monthLabel(mk)).join(", ")} (+ mois précédent pour comparaison) — détecté automatiquement dans la question`;
+    } else {
+      contextTx = windowedForContext;
+      windowLabel = "12 derniers mois glissants (aucune période précise détectée dans la question)";
+    }
+    const sendCsv = transactionsToCompactCSV(contextTx.slice(0, MAX_TX));
+
     try {
       const res = await fetchWithTimeout("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: nextMessages,
-          context: csv,
-          contextWindow: fullHistory ? "historique complet" : "12 derniers mois glissants uniquement",
+          context: sendCsv,
+          contextWindow: windowLabel,
           today: todayISO(),
           accounts: accounts.map((a) => `${a.name} : solde actuel ${fmt(accountBalance(a, transactions))} FCFA`),
           budgets: budgets.map((b) => `${b.category}: limite ${fmt(b.amount)} FCFA/mois`),
@@ -8332,7 +8391,7 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
         {messages.length === 0 && (
           <div style={{ margin: "auto", textAlign: "center", color: COLOR.inkMuted, fontSize: 12.5, maxWidth: 320 }}>
             <MessageCircle size={28} color={COLOR.hairline} style={{ marginBottom: 10 }} />
-            <div>Pose une question sur tes transactions, demande un avis franc sur tes habitudes, ou demande-lui si une dépense que tu envisages est raisonnable — ex. "Critique mes dépenses non-productives de juillet", "Est-ce que je peux me permettre 40 000 FCFA pour X ?", "Quelle est ma plus grosse habitude coûteuse en ce moment ?".</div>
+            <div>Pose une question sur tes transactions, demande un avis franc sur tes habitudes, ou demande-lui si une dépense que tu envisages est raisonnable — ex. "Critique mes dépenses non-productives de juillet", "Est-ce que je peux me permettre 40 000 FCFA pour X ?", "Quelle est ma plus grosse habitude coûteuse en ce moment ?". Mentionne un mois pour des réponses plus rapides et ciblées.</div>
           </div>
         )}
         {messages.map((m, i) => (
