@@ -8284,7 +8284,11 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
         throw new Error(errBody.error || `Erreur serveur (${res.status})`);
       }
       const data = await res.json();
-      setMessages((m) => [...m, { role: "assistant", content: data.reply || "Pas de réponse de l'assistant." }]);
+      if (!data.reply) {
+        const debugInfo = data.debug ? ` (stop_reason: ${data.debug.stop_reason || "?"}, tokens: ${data.debug.usage?.output_tokens ?? "?"})` : "";
+        throw new Error(`L'assistant a répondu sans texte exploitable${debugInfo}. Réessaie avec une question un peu différente, ou regarde les logs Vercel (Deployments → Functions → /api/chat) pour le détail complet.`);
+      }
+      setMessages((m) => [...m, { role: "assistant", content: data.reply }]);
     } catch (e: any) {
       setError(e?.message || "Impossible de contacter l'assistant. Vérifie que la clé API est bien configurée sur Vercel (ANTHROPIC_API_KEY), ou réessaie plus tard.");
     } finally {
