@@ -8,11 +8,12 @@ import {
 import {
   LayoutDashboard, CalendarRange, PiggyBank, Layers, BookOpen, TrendingUp,
   TrendingDown, Filter, X, Plus, Pencil, Trash2, Save, RotateCcw, Search,
-  ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight,
+  ArrowUpDown, Wallet, Target, AlertTriangle, Info, Check, Circle, ChevronRight, ChevronLeft,
   SlidersHorizontal, Workflow, CalendarDays, BarChart3, Briefcase, HandCoins, Clock,
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu, ChevronDown,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail, Rocket, Compass,
   FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon, Activity,
+  MessageCircle, Send,
 } from "lucide-react";
 
 // ============================================================
@@ -47,6 +48,11 @@ const fontImport = `
 }
 .gl-scroll::-webkit-scrollbar { height: 5px; width: 5px; }
 .gl-scroll::-webkit-scrollbar-thumb { background: #2a362e; border-radius: 4px; }
+.gl-journal-row { transition: background 0.1s ease; }
+.gl-journal-row:hover { background: rgba(201,162,39,0.06) !important; }
+.gl-journal-row:hover td { border-color: rgba(201,162,39,0.25) !important; }
+.gl-spin { animation: gl-spin-rotate 0.9s linear infinite; }
+@keyframes gl-spin-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @supports (padding: max(0px)) {
   .gl-safe-bottom { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   .gl-safe-top { padding-top: max(0px, env(safe-area-inset-top)); }
@@ -91,21 +97,69 @@ const SUPABASE_URL = getEnvVar("VITE_SUPABASE_URL");
 const SUPABASE_ANON_KEY = getEnvVar("VITE_SUPABASE_ANON_KEY");
 const SYNC_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 
-async function fetchRemoteState(syncCode: string): Promise<any | null> {
+// Fusionne deux listes (locale + distante) par identifiant unique, au lieu de laisser
+// l'une écraser l'autre — sur demande explicite de l'utilisateur (11/08/2026) : "je veux
+// une solution qui récupère toutes les transactions saisies et corrige sur tous [les
+// appareils]". Ce qui n'existe QUE d'un côté est toujours conservé : rien n'est jamais
+// perdu par simple écrasement.
+// Corrigé le 12/08/2026 : en cas de conflit (même id des deux côtés — typiquement une
+// transaction MODIFIÉE localement, pas ajoutée), la version distante gagnait toujours,
+// sans condition — une modification pas encore poussée au moment du cycle de
+// synchronisation suivant était donc silencieusement écrasée par l'ancienne version.
+// Comparaison par horodatage INDIVIDUEL par élément (updatedAt, posé automatiquement à
+// chaque création/édition — voir setTransactionsTracked) plutôt qu'un seul verdict
+// global pour toute la synchronisation : plus juste si plusieurs éléments ont été
+// modifiés à des moments différents. Sans horodatage d'aucun côté (données historiques
+// jamais rééditées), on garde la version distante par défaut, comme avant.
+function mergeById<T extends { id: string; updatedAt?: string }>(local: T[], remote: T[]): T[] {
+  const byId = new Map<string, T>();
+  local.forEach((item) => byId.set(item.id, item));
+  remote.forEach((item) => {
+    const existing = byId.get(item.id);
+    if (!existing) { byId.set(item.id, item); return; }
+    if (existing.updatedAt || item.updatedAt) {
+      byId.set(item.id, (item.updatedAt || "") > (existing.updatedAt || "") ? item : existing);
+      return;
+    }
+    byId.set(item.id, item);
+  });
+  return Array.from(byId.values());
+}
+
+// Timeout explicite sur les appels réseau vers Supabase — corrigé le 14/08/2026. Sans
+// ça, un fetch() qui reste "en attente" sur une connexion capricieuse (wifi/4G
+// instable, fréquent sur mobile) pouvait ne jamais échouer ni réussir pendant une
+// bonne minute ou deux avant que le système ne l'abandonne de lui-même. Pendant tout ce
+// temps, runSync restait verrouillé "en cours" (syncInFlight), bloquant TOUS les autres
+// déclencheurs derrière lui — y compris le temps réel — ce qui explique un délai de
+// synchronisation observé de 1 à 2 minutes entre deux appareils malgré un canal temps
+// réel actif des deux côtés.
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 20000): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchRemoteState(syncCode: string): Promise<{ data: any; updatedAt: string } | null> {
   if (!SYNC_ENABLED || !syncCode) return null;
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
     });
     if (!res.ok) return null;
     const rows = await res.json();
-    return rows?.[0]?.data || null;
+    if (!rows?.[0]?.data) return null;
+    return { data: rows[0].data, updatedAt: rows[0].updated_at };
   } catch { return null; }
 }
 async function pushRemoteState(syncCode: string, data: any): Promise<boolean> {
   if (!SYNC_ENABLED || !syncCode) return false;
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
       method: "POST",
       headers: {
         apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
@@ -181,6 +235,12 @@ interface Transaction {
   // réels (qui restent basés sur "account", où l'argent a vraiment bougé).
   onBehalfOf?: string;
   settled?: boolean; // avance entre comptes déjà réglée entre les deux comptes concernés
+  // Horodatage de la dernière modification — posé automatiquement (via
+  // setTransactionsTracked, pas au cas par cas) à chaque création ou édition, quel que
+  // soit le point de saisie utilisé. Permet à la fusion de synchronisation de départager
+  // deux versions d'une même transaction déjà connue des deux côtés. Absent sur les
+  // données historiques jamais rééditées depuis l'ajout de ce champ.
+  updatedAt?: string;
 }
 interface Account {
   id: string;
@@ -471,6 +531,13 @@ function dateLabelShort(date: string) {
     return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
   } catch { return date; }
 }
+function weekdayLabel(date: string) {
+  try {
+    const d = new Date(date + "T00:00:00");
+    const s = d.toLocaleDateString("fr-FR", { weekday: "long" });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  } catch { return ""; }
+}
 function addInterval(date: string, freq: "Hebdomadaire" | "Mensuelle" | "Annuelle") {
   const d = new Date(date + "T00:00:00");
   if (freq === "Hebdomadaire") d.setDate(d.getDate() + 7);
@@ -509,6 +576,15 @@ function categoriesForType(transactions: Transaction[], type: TxType): string[] 
   known.forEach((c) => used.add(c));
   return Array.from(used).sort((a, b) => a.localeCompare(b, "fr"));
 }
+// Construit une liste d'options de catégorie regroupée "Dépenses" / "Revenus" (une
+// catégorie qui existe dans les deux — ex: "Ajustement" — apparaît dans les deux
+// groupes) — sur demande explicite de l'utilisateur (10/08/2026) : la liste plate,
+// mélangée et triée alphabétiquement toutes catégories confondues était trop désordonnée.
+function groupedCategoryOptions(transactions: Transaction[]): { value: string; label: string; group: string }[] {
+  const dep = categoriesForType(transactions, "Dépense").map((c) => ({ value: c, label: c, group: "Dépenses" }));
+  const rev = categoriesForType(transactions, "Revenu").map((c) => ({ value: c, label: c, group: "Revenus" }));
+  return [...dep, ...rev];
+}
 function defaultQuickCategory(transactions: Transaction[], type: TxType): string {
   const list = categoriesForType(transactions, type);
   if (type === "Dépense" && list.includes("Aliments")) return "Aliments";
@@ -545,24 +621,59 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
-function usePersistentState<T>(key: string, initial: T): [T, (v: T) => void, boolean] {
+// Corrigé le 11/08/2026 : des transactions récemment saisies disparaissaient parfois,
+// notamment juste après un redéploiement. Deux garde-fous ajoutés :
+// 1. Synchronisation entre onglets/fenêtres : si l'app est ouverte à deux endroits (ex :
+//    icône PWA sur l'écran d'accueil + onglet navigateur), sans ce correctif, un onglet
+//    avec des données périmées pouvait écraser silencieusement les données plus
+//    récentes de l'autre en enregistrant son propre état obsolète après coup. On écoute
+//    maintenant les changements de storage venant d'un autre onglet et on les adopte.
+// 2. Détection de démarrage à vide : si le localStorage est vide au chargement (ex :
+//    nouvel appareil, navigation privée, ou un déploiement qui change d'URL/domaine —
+//    le localStorage est propre à chaque origine), l'app retombe sur les données de
+//    démonstration au lieu des vraies données, ce qui RESSEMBLE à une perte de données
+//    alors que rien n'a été effacé — juste chargé depuis le mauvais endroit. Signalé via
+//    le 4e élément retourné pour que l'app puisse avertir clairement l'utilisateur.
+// Corrigé le 11/08/2026 : le vrai défaut de conception qui causait la perte de données
+// n'était pas juste "le local peut se vider" (ça, on ne peut pas l'empêcher — c'est le
+// navigateur/l'OS qui décide) — c'est que dès que le local était vide, l'app se mettait
+// À SAUVEGARDER SILENCIEUSEMENT les données de secours comme si c'était les vraies,
+// sans jamais demander confirmation. Le paramètre "holdSave" permet de bloquer
+// complètement l'écriture tant qu'un choix explicite n'a pas été fait (voir l'écran de
+// blocage plus bas dans le composant racine).
+function usePersistentState<T>(key: string, initial: T, gateResolved?: boolean): [T, (v: T) => void, boolean, boolean] {
   const [state, setState] = useState<T>(initial);
-  const [loaded, setLoaded] = useState(false);
+  const [readDone, setReadDone] = useState(false);
+  const [startedEmpty, setStartedEmpty] = useState(false);
+  const [foundReal, setFoundReal] = useState(false);
   useEffect(() => {
     try {
       const raw = localStorage.getItem(key);
-      if (raw) setState(JSON.parse(raw));
+      if (raw) { setState(JSON.parse(raw)); setFoundReal(true); }
+      else setStartedEmpty(true);
     } catch {}
-    setLoaded(true);
+    setReadDone(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // On n'écrit dans le localStorage que si on a trouvé de vraies données au départ, OU
+  // si le blocage a été explicitement levé (voir l'écran de choix au niveau racine) —
+  // jamais automatiquement juste parce que la lecture est terminée.
+  const safeToSave = readDone && (foundReal || !!gateResolved);
   useEffect(() => {
-    if (!loaded) return;
+    if (!safeToSave) return;
     try {
       localStorage.setItem(key, JSON.stringify(state));
     } catch {}
-  }, [state, loaded]);
-  return [state, setState, loaded];
+  }, [state, safeToSave]);
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== key || e.newValue === null) return;
+      try { setState(JSON.parse(e.newValue)); } catch {}
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [key]);
+  return [state, setState, readDone, startedEmpty];
 }
 
 // ============================================================
@@ -658,7 +769,7 @@ function PanelWithHelp({ title, subtitle, explain, right, children, style = {}, 
               <ChevronDown size={17} color={COLOR.inkMuted} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
             </div>
           </button>
-          {open && <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 24, flexShrink: 0 }}>{right}{helpButton}</div>}
+          {open && <div style={{ display: "flex", alignItems: "center", gap: 8, paddingRight: 24, flexWrap: "wrap", justifyContent: "flex-end" }}>{right}{helpButton}</div>}
         </div>
         {open && <div style={{ padding: "0 24px 24px 24px" }}>{explainBlock}{children}</div>}
       </div>
@@ -723,8 +834,19 @@ function Kpi({ label, value, suffix = "FCFA", tone = COLOR.ink, icon: Icon, hint
 }
 
 function Select({ value, onChange, options, label }: {
-  value: string; onChange: (v: string) => void; options: { value: string; label: string }[]; label?: string;
+  value: string; onChange: (v: string) => void; options: { value: string; label: string; group?: string }[]; label?: string;
 }) {
+  // Regroupe les options par "group" si fourni (ex: Dépenses / Revenus), en conservant
+  // l'ordre d'apparition des groupes — sur demande explicite de l'utilisateur
+  // (10/08/2026) : la liste de catégories mélangée dépenses/revenus était trop désordonnée.
+  const hasGroups = options.some((o) => o.group);
+  const groups: { name: string | null; items: typeof options }[] = [];
+  options.forEach((o) => {
+    const g = o.group || null;
+    let bucket = groups.find((b) => b.name === g);
+    if (!bucket) { bucket = { name: g, items: [] }; groups.push(bucket); }
+    bucket.items.push(o);
+  });
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
       {label && <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</label>}
@@ -732,7 +854,11 @@ function Select({ value, onChange, options, label }: {
         background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.ink,
         padding: "8px 10px", fontSize: 12.5, fontFamily: "'Inter', sans-serif", minWidth: 130, cursor: "pointer",
       }}>
-        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        {hasGroups
+          ? groups.map((g, i) => g.name
+              ? <optgroup key={g.name} label={g.name}>{g.items.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</optgroup>
+              : g.items.map((o) => <option key={o.value} value={o.value}>{o.label}</option>))
+          : options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
   );
@@ -762,6 +888,52 @@ interface Filters { from: string; to: string; type: string; group: string; categ
 // doit permettre de choisir PLUSIEURS comptes à la fois (ex: "Petty Cash" + "Revenus
 // MAZDA", pour repérer les dépenses d'une catégorie qui n'ont PAS été prélevées sur le
 // compte habituel — sur demande explicite de l'utilisateur, 10/08/2026).
+// Menu déroulant simple-sélection avec en-têtes de groupe colorés (Dépenses en rouille,
+// Revenus en vert) — remplace un <select> natif avec <optgroup>, dont la couleur n'est
+// pas fiable, en particulier sur mobile où l'OS prend le rendu en main et ignore le CSS
+// de l'app. Sur demande explicite de l'utilisateur (10/08/2026).
+function GroupedSingleSelect({ label, value, onChange, allLabel, options }: {
+  label: string; value: string; onChange: (v: string) => void; allLabel: string;
+  options: { value: string; label: string; group: string }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+  const groupColor: Record<string, string> = { "Dépenses": COLOR.claySoft, "Revenus": COLOR.emeraldSoft };
+  const groups: { name: string; items: typeof options }[] = [];
+  options.forEach((o) => {
+    let bucket = groups.find((b) => b.name === o.group);
+    if (!bucket) { bucket = { name: o.group, items: [] }; groups.push(bucket); }
+    bucket.items.push(o);
+  });
+  const current = options.find((o) => o.value === value);
+  return (
+    <div ref={ref} style={{ position: "relative", display: "flex", flexDirection: "column", gap: 5 }}>
+      <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</label>
+      <button onClick={() => setOpen((o) => !o)} style={{ background: COLOR.surfaceInput, border: `1px solid ${value ? COLOR.gold : COLOR.hairline}`, borderRadius: 6, color: current ? (groupColor[current.group] || COLOR.ink) : COLOR.ink, padding: "8px 10px", fontSize: 12.5, cursor: "pointer", minWidth: 130, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{current ? current.label : allLabel}</span> <ChevronDown size={12} color={COLOR.inkMuted} />
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: 8, zIndex: 20, minWidth: 200, maxHeight: 320, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          <button onClick={() => { onChange(""); setOpen(false); }} style={{ display: "block", width: "100%", textAlign: "left", background: !value ? "rgba(201,162,39,0.12)" : "transparent", border: "none", color: COLOR.ink, fontSize: 12.5, cursor: "pointer", padding: "6px 8px", borderRadius: 4, marginBottom: 4 }}>{allLabel}</button>
+          {groups.map((g) => (
+            <div key={g.name}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: groupColor[g.name] || COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", padding: "8px 8px 4px" }}>{g.name}</div>
+              {g.items.map((o) => (
+                <button key={o.value} onClick={() => { onChange(o.value); setOpen(false); }} style={{ display: "block", width: "100%", textAlign: "left", background: value === o.value ? "rgba(201,162,39,0.12)" : "transparent", border: "none", color: groupColor[g.name] || COLOR.ink, fontSize: 12.5, cursor: "pointer", padding: "6px 8px", borderRadius: 4 }}>{o.label}</button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MultiSelectDropdown({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (v: string[]) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -795,8 +967,8 @@ function MultiSelectDropdown({ label, options, selected, onChange }: { label: st
   );
 }
 
-function FilterBar({ filters, setFilters, allMonths, allCategories, allAccounts, onReset }: {
-  filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; allAccounts: string[]; onReset: () => void;
+function FilterBar({ filters, setFilters, allMonths, allCategories, categoryOptions, allAccounts, onReset }: {
+  filters: Filters; setFilters: (f: Filters) => void; allMonths: string[]; allCategories: string[]; categoryOptions: { value: string; label: string; group: string }[]; allAccounts: string[]; onReset: () => void;
 }) {
   // "Du mois" cale automatiquement "Au mois" sur la même valeur (l'utilisateur élargit
   // ensuite lui-même si besoin) — sur demande explicite de l'utilisateur, plutôt que de
@@ -819,7 +991,8 @@ function FilterBar({ filters, setFilters, allMonths, allCategories, allAccounts,
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
-      <Select label="Catégorie" value={filters.category} onChange={(v) => patch({ category: v, subcategory: "Toutes" })} options={[{ value: "Toutes", label: "Toutes" }, ...allCategories.map((c) => ({ value: c, label: c }))]} />
+      <GroupedSingleSelect label="Catégorie" allLabel="Toutes" value={filters.category === "Toutes" ? "" : filters.category}
+        onChange={(v) => patch({ category: v || "Toutes", subcategory: "Toutes" })} options={categoryOptions} />
       {filters.category !== "Toutes" && (
         <Select label="Sous-catégorie" value={filters.subcategory} onChange={(v) => patch({ subcategory: v })}
           options={[{ value: "Toutes", label: "Toutes" }, ...Array.from(new Set([...depSubcategories[filters.category] || [], ...revSubcategories[filters.category] || []])).map((s) => ({ value: s, label: s }))]} />
@@ -1479,6 +1652,11 @@ function nextMonthKey(mk: string): string {
   const [y, m] = mk.split("_").map(Number);
   return m === 12 ? `${y + 1}_1` : `${y}_${m + 1}`;
 }
+function addDays(dateISO: string, n: number): string {
+  const d = new Date(dateISO + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
 function daysInMonthOf(mk: string): number {
   const [y, m] = mk.split("_").map(Number);
   return new Date(y, m, 0).getDate();
@@ -1941,6 +2119,344 @@ function computeAsianIndicators(transactions: Transaction[], chargeOverrides: Re
   const protectionDetail = sumForDetail(CN_4321_CATEGORIES.protection);
 
   return { rule4321, tauxEpargne, kakeibo, avgRevenu, hasDeficit, windowMonths, totalDepensesMonthly, investMonthly, protectionMonthly, vieCouranteMonthly, liquideMonthly, investDetail, protectionDetail, lookback };
+}
+
+// ============================================================
+// CONSEILS CRITIQUES DU JOUR — "Puis-je dépenser ça ?" — sur demande explicite de
+// l'utilisateur (14/08/2026) : avant une dépense, poser quelques questions à cocher +
+// le montant, et répondre franchement "oui / attends / non", avec une date précise
+// quand il faut patienter. Deux couches, comme un conseiller le ferait :
+//  1) Une contrainte DURE, calculée sur les vraies données (pas déclarative) : l'argent
+//     réellement disponible avant le prochain revenu récurrent connu — solde des
+//     comptes moins les charges fixes à venir avant cette date. Si le montant demandé
+//     dépasse ça, la réponse est "attends" quels que soient les cases cochées : on ne
+//     peut pas dépenser de l'argent qu'on n'a pas, peu importe les bonnes intentions.
+//  2) Un score de jugement basé sur les cases cochées (besoin réel, prévu à l'avance,
+//     dettes en cours, dépassement de budget déjà en cours sur cette catégorie...),
+//     qui affine la réponse quand la contrainte dure est respectée.
+// ============================================================
+interface SpendingCheckAnswers {
+  nature: "essentiel" | "envie_reflechie" | "envie_impulsive";
+  anticipation: "prevue" | "decidee_aujourdhui" | "derniere_minute";
+  dette: "aucune" | "en_cours" | "en_retard";
+  ressenti: "serein" | "coupable" | "sait_que_non";
+  ponctuelle: boolean;
+  budgetTendu: boolean;
+}
+interface SpendingCheckResult {
+  verdict: "oui" | "attends" | "non";
+  headline: string;
+  reasons: string[];
+  waitUntil?: string; // date ISO suggérée si "attends"
+  soldeDisponible: number;
+  argentReelDisponible: number;
+}
+
+function evaluateSpendingCheck(
+  amount: number, category: string | null, accountName: string | null,
+  answers: SpendingCheckAnswers, transactions: Transaction[], accounts: Account[],
+  recurring: RecurringTemplate[], budgets: CategoryBudget[]
+): SpendingCheckResult {
+  const today = todayISO();
+  const relevantAccounts = accountName ? accounts.filter((a) => a.name === accountName) : accounts;
+  const soldeDisponible = relevantAccounts.reduce((a, acc) => a + accountBalance(acc, transactions), 0);
+
+  // Prochain revenu récurrent connu (le plus proche dans le futur)
+  const upcomingIncomes = recurring.filter((r) => r.type === "Revenu" && r.nextDate >= today).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
+  const nextIncome = upcomingIncomes[0] || null;
+
+  // Charges fixes récurrentes attendues avant ce revenu (ou dans les 30 jours si aucun
+  // revenu récurrent n'est déclaré — fenêtre de précaution par défaut)
+  const horizonDate = nextIncome ? nextIncome.nextDate : (() => { const d = new Date(today); d.setDate(d.getDate() + 30); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  const upcomingFixedCharges = recurring
+    .filter((r) => r.type === "Dépense" && r.nextDate >= today && r.nextDate <= horizonDate)
+    .reduce((a, r) => a + r.amount, 0);
+
+  const argentReelDisponible = soldeDisponible - upcomingFixedCharges;
+
+  // Statut du budget de la catégorie ce mois-ci, si elle est budgétée
+  const currentMonth = dateToMonthKey(today);
+  const budget = category ? budgets.find((b) => b.category === category) : undefined;
+  let budgetInfo: { spent: number; limit: number } | null = null;
+  if (budget) {
+    const spent = transactions.filter((t) => t.type === "Dépense" && t.category === category && dateToMonthKey(t.date) === currentMonth).reduce((a, t) => a + t.amount, 0);
+    budgetInfo = { spent, limit: budget.amount };
+  }
+
+  const reasons: string[] = [];
+
+  // Contrainte dure : l'argent n'existe tout simplement pas
+  if (amount > soldeDisponible) {
+    reasons.push(`Ton solde disponible (${fmt(soldeDisponible)} FCFA${accountName ? ` sur ${accountName}` : ""}) est inférieur au montant demandé (${fmt(amount)} FCFA) — ce n'est pas une question de discipline, l'argent n'y est simplement pas.`);
+    return { verdict: "non", headline: "Non — le solde ne couvre pas la dépense", reasons, soldeDisponible, argentReelDisponible };
+  }
+  if (amount > argentReelDisponible) {
+    const waitLabel = nextIncome ? `ton prochain revenu prévu (${monthLabel(dateToMonthKey(nextIncome.nextDate))}, le ${dateLabelFull(nextIncome.nextDate)})` : "d'ici environ 30 jours, une fois tes charges fixes passées";
+    reasons.push(`Ton solde couvre le montant sur le papier (${fmt(soldeDisponible)} FCFA), mais ${fmt(upcomingFixedCharges)} FCFA de charges fixes récurrentes sont encore à venir avant ${nextIncome ? "ton prochain revenu" : "un mois"} — il ne reste réellement que ${fmt(argentReelDisponible)} FCFA de marge, insuffisant pour ${fmt(amount)} FCFA.`);
+    reasons.push(`Attends ${waitLabel} pour refaire le point.`);
+    return { verdict: "attends", headline: "Attends — l'argent est déjà engagé ailleurs", reasons, waitUntil: nextIncome?.nextDate, soldeDisponible, argentReelDisponible };
+  }
+
+  // Contrainte dure respectée — on affine avec le jugement, sur des critères graduels
+  // (pas de simples oui/non) pour un diagnostic plus honnête qu'une case à cocher.
+  let score = 0;
+
+  if (answers.nature === "essentiel") { score += 3; }
+  else if (answers.nature === "envie_reflechie") { score += 0; reasons.push("C'est une envie, pas un besoin — assumée et réfléchie, ce qui est déjà mieux que la moyenne, mais ça reste une envie."); }
+  else { score -= 3; reasons.push("Tu as toi-même qualifié ça d'envie impulsive — c'est précisément le genre de décision qu'on regrette une fois le compte en banque consulté le lendemain."); }
+
+  if (answers.anticipation === "prevue") { score += 2; }
+  else if (answers.anticipation === "decidee_aujourdhui") { score -= 1; reasons.push("Décidée aujourd'hui seulement — pas forcément grave une fois de temps en temps, mais si ce schéma se répète, c'est le signe d'un budget qui se pilote au jour le jour plutôt qu'à l'avance."); }
+  else { score -= 3; reasons.push("Décidée dans la dernière heure — une dépense prise dans l'instant, sans recul, est statistiquement celle qu'on regrette le plus souvent."); }
+
+  if (answers.dette === "aucune") { score += 1; }
+  else if (answers.dette === "en_cours") { score -= 2; reasons.push("Tu as des dettes en cours — même à jour, chaque FCFA dépensé ailleurs est un FCFA de moins pour t'en libérer plus vite."); }
+  else { score -= 4; reasons.push("Tu as des dettes ou impayés EN RETARD — c'est la priorité absolue avant toute dépense non essentielle, sans exception."); }
+
+  if (answers.ressenti === "serein") { score += 1; }
+  else if (answers.ressenti === "coupable") { score -= 2; reasons.push("Tu as coché \"un peu coupable\" — ce ressenti n'est pas anodin : ton instinct financier te met déjà en garde avant même le calcul."); }
+  else { score -= 4; reasons.push("Tu sais toi-même que tu ne devrais pas la faire — la question n'est plus financière à ce stade, elle est déjà tranchée. Écoute-toi."); }
+
+  if (answers.ponctuelle) score += 1; else { score -= 1; reasons.push("Elle risque de se reproduire — une dépense ponctuelle et une habitude n'ont pas le même impact sur 6 mois."); }
+
+  if (answers.budgetTendu) { score -= 3; reasons.push(`Tu as toi-même signalé que ce poste est déjà tendu ce mois-ci${budgetInfo ? ` (${fmt(budgetInfo.spent)} FCFA dépensés pour une limite de ${fmt(budgetInfo.limit)} FCFA)` : ""} — l'ajouter maintenant, c'est creuser un trou déjà réel.`); }
+  else if (budgetInfo && budgetInfo.spent + amount > budgetInfo.limit) {
+    score -= 2; reasons.push(`Cette dépense ferait dépasser le budget "${category}" : ${fmt(budgetInfo.spent + amount)} FCFA contre une limite de ${fmt(budgetInfo.limit)} FCFA ce mois-ci.`);
+  }
+
+  if (score <= -5) {
+    reasons.unshift(`Tu as les fonds sur le papier (${fmt(argentReelDisponible)} FCFA de marge réelle), mais les réponses ci-dessus s'accumulent contre cette dépense — ce n'est pas une question de moyens, c'est une question de moment.`);
+    return { verdict: "non", headline: "Non — pas dans ces conditions", reasons, soldeDisponible, argentReelDisponible };
+  }
+  if (score < 0) {
+    reasons.unshift(`Marge réelle disponible : ${fmt(argentReelDisponible)} FCFA. Faisable financièrement, mais les réponses penchent du mauvais côté.`);
+    return { verdict: "attends", headline: "Attends un autre jour — l'argent est là, pas les bonnes conditions", reasons, soldeDisponible, argentReelDisponible };
+  }
+  reasons.unshift(`Marge réelle disponible après charges fixes à venir : ${fmt(argentReelDisponible)} FCFA — largement suffisant, et les réponses vont dans le bon sens.`);
+  return { verdict: "oui", headline: "Oui, tu peux le faire", reasons, soldeDisponible, argentReelDisponible };
+}
+
+// ============================================================
+// CONSEILS CRITIQUES — lecture des 6 derniers mois de transactions (catégorie,
+// sous-catégorie, bénéficiaire, ET notes/descriptions) pour produire des constats
+// précis, chiffrés et volontairement sans complaisance — demande explicite de
+// l'utilisateur (14/08/2026) : "des conseils sérieux, précis et très critiques".
+// 100% déterministe (pas d'appel à un modèle de langage depuis l'app déployée) :
+// chaque règle ci-dessous encode un réflexe concret de conseiller financier —
+// repérer les petites fuites répétées, la concentration excessive, l'argent non
+// classifié, la dérive dans le temps — puis chiffre son impact plutôt que de rester
+// vague. `scope` (Personnel/Business) est respecté : les dépenses professionnelles ne
+// sont jamais présentées comme du gaspillage de train de vie personnel.
+// ============================================================
+interface CriticalAdvice { severity: "critique" | "attention" | "positif"; title: string; text: string; }
+
+const STOPWORDS_FR = new Set(["le","la","les","de","des","du","un","une","et","à","au","aux","pour","avec","sur","dans","ce","cette","ces","mon","ma","mes","son","sa","ses","en","par","chez","vers","the","of","for"]);
+
+function buildCriticalAdvice(transactions: Transaction[], categoryGroups: Record<string, Group>, categoryScope: Record<string, Scope>, recurring: RecurringTemplate[]): { opening: string; items: CriticalAdvice[] } {
+  const today = todayISO();
+  const cutoff = new Date(today); cutoff.setMonth(cutoff.getMonth() - 6);
+  const cutoffStr = `${cutoff.getFullYear()}-${pad2(cutoff.getMonth() + 1)}-${pad2(cutoff.getDate())}`;
+  const window = transactions.filter((t) => t.date >= cutoffStr && t.date <= today);
+  const isPersonal = (t: Transaction) => (categoryScope[t.category] || "Personnel") === "Personnel";
+  const personal = window.filter(isPersonal);
+  const monthKeys = Array.from(new Set(window.map((t) => dateToMonthKey(t.date)))).sort();
+
+  if (window.length < 10 || monthKeys.length < 2) {
+    return { opening: "Pas assez d'historique sur les 6 derniers mois pour un diagnostic sérieux — reviens ici une fois que tu auras saisi davantage de transactions.", items: [] };
+  }
+
+  const items: CriticalAdvice[] = [];
+  const totalRev = window.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+  const totalDep = window.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+  const monthlyRev = totalRev / monthKeys.length;
+  const monthlyDep = totalDep / monthKeys.length;
+  const savingsRate = totalRev > 0 ? ((totalRev - totalDep) / totalRev) * 100 : -100;
+
+  // 1) Taux d'épargne réel sur 6 mois
+  if (savingsRate < 0) {
+    items.push({ severity: "critique", title: "Tu vis au-dessus de tes moyens", text: `Sur les 6 derniers mois, tes dépenses (${fmt(totalDep)} FCFA) dépassent tes revenus (${fmt(totalRev)} FCFA) de ${fmt(totalDep - totalRev)} FCFA au total — soit ${fmt(Math.round((totalDep - totalRev) / monthKeys.length))} FCFA de déficit par mois en moyenne. Ce n'est pas un mois difficile isolé, c'est une tendance sur un semestre entier.` });
+  } else if (savingsRate < 10) {
+    items.push({ severity: "attention", title: "Marge d'épargne trop faible pour absorber un imprévu", text: `Tu épargnes ${savingsRate.toFixed(1)}% de tes revenus sur 6 mois (${fmt(totalRev - totalDep)} FCFA au total) — en dessous du seuil de 10% généralement considéré comme le minimum vital. Une seule dépense imprévue de plus qu'un mois normal, et tu repasses dans le rouge.` });
+  } else {
+    items.push({ severity: "positif", title: "Taux d'épargne sain sur 6 mois", text: `${savingsRate.toFixed(1)}% de tes revenus mis de côté sur la période (${fmt(totalRev - totalDep)} FCFA) — au-dessus du seuil de 10%. Ne relâche pas l'effort pour autant.` });
+  }
+
+  // 2) Dérive du Non-productif dans le temps (premier vs dernier mois complet de la fenêtre)
+  const nonProdByMonth = monthKeys.map((mk) => {
+    const dep = window.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === mk);
+    const total = dep.reduce((a, t) => a + t.amount, 0) || 1;
+    const nonProd = dep.filter((t) => (t.type === "Revenu" ? "Revenu" : categoryGroups[t.category] || "Non classifié") === "Non-productif").reduce((a, t) => a + t.amount, 0);
+    return { mk, share: (nonProd / total) * 100 };
+  });
+  if (nonProdByMonth.length >= 3) {
+    const first = nonProdByMonth[0].share, last = nonProdByMonth[nonProdByMonth.length - 1].share;
+    if (last - first >= 12) {
+      items.push({ severity: "critique", title: "Le \"Non-productif\" grignote une part croissante de ton budget", text: `Il représentait ${first.toFixed(0)}% de tes dépenses en ${monthLabel(nonProdByMonth[0].mk)}, contre ${last.toFixed(0)}% en ${monthLabel(nonProdByMonth[nonProdByMonth.length - 1].mk)} — une dérive de +${(last - first).toFixed(0)} points en ${monthKeys.length} mois. Ce n'est pas une variation ponctuelle, c'est une trajectoire.` });
+    }
+  }
+
+  // 3) Trois paliers de dépenses "non utiles" (= groupe Non-productif de l'app) —
+  // grosses, moyennes, petites — chacune avec son propre mécanisme de déni à
+  // déconstruire, sur demande explicite de l'utilisateur (14/08/2026) : "des paroles
+  // humaines dures pour me faire changer de comportement". Le seuil de chaque palier
+  // est relatif au revenu mensuel moyen (avec un plancher FCFA), pour rester pertinent
+  // quel que soit le niveau de revenu.
+  const nonProdWindow = personal.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Non-productif");
+  const grosseSeuil = Math.max(monthlyRev * 0.08, 40000);
+  const petiteSeuil = Math.max(monthlyRev * 0.015, 5000);
+  const grosses = nonProdWindow.filter((t) => t.amount >= grosseSeuil).sort((a, b) => b.amount - a.amount);
+  const moyennes = nonProdWindow.filter((t) => t.amount >= petiteSeuil && t.amount < grosseSeuil);
+  const petites = nonProdWindow.filter((t) => t.amount < petiteSeuil);
+  const sumAmt = (arr: Transaction[]) => arr.reduce((a, t) => a + t.amount, 0);
+  const grossesTotal = sumAmt(grosses), moyennesTotal = sumAmt(moyennes), petitesTotal = sumAmt(petites);
+
+  if (grosses.length) {
+    const top = grosses[0];
+    const topLabel = top.subcategory ? `${top.category} · ${top.subcategory}` : top.category;
+    const share = totalDep > 0 ? (grossesTotal / totalDep) * 100 : 0;
+    items.push({
+      severity: "critique",
+      title: `${fmt(grossesTotal)} FCFA de GROSSES dépenses non-productives en 6 mois`,
+      text: `La plus lourde : "${topLabel}", ${fmt(top.amount)} FCFA le ${dateLabelFull(top.date)}${top.note ? ` ("${top.note}")` : ", sans une ligne pour expliquer pourquoi"}. ${grosses.length} dépense${grosses.length > 1 ? "s" : ""} de ce calibre en 6 mois, ${share.toFixed(0)}% de tout ce que tu as dépensé — sur du non essentiel. Chacune a probablement semblé justifiée sur le moment. Sois honnête : combien d'entre elles referais-tu si tu devais les repayer aujourd'hui, cash, en main propre ?`,
+    });
+  }
+  if (moyennes.length >= 5) {
+    const avg = moyennesTotal / moyennes.length;
+    items.push({
+      severity: moyennesTotal > monthlyRev * 0.25 ? "critique" : "attention",
+      title: `${fmt(moyennesTotal)} FCFA de dépenses non-productives "moyennes" — celles que tu ne comptes jamais`,
+      text: `${moyennes.length} dépenses en 6 mois, ${fmt(Math.round(avg))} FCFA en moyenne chacune — jamais assez grosses individuellement pour te faire réagir, jamais assez petites pour être anodines. C'est exactement le piège : aucune ne ressemble à un excès sur le moment, et pourtant leur somme dépasse largement ce que tu estimerais si on te demandait, là, maintenant, sans regarder.`,
+    });
+  }
+  if (petites.length >= 10) {
+    const perMonth = petitesTotal / monthKeys.length;
+    items.push({
+      severity: petitesTotal > monthlyRev * 0.15 ? "critique" : "attention",
+      title: "Tu te mens sur tes \"petites\" dépenses non-productives",
+      text: `${petites.length} petites dépenses non-productives en 6 mois, aucune au-delà de ${fmt(Math.round(petiteSeuil))} FCFA — le genre qu'on paie sans y penser et qu'on oublie dans la minute. Ensemble : ${fmt(petitesTotal)} FCFA, soit ${fmt(Math.round(perMonth))} FCFA par mois. Arrête de te dire "c'est rien" à chaque fois — prises une par une elles ne pèsent rien, additionnées ce sont elles qui sabotent le plus silencieusement ton épargne, précisément parce que tu ne les vois jamais venir.`,
+    });
+  }
+
+  // Habitude nommée — la sous-catégorie/bénéficiaire non-productif qui revient le plus
+  // souvent (fréquence, pas montant) : donne un nom précis à combattre plutôt qu'un
+  // chiffre abstrait
+  const recurringCats = new Set(recurring.map((r) => r.category));
+  const freqMap: Record<string, { count: number; total: number }> = {};
+  nonProdWindow.filter((t) => !recurringCats.has(t.category)).forEach((t) => {
+    const key = t.subcategory ? `${t.category} · ${t.subcategory}` : t.category;
+    if (!freqMap[key]) freqMap[key] = { count: 0, total: 0 };
+    freqMap[key].count += 1; freqMap[key].total += t.amount;
+  });
+  const habit = Object.entries(freqMap).filter(([, v]) => v.count >= 10).sort((a, b) => b[1].total - a[1].total)[0];
+  if (habit) {
+    const [key, v] = habit;
+    const perMonth = v.count / monthKeys.length;
+    items.push({ severity: "critique", title: `"${key}" — ce n'est plus une dépense, c'est une habitude`, text: `${v.count} fois en ${monthKeys.length} mois (~${perMonth.toFixed(1)} fois par mois), ${fmt(v.total)} FCFA au total, et zéro utilité réelle dans ta vie. Sur une année pleine au même rythme, ça ferait ${fmt(Math.round(v.total / monthKeys.length * 12))} FCFA — le prix d'un objectif que tu n'atteindras jamais tant que tu continues à financer celle-ci en premier.` });
+  }
+
+  // "Nécessaire" ne veut pas dire optimisé — le Non-productif n'a pas le monopole de la
+  // critique : une grosse dépense étiquetée "Nécessaire" mérite aussi qu'on se demande
+  // si elle a été achetée intelligemment ou juste payée sans réfléchir, parce que
+  // "de toute façon c'est nécessaire" est la meilleure excuse pour ne rien comparer.
+  const necessaireWindow = personal.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Nécessaire");
+  const necGrosses = necessaireWindow.filter((t) => t.amount >= grosseSeuil).sort((a, b) => b.amount - a.amount);
+  if (necGrosses.length) {
+    const top = necGrosses[0];
+    const topLabel = top.subcategory ? `${top.category} · ${top.subcategory}` : top.category;
+    const necTotal = sumAmt(necGrosses);
+    items.push({
+      severity: "attention",
+      title: `${fmt(necTotal)} FCFA de grosses dépenses "Nécessaire" — utile ne veut pas dire optimisé`,
+      text: `La plus lourde : "${topLabel}", ${fmt(top.amount)} FCFA le ${dateLabelFull(top.date)}. Nécessaire ne veut pas dire qu'il fallait payer ce prix précis. As-tu vraiment comparé, négocié, cherché une alternative — ou pris l'option la plus simple parce que "de toute façon il fallait le faire" ? C'est justement la catégorie où on arrête le plus souvent de réfléchir, en se cachant derrière le mot "nécessaire".`,
+    });
+  }
+
+  // "Productif" n'est pas un totem d'immunité — une dépense isolée, jamais répétée,
+  // rangée dans "Productif" mérite d'être questionnée : un vrai investissement se suit
+  // et se répète dans le temps, il ne se contente pas d'une étiquette rassurante.
+  const productifByCat: Record<string, { count: number; total: number }> = {};
+  personal.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Productif").forEach((t) => {
+    if (!productifByCat[t.category]) productifByCat[t.category] = { count: 0, total: 0 };
+    productifByCat[t.category].count += 1; productifByCat[t.category].total += t.amount;
+  });
+  const suspectProductif = Object.entries(productifByCat).filter(([, v]) => v.count <= 1 && v.total >= grosseSeuil).sort((a, b) => b[1].total - a[1].total)[0];
+  if (suspectProductif) {
+    const [cat, v] = suspectProductif;
+    items.push({
+      severity: "attention",
+      title: `"${cat}" classée "Productif" — vraiment un investissement, ou une dépense qui se donne bonne conscience ?`,
+      text: `${fmt(v.total)} FCFA en une seule fois sur 6 mois, aucune récurrence avant ni après. Un vrai investissement se suit, se répète, produit un retour mesurable dans le temps. Une dépense isolée rangée dans "Productif" ressemble surtout à un achat comme un autre, habillé pour peser moins lourd sur la conscience — vérifie honnêtement laquelle des deux c'était.`,
+    });
+  }
+
+  // 4) Concentration excessive sur une seule catégorie de dépense
+  const byCategory: Record<string, { total: number; group: Group }> = {};
+  window.filter((t) => t.type === "Dépense").forEach((t) => {
+    if (!byCategory[t.category]) byCategory[t.category] = { total: 0, group: categoryGroups[t.category] || "Non classifié" };
+    byCategory[t.category].total += t.amount;
+  });
+  const topCat = Object.entries(byCategory).sort((a, b) => b[1].total - a[1].total)[0];
+  if (topCat && totalDep > 0) {
+    const share = (topCat[1].total / totalDep) * 100;
+    if (share >= 50 && topCat[1].group !== "Nécessaire") {
+      items.push({ severity: "critique", title: `"${topCat[0]}" avale plus de la moitié de tes dépenses`, text: `${fmt(topCat[1].total)} FCFA sur 6 mois (${share.toFixed(0)}% du total) dans une seule catégorie (${topCat[1].group}) — ce n'est plus de la concentration, c'est une dépendance budgétaire à un seul poste. Le jour où cette dépense change (hausse de prix, imprévu), tout ton équilibre financier vacille avec elle.` });
+    } else if (share >= 35 && topCat[1].group !== "Nécessaire") {
+      items.push({ severity: "attention", title: `"${topCat[0]}" concentre à elle seule ${share.toFixed(0)}% de tes dépenses`, text: `${fmt(topCat[1].total)} FCFA sur 6 mois dans une seule catégorie (${topCat[1].group}) — au-delà de 30-35% dans une seule ligne, un budget devient fragile : le moindre dérapage sur ce poste précis fait dérailler tout le mois.` });
+    }
+  }
+
+  // 5) Argent dont la destination réelle est inconnue (Non classifié + sans compte)
+  const nonClasse = window.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Non classifié").reduce((a, t) => a + t.amount, 0);
+  const sansCompte = window.filter((t) => t.type === "Dépense" && !t.account).reduce((a, t) => a + t.amount, 0);
+  if (nonClasse + sansCompte > monthlyDep * 0.05) {
+    items.push({ severity: "attention", title: "Une partie de ton argent est un angle mort", text: `${fmt(nonClasse)} FCFA en catégories "Non classifié" et ${fmt(sansCompte)} FCFA sans compte associé sur 6 mois. Tant que ce n'est pas classé, aucun ratio de cette page (ni aucun conseil ci-dessus) ne peut vraiment être fiable pour cette part-là — c'est une dette de rigueur avant d'être une dette financière.` });
+  }
+
+  // 6) Effet week-end sur le Non-productif
+  const nonProdTx = window.filter((t) => t.type === "Dépense" && (categoryGroups[t.category] || "Non classifié") === "Non-productif");
+  const nonProdTotal = nonProdTx.reduce((a, t) => a + t.amount, 0);
+  const weekendTotal = nonProdTx.filter((t) => { const d = new Date(t.date + "T00:00:00").getDay(); return d === 0 || d === 5 || d === 6; }).reduce((a, t) => a + t.amount, 0);
+  if (nonProdTotal > 0) {
+    const weekendShare = (weekendTotal / nonProdTotal) * 100;
+    if (weekendShare >= 55) {
+      items.push({ severity: "attention", title: "Le week-end fait le plus gros des dégâts sur le \"Non-productif\"", text: `${weekendShare.toFixed(0)}% de tes dépenses non-productives (${fmt(weekendTotal)} FCFA sur ${fmt(nonProdTotal)} FCFA) tombent vendredi-samedi-dimanche. Si tu veux réduire ce poste, c'est là qu'il faut agir en priorité — pas sur les dépenses de semaine, marginales en comparaison.` });
+    }
+  }
+
+  // 7) Fouille des notes/descriptions — mot le plus fréquent qui n'apparaît dans aucune
+  // catégorie/sous-catégorie/bénéficiaire déjà connue (potentiel signal manqué)
+  const wordCounts: Record<string, { count: number; total: number }> = {};
+  personal.filter((t) => t.type === "Dépense" && t.note && t.note.trim()).forEach((t) => {
+    const words = t.note!.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !STOPWORDS_FR.has(w));
+    const seen = new Set(words);
+    seen.forEach((w) => {
+      if (t.category.toLowerCase().includes(w) || (t.subcategory || "").toLowerCase().includes(w) || (t.payee || "").toLowerCase().includes(w)) return; // déjà capté ailleurs
+      if (!wordCounts[w]) wordCounts[w] = { count: 0, total: 0 };
+      wordCounts[w].count += 1; wordCounts[w].total += t.amount;
+    });
+  });
+  const topWord = Object.entries(wordCounts).filter(([, v]) => v.count >= 8).sort((a, b) => b[1].total - a[1].total)[0];
+  if (topWord) {
+    const [word, v] = topWord;
+    items.push({ severity: "attention", title: `Le mot "${word}" revient sans arrêt dans tes notes`, text: `${v.count} fois sur 6 mois pour un total de ${fmt(v.total)} FCFA, sans que ça corresponde à une catégorie ou un bénéficiaire dédié — c'est le genre de motif que les catégories seules ne montrent pas. Vaut le coup d'aller relire ces transactions une par une pour voir si un vrai poste de dépense se cache derrière.` });
+  }
+
+  // 8) Doublons probables — même date, même montant, même catégorie (erreur de saisie possible)
+  const dupKey = (t: Transaction) => `${t.date}|${t.amount}|${t.category}|${t.type}`;
+  const dupCounts: Record<string, number> = {};
+  window.forEach((t) => { dupCounts[dupKey(t)] = (dupCounts[dupKey(t)] || 0) + 1; });
+  const dupCount = Object.values(dupCounts).filter((c) => c >= 2).length;
+  if (dupCount >= 3) {
+    items.push({ severity: "attention", title: "Doublons de saisie probables", text: `${dupCount} groupes de transactions identiques (même date, même montant, même catégorie) détectés sur 6 mois — certaines sont peut-être légitimes (deux achats similaires le même jour), mais ça vaut une relecture rapide dans le Journal : une saisie en double fausse tous tes totaux sans que tu t'en rendes compte.` });
+  }
+
+  const critiqueCount = items.filter((i) => i.severity === "critique").length;
+  const opening = critiqueCount === 0
+    ? "Rien d'alarmant sur les 6 derniers mois — les points ci-dessous sont surtout des marges de progression, pas des urgences."
+    : `${critiqueCount} point${critiqueCount > 1 ? "s" : ""} sérieux sur les 6 derniers mois — pas de complaisance, voici ce qui mérite vraiment ton attention.`;
+
+  items.sort((a, b) => { const order = { critique: 0, attention: 1, positif: 2 }; return order[a.severity] - order[b.severity]; });
+  return { opening, items };
 }
 
 // ============================================================
@@ -2708,9 +3224,10 @@ function HealthScoreNarrativeSheet({ open, onClose, tauxEpargne, pctNonProd, cv,
   );
 }
 
-function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides, includeGrundfosVoiture, monthlyObjective }: {
-  filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[];
+function ApercuTab({ filtered, filters, accounts, transactions, categoryGroups, chargeOverrides, includeGrundfosVoiture, monthlyObjective, recurring, budgets }: {
+  filtered: any[]; filters: Filters; accounts: Account[]; transactions: Transaction[]; categoryGroups: Record<string, Group>;
   chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean; monthlyObjective: number;
+  recurring: RecurringTemplate[]; budgets: CategoryBudget[];
 }) {
   const totalRevenus = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const totalDepenses = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
@@ -2752,8 +3269,120 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
 
   const delta = (a?: number, b?: number) => (a !== undefined && b !== undefined && b !== 0 ? ((a - b) / b) * 100 : null);
 
+  // Rapport mois — synthèse complète du mois choisi (revenus, dépenses, nature, écarts vs
+  // le mois précédent), indépendante des filtres globaux, sur demande explicite de
+  // l'utilisateur (12/08/2026). Navigable (mois précédent/suivant), jamais au-delà du mois en cours.
+  const [monthlyReportOpen, setMonthlyReportOpen] = useState(false);
+  const [reportAnchor, setReportAnchor] = useState(() => dateToMonthKey(todayISO()));
+
+  // "Puis-je dépenser ça ?" — sur demande explicite de l'utilisateur (14/08/2026).
+  const [spendCheckOpen, setSpendCheckOpen] = useState(false);
+  const [spendAmount, setSpendAmount] = useState<number>(0);
+  const [spendCategory, setSpendCategory] = useState<string>("");
+  const [spendAccount, setSpendAccount] = useState<string>("");
+  const [spendAnswers, setSpendAnswers] = useState<SpendingCheckAnswers>({ nature: "essentiel", anticipation: "prevue", dette: "aucune", ressenti: "serein", ponctuelle: true, budgetTendu: false });
+  const [spendResult, setSpendResult] = useState<SpendingCheckResult | null>(null);
+  const [spendCatPickerOpen, setSpendCatPickerOpen] = useState(false);
+  const [spendSubcategory, setSpendSubcategory] = useState("");
+
+  const buildMonthlyReport = (anchorMonthKey: string) => {
+    const prevKey = prevMonthKey(anchorMonthKey);
+    const isCurrentPeriod = anchorMonthKey === dateToMonthKey(todayISO());
+    const curColLabel = isCurrentPeriod ? "Ce mois" : monthLabel(anchorMonthKey);
+    const withGroupFull = transactions.map((t) => ({ ...t, month: dateToMonthKey(t.date), group: t.type === "Revenu" ? "Revenu" : groupFor(t, categoryGroups) }));
+
+    const sumForMonth = (mk: string) => {
+      const arr = withGroupFull.filter((t) => t.month === mk);
+      const rev = arr.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+      const dep = arr.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+      return { rev, dep, solde: rev - dep, tx: arr };
+    };
+    const cur = sumForMonth(anchorMonthKey);
+    const prev = sumForMonth(prevKey);
+
+    const groupsList = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
+    const byGroup = (arr: any[]) => {
+      const byG: Record<string, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
+      arr.filter((t) => t.type === "Dépense").forEach((t) => { byG[t.group] = (byG[t.group] || 0) + t.amount; });
+      return byG;
+    };
+    const curByGroup = byGroup(cur.tx);
+    const prevByGroup = byGroup(prev.tx);
+    const deltas = groupsList.map((g) => {
+      const c = curByGroup[g], p = prevByGroup[g], d = c - p;
+      const pct = p > 0 ? (d / p) * 100 : (c > 0 ? 100 : 0);
+      return { group: g, cur: c, prev: p, delta: d, pct };
+    }).filter((d) => d.cur > 0 || d.prev > 0);
+
+    const depDelta = cur.dep - prev.dep;
+    const depPct = prev.dep > 0 ? (depDelta / prev.dep) * 100 : (cur.dep > 0 ? 100 : 0);
+    const revDelta = cur.rev - prev.rev;
+    const soldeDelta = cur.solde - prev.solde;
+    const curEpargne = cur.rev > 0 ? (cur.solde / cur.rev) * 100 : 0;
+    const prevEpargne = prev.rev > 0 ? (prev.solde / prev.rev) * 100 : 0;
+    const biggestMover = [...deltas].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))[0];
+
+    let verdict = "";
+    if (Math.abs(depDelta) < 1) {
+      verdict = "Dépenses quasi stables par rapport au mois dernier — rien de notable à signaler.";
+    } else if (depDelta < 0) {
+      if (biggestMover?.group === "Non-productif") verdict = `Baisse fondée : elle est portée principalement par le "Non-productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins), le poste le plus facile à maîtriser sans rien sacrifier d'essentiel.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `À surveiller : cette baisse vient surtout du "Nécessaire" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — vérifie qu'il ne s'agit pas d'une privation plutôt que d'une vraie économie.`;
+      else if (biggestMover?.group === "Productif") verdict = `Baisse portée par le "Productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — à vérifier que ce n'est pas un investissement simplement décalé dans le temps.`;
+      else verdict = "Baisse des dépenses, sans nature clairement dominante.";
+    } else {
+      if (biggestMover?.group === "Productif") verdict = `Hausse plutôt saine : elle est portée principalement par le "Productif" (${fmt(biggestMover.delta)} FCFA de plus), donc probablement de l'investissement plutôt que du gaspillage.`;
+      else if (biggestMover?.group === "Non-productif") verdict = `À surveiller : cette hausse vient surtout du "Non-productif" (${fmt(biggestMover.delta)} FCFA de plus) — c'est le premier poste à réduire si besoin.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `Hausse portée par le "Nécessaire" (${fmt(biggestMover.delta)} FCFA de plus) — vérifie si c'est ponctuel ou un vrai changement de rythme.`;
+      else verdict = "Hausse des dépenses, sans nature clairement dominante.";
+    }
+
+    return {
+      title: `Rapport mois — ${monthLabel(anchorMonthKey)}`,
+      headline: `Solde : ${fmt(cur.solde)} FCFA (${soldeDelta >= 0 ? "+" : ""}${fmt(soldeDelta)} FCFA vs ${monthLabel(prevKey)})`,
+      formula: `${monthLabel(anchorMonthKey)} vs ${monthLabel(prevKey)} — synthèse revenus, dépenses et nature`,
+      badge: { text: isCurrentPeriod ? "Mois en cours" : "Période passée", tone: (isCurrentPeriod ? "live" : "past") as "live" | "past" },
+      blocks: [
+        {
+          kind: "kv" as const,
+          rows: [
+            { label: "Revenus", value: `${fmt(cur.rev)} FCFA (${revDelta >= 0 ? "+" : ""}${fmt(revDelta)})` },
+            { label: "Dépenses", value: `${fmt(cur.dep)} FCFA (${depDelta >= 0 ? "+" : ""}${fmt(depDelta)})`, warn: depDelta > 0 },
+            { label: "Solde", value: `${fmt(cur.solde)} FCFA (${soldeDelta >= 0 ? "+" : ""}${fmt(soldeDelta)})`, strong: true, warn: cur.solde < 0 },
+            { label: "Taux d'épargne", value: `${curEpargne.toFixed(1)}% (${curEpargne - prevEpargne >= 0 ? "+" : ""}${(curEpargne - prevEpargne).toFixed(1)} pts)` },
+          ],
+        },
+        {
+          kind: "table" as const,
+          columns: ["Nature", curColLabel, "Mois dernier", "Écart", "Évolution"],
+          highlightCol: isCurrentPeriod ? 1 : undefined,
+          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, `${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(0)}%`]),
+          cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, Math.abs(d.delta) < 1 ? COLOR.inkMuted : d.delta < 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
+          footerRow: ["Total", fmt(cur.dep), fmt(prev.dep), `${depDelta >= 0 ? "+" : ""}${fmt(depDelta)}`, `${depPct >= 0 ? "+" : ""}${depPct.toFixed(0)}%`],
+          footerColors: [undefined, undefined, undefined, undefined, Math.abs(depDelta) < 1 ? COLOR.inkMuted : depDelta < 0 ? COLOR.emeraldSoft : COLOR.claySoft],
+        },
+        { kind: "note" as const, tone: ((depDelta < 0 && biggestMover?.group === "Nécessaire") || (depDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
+      ],
+    };
+  };
+
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+        <button onClick={() => { setSpendResult(null); setSpendCheckOpen(true); }} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "rgba(139,123,194,0.14)", border: `1px solid ${COLOR.violet}`,
+          borderRadius: 8, color: COLOR.violetSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer", fontFamily: "'Inter', sans-serif", fontWeight: 600,
+        }}>
+          <AlertTriangle size={14} /> Puis-je dépenser ça ?
+        </button>
+        <button onClick={() => { setReportAnchor(dateToMonthKey(todayISO())); setMonthlyReportOpen(true); }} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`,
+          borderRadius: 8, color: COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer", fontFamily: "'Inter', sans-serif", fontWeight: 600,
+        }}>
+          <CalendarRange size={14} /> Rapport mois
+        </button>
+      </div>
       <SignauxClesPanel transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Revenus (période)" value={fmt(totalRevenus)} tone={COLOR.emeraldSoft} icon={TrendingUp} />
@@ -2900,6 +3529,152 @@ function ApercuTab({ filtered, filters, accounts, transactions, chargeOverrides,
           </div>
         ) : <EmptyState />}
       </PanelWithHelp>
+
+      {monthlyReportOpen && (() => {
+        const d = buildMonthlyReport(reportAnchor);
+        const atCurrent = monthSortKey(reportAnchor) >= monthSortKey(dateToMonthKey(todayISO()));
+        return (
+          <CalcDetailSheet open={monthlyReportOpen} onClose={() => setMonthlyReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} badge={d.badge}
+            onPrev={() => setReportAnchor(prevMonthKey(reportAnchor))}
+            onNext={atCurrent ? undefined : () => setReportAnchor(nextMonthKey(reportAnchor))}
+          />
+        );
+      })()}
+
+      {spendCheckOpen && (() => {
+        const fieldLabel: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 };
+        const nakedSelect: React.CSSProperties = {
+          background: "transparent", border: "none", color: COLOR.ink, fontSize: 14.5, fontWeight: 600,
+          fontFamily: "'Fraunces', serif", padding: 0, cursor: "pointer", width: "100%", appearance: "none", WebkitAppearance: "none",
+        };
+        return (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg, display: "flex", justifyContent: "center", alignItems: "center" }}>
+          <div style={{
+            width: "100%", maxWidth: 460, maxHeight: "92vh", display: "flex", flexDirection: "column",
+            background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
+            borderRadius: 20, border: `1px solid ${COLOR.hairline}`, overflowY: "auto", overflowX: "hidden",
+          }}>
+            {/* Header — même langage visuel que la Saisie rapide (bouton fermer circulaire,
+                pastille centrale), sur demande explicite de l'utilisateur (14/08/2026) */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
+              <button onClick={() => setSpendCheckOpen(false)} style={{
+                width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
+                color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+              }}>
+                <X size={18} />
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: COLOR.surface, borderRadius: 24, padding: "8px 16px", border: `1px solid ${COLOR.hairline}` }}>
+                <AlertTriangle size={15} color={COLOR.violetSoft} />
+                <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: COLOR.ink }}>Puis-je dépenser ça ?</span>
+              </div>
+              <div style={{ width: 40 }} />
+            </div>
+
+            {/* Montant — zone centrale, identique en esprit à la Saisie rapide */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", position: "relative", padding: "14px 24px 6px 24px" }}>
+              <div style={{ position: "absolute", top: 8, fontSize: 60, fontWeight: 700, color: COLOR.violet, opacity: 0.07, fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none" }}>FCFA</div>
+              <input type="number" inputMode="numeric" value={spendAmount || ""} placeholder="0" autoFocus
+                onChange={(e) => setSpendAmount(Number(e.target.value) || 0)}
+                style={{ position: "relative", background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 44, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", width: "100%", maxWidth: 280 }} />
+              <span style={{ position: "relative", fontSize: 11.5, color: COLOR.inkMuted, marginTop: 2 }}>Montant à dépenser</span>
+            </div>
+
+            {/* Compte / Catégorie — même style pilule que la Saisie rapide */}
+            <div style={{ padding: "8px 20px 16px 20px", display: "flex", gap: 20 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={fieldLabel}>Compte</div>
+                <select value={spendAccount} onChange={(e) => setSpendAccount(e.target.value)} style={nakedSelect}>
+                  <option value="">Tous les comptes</option>
+                  {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
+              <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
+                <div style={{ ...fieldLabel, textAlign: "right" }}>Catégorie</div>
+                <button onClick={() => setSpendCatPickerOpen(true)} style={{ ...nakedSelect, textAlign: "right", cursor: "pointer", display: "block" }}>
+                  {spendCategory || "Choisir…"}
+                </button>
+                {spendSubcategory && <div style={{ textAlign: "right", fontSize: 12, color: COLOR.inkMuted, marginTop: 3 }}>{spendSubcategory}</div>}
+              </div>
+            </div>
+            <CategoryPickerSheet open={spendCatPickerOpen} onClose={() => setSpendCatPickerOpen(false)} transactions={transactions} type="Dépense"
+              value={spendCategory} subvalue={spendSubcategory} onSelect={(c, s) => { setSpendCategory(c); setSpendSubcategory(s); }} />
+
+            {/* Questions — zone basse, façon fiche de saisie WinDev : listes déroulantes
+                pour les critères graduels, cases à cocher pour les binaires simples */}
+            <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 20px", background: COLOR.surface, display: "flex", flexDirection: "column", gap: 14 }}>
+              {[
+                { key: "nature" as const, label: "Nature de la dépense", options: [
+                  { value: "essentiel", label: "Besoin essentiel" },
+                  { value: "envie_reflechie", label: "Envie réfléchie, assumée" },
+                  { value: "envie_impulsive", label: "Envie impulsive, là maintenant" },
+                ]},
+                { key: "anticipation" as const, label: "Anticipation", options: [
+                  { value: "prevue", label: "Prévue depuis plus d'une semaine" },
+                  { value: "decidee_aujourdhui", label: "Décidée aujourd'hui" },
+                  { value: "derniere_minute", label: "Décidée dans la dernière heure" },
+                ]},
+                { key: "dette", label: "Situation d'endettement actuelle", options: [
+                  { value: "aucune", label: "Aucune dette en cours" },
+                  { value: "en_cours", label: "Dettes en cours, mais à jour" },
+                  { value: "en_retard", label: "Dettes ou impayés en retard" },
+                ]},
+                { key: "ressenti" as const, label: "Comment tu te sens en la faisant", options: [
+                  { value: "serein", label: "Serein(e), aucune hésitation" },
+                  { value: "coupable", label: "Un peu coupable" },
+                  { value: "sait_que_non", label: "Je sais que je ne devrais pas" },
+                ]},
+              ].map((q) => (
+                <div key={q.key}>
+                  <div style={fieldLabel}>{q.label}</div>
+                  <select value={(spendAnswers as any)[q.key]} onChange={(e) => setSpendAnswers({ ...spendAnswers, [q.key]: e.target.value })}
+                    style={{ ...inputStyle, width: "100%", fontFamily: "'Inter', sans-serif" }}>
+                    {q.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
+              ))}
+
+              <div style={{ paddingTop: 4, borderTop: `1px dashed ${COLOR.hairline}`, display: "flex", flexDirection: "column", gap: 10, marginTop: 4 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
+                  <input type="checkbox" checked={spendAnswers.ponctuelle} onChange={(e) => setSpendAnswers({ ...spendAnswers, ponctuelle: e.target.checked })} style={{ width: 16, height: 16, accentColor: COLOR.violet }} />
+                  C'est ponctuel — ça ne se reproduira pas ce mois-ci
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
+                  <input type="checkbox" checked={spendAnswers.budgetTendu} onChange={(e) => setSpendAnswers({ ...spendAnswers, budgetTendu: e.target.checked })} style={{ width: 16, height: 16, accentColor: COLOR.violet }} />
+                  Ce poste est déjà tendu ce mois-ci, budget ou pas
+                </label>
+              </div>
+
+              <button onClick={() => setSpendResult(evaluateSpendingCheck(spendAmount, spendCategory || null, spendAccount || null, spendAnswers, transactions, accounts, recurring, budgets))}
+                disabled={spendAmount <= 0}
+                style={{ width: "100%", marginTop: 4, padding: "15px 0", borderRadius: 14, border: "none", background: spendAmount > 0 ? COLOR.violet : COLOR.hairline, color: spendAmount > 0 ? "#0e1611" : COLOR.inkMuted, fontSize: 15.5, fontWeight: 700, cursor: spendAmount > 0 ? "pointer" : "default" }}>
+                Vérifier
+              </button>
+
+              {spendResult && (() => {
+                const tone = spendResult.verdict === "oui" ? COLOR.emerald : spendResult.verdict === "attends" ? COLOR.gold : COLOR.clay;
+                const toneSoft = spendResult.verdict === "oui" ? COLOR.emeraldSoft : spendResult.verdict === "attends" ? COLOR.goldSoft : COLOR.claySoft;
+                const Icon = spendResult.verdict === "oui" ? CheckSquare : spendResult.verdict === "attends" ? AlertTriangle : X;
+                return (
+                  <div style={{ padding: 14, borderRadius: 10, background: `${tone}14`, border: `1px solid ${tone}55`, borderLeft: `3px solid ${tone}` }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <Icon size={16} color={toneSoft} />
+                      <span style={{ fontSize: 13.5, fontWeight: 700, color: COLOR.ink }}>{spendResult.headline}</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      {spendResult.reasons.map((r, i) => (
+                        <div key={i} style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.5, display: "flex", gap: 6 }}>
+                          <span style={{ color: toneSoft, flexShrink: 0 }}>—</span><span>{r}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 }
@@ -4236,11 +5011,14 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
   const exportPDF = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
 
@@ -4266,7 +5044,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
       drawKpiBox(14 + kpiW + 8, "VS PÉRIODE PRÉC.", `${delta >= 0 ? "+" : "−"}${fmtPdf(Math.abs(delta))}`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
       drawKpiBox(14 + (kpiW + 8) * 2, "VARIATION", `${delta >= 0 ? "+" : "−"}${Math.abs(deltaPct).toFixed(0)}%`, improved ? 63 : 193, improved ? 156 : 84, improved ? 122 : 63);
 
-      autoTable(doc, {
+      doc.autoTable({
         startY: 68,
         head: [["Catégorie", "Montant (FCFA)", "% du total"]],
         body: catList.map((c) => [c.name, fmtPdf(c.value), `${c.pct.toFixed(0)}%`]),
@@ -4283,7 +5061,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
         doc.setFontSize(10); doc.setTextColor(26, 43, 76); doc.setFont("helvetica", "bold");
         doc.text(c.name, 14, y);
         doc.setFont("helvetica", "normal");
-        autoTable(doc, {
+        doc.autoTable({
           startY: y + 3,
           head: [["Sous-catégorie", "Montant (FCFA)", "% de la catégorie"]],
           body: subs.map((s) => [s.name, fmtPdf(s.value), `${s.pct.toFixed(0)}%`]),
@@ -4657,7 +5435,7 @@ function CategoryOverviewTab({ transactions, categoryGroups, allMonths, navConte
               {category}{subcategory && <span style={{ color: COLOR.inkMuted, fontWeight: 400 }}> · {subcategory}</span>}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
               {(["mois", "jour"] as const).map((g) => (
                 <button key={g} onClick={() => setGranularity(g)} style={{
@@ -5316,13 +6094,7 @@ function CustomProjectionPanel({ transactions, accounts, allCategories }: {
         </div>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Remplacer une catégorie par un montant fixe</label>
-            <select value={overrideCategory} onChange={(e) => setOverrideCategory(e.target.value)} style={{ ...inputStyle, width: 200 }}>
-              <option value="">— aucune —</option>
-              {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
+          <GroupedSingleSelect label="Remplacer une catégorie par un montant fixe" allLabel="— aucune —" value={overrideCategory} onChange={setOverrideCategory} options={groupedCategoryOptions(transactions)} />
           {overrideCategory && (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Nouveau montant / mois</label>
@@ -6134,11 +6906,14 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
   const exportActivitiesNarrativePdf = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -6207,7 +6982,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       <PanelWithHelp title="Rentabilité par activité" subtitle="Basée sur la catégorie de chaque transaction, pas sur le compte — l'argent circule souvent entre comptes"
         explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé."
         right={
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={exportActivitiesExcel} disabled={xlsState === "loading"} style={{
               display: "flex", alignItems: "center", gap: 6, background: xlsState === "error" ? "rgba(193,84,63,0.14)" : "rgba(63,156,122,0.14)",
               border: `1px solid ${xlsState === "error" ? COLOR.clay : COLOR.emerald}`, borderRadius: 8,
@@ -7089,7 +7864,7 @@ function NarrativeReportSheet({ open, onClose, rule4321, tauxEpargne, kakeibo }:
 // Fiche de lecture pour le rapport narratif des 5 ratios institutionnels.
 type CalcDetailBlock =
   | { kind: "kv"; rows: { label: string; value: string; strong?: boolean; warn?: boolean }[] }
-  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[] }
+  | { kind: "table"; columns: string[]; rows: (string | number)[][]; warnRows?: number[]; cellColors?: (string | undefined)[][]; footerRow?: (string | number)[]; footerColors?: (string | undefined)[]; highlightCol?: number }
   | { kind: "note"; text: string; tone?: "warn" | "info" };
 
 // Petite icône cliquable placée à côté de chaque chiffre du Diagnostic Financier —
@@ -7106,8 +7881,9 @@ function CalcDetailIcon({ onClick }: { onClick: () => void }) {
   );
 }
 
-function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
+function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext, badge }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
+  onPrev?: () => void; onNext?: () => void; badge?: { text: string; tone: "live" | "past" };
 }) {
   const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   if (!open) return null;
@@ -7116,11 +7892,14 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
   const downloadPdf = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
       // Les polices standard de jsPDF (Helvetica) ne supportent pas l'espace fine
@@ -7149,7 +7928,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       blocks.forEach((b) => {
         if (y > 260) { doc.addPage(); y = 20; }
         if (b.kind === "kv") {
-          autoTable(doc, {
+          doc.autoTable({
             startY: y,
             body: b.rows.map((r) => [ps(r.label), ps(r.value)]),
             theme: "plain",
@@ -7163,15 +7942,33 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
           });
           y = (doc as any).lastAutoTable.finalY + 8;
         } else if (b.kind === "table") {
-          autoTable(doc, {
+          doc.autoTable({
             startY: y,
             head: [b.columns.map(ps)],
             body: b.rows.map((row) => row.map((c) => ps(c))),
+            foot: b.footerRow ? [b.footerRow.map(ps)] : undefined,
             headStyles: { fillColor: [26, 43, 76] },
+            footStyles: { fillColor: [255, 255, 255], textColor: [20, 20, 20], fontStyle: "bold", lineWidth: 0.3 },
             styles: { fontSize: 8 },
             columnStyles: Object.fromEntries(b.columns.map((_, i) => [i, i === 0 ? { halign: "left" } : { halign: "right" }])),
             didParseCell: (data: any) => {
-              if (b.warnRows?.includes(data.row.index) && data.section === "body") data.cell.styles.textColor = [193, 84, 63];
+              if (data.section === "foot") {
+                const footColor = b.footerColors?.[data.column.index];
+                if (footColor) {
+                  const hex = footColor.replace("#", "");
+                  data.cell.styles.textColor = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+                }
+                return;
+              }
+              if (data.section !== "body") return;
+              if (data.column.index === b.highlightCol) data.cell.styles.fillColor = [252, 246, 224];
+              const cellColor = b.cellColors?.[data.row.index]?.[data.column.index];
+              if (cellColor) {
+                const hex = cellColor.replace("#", "");
+                data.cell.styles.textColor = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+              } else if (b.warnRows?.includes(data.row.index)) {
+                data.cell.styles.textColor = [193, 84, 63];
+              }
             },
           });
           y = (doc as any).lastAutoTable.finalY + 10;
@@ -7203,11 +8000,23 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 22px", borderBottom: `1px solid ${COLOR.hairline}` }}>
           <div>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>{title}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>{title}</span>
+              {badge && (
+                <span style={{
+                  fontSize: 10, fontWeight: 700, letterSpacing: "0.03em", textTransform: "uppercase", padding: "2px 9px", borderRadius: 20,
+                  color: badge.tone === "live" ? COLOR.goldSoft : COLOR.inkMuted,
+                  background: badge.tone === "live" ? "rgba(201,162,39,0.14)" : "rgba(255,255,255,0.06)",
+                  border: `1px solid ${badge.tone === "live" ? "rgba(201,162,39,0.4)" : COLOR.hairline}`,
+                }}>{badge.text}</span>
+              )}
+            </div>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, color: COLOR.goldSoft, marginTop: 4 }}>{headline}</div>
             <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 4, fontStyle: "italic" }}>{formula}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            {onPrev && <button onClick={onPrev} title="Période précédente" style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", padding: 4 }}><ChevronLeft size={18} /></button>}
+            {onNext && <button onClick={onNext} title="Période suivante" style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", padding: 4 }}><ChevronRight size={18} /></button>}
             <button onClick={downloadPdf} disabled={pdfState === "loading"} title="Télécharger cette fiche en PDF" style={{ background: "transparent", border: "none", color: pdfState === "error" ? COLOR.claySoft : COLOR.slateBlueSoft, cursor: pdfState === "loading" ? "default" : "pointer", display: "flex", padding: 4 }}>
               {pdfState === "loading" ? <Loader2 size={17} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={17} />}
             </button>
@@ -7227,18 +8036,31 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks }: {
               </div>
             );
             if (b.kind === "table") return (
-              <div key={i} style={{ marginBottom: 16, overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <div key={i} style={{ marginBottom: 16, overflowX: "auto", maxWidth: "100%" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5, tableLayout: "fixed" }}>
                   <thead>
-                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 8px", color: COLOR.inkMuted, fontWeight: 600, borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}>{c}</th>)}</tr>
+                    <tr>{b.columns.map((c, ci) => <th key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", color: ci === b.highlightCol ? COLOR.goldSoft : COLOR.inkMuted, fontWeight: ci === b.highlightCol ? 700 : 600, background: ci === b.highlightCol ? "rgba(201,162,39,0.10)" : "transparent", borderBottom: ci === b.highlightCol ? `2px solid ${COLOR.gold}` : `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}>{c}</th>)}</tr>
                   </thead>
                   <tbody>
                     {b.rows.map((row, ri) => (
                       <tr key={ri} style={{ background: b.warnRows?.includes(ri) ? "rgba(193,84,63,0.08)" : "transparent" }}>
-                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 8px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", color: b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink, borderBottom: `1px solid ${COLOR.hairline}` }}>{cell}</td>)}
+                        {row.map((cell, ci) => <td key={ci} style={{ textAlign: ci === 0 ? "left" : "right", padding: "6px 4px", fontFamily: ci === 0 ? "inherit" : "'IBM Plex Mono', monospace", fontWeight: b.cellColors?.[ri]?.[ci] ? 600 : 400, color: b.cellColors?.[ri]?.[ci] || (b.warnRows?.includes(ri) ? COLOR.claySoft : COLOR.ink), background: ci === b.highlightCol ? "rgba(201,162,39,0.05)" : "transparent", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "normal", wordBreak: "break-word" }}>{cell}</td>)}
                       </tr>
                     ))}
                   </tbody>
+                  {b.footerRow && (
+                    <tfoot>
+                      <tr style={{ background: "rgba(91,126,166,0.08)" }}>
+                        {b.footerRow.map((cell, ci) => <td key={ci} style={{
+                          textAlign: ci === 0 ? "left" : "right", padding: "7px 4px", fontFamily: ci === 0 ? "'Inter', sans-serif" : "'IBM Plex Mono', monospace",
+                          fontWeight: 700, color: b.footerColors?.[ci] || COLOR.ink, whiteSpace: "normal", wordBreak: "break-word",
+                          borderTop: `1.5px solid ${COLOR.slateBlue}`, borderBottom: `1.5px solid ${COLOR.slateBlue}`,
+                          borderLeft: ci === 0 ? `1.5px solid ${COLOR.slateBlue}` : "none",
+                          borderRight: ci === (b.footerRow!.length - 1) ? `1.5px solid ${COLOR.slateBlue}` : "none",
+                        }}>{cell}</td>)}
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               </div>
             );
@@ -7397,9 +8219,157 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
   );
 }
 
-function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange }: {
+// ============================================================
+// ASSISTANT IA — sur demande explicite de l'utilisateur (14/08/2026) : "un puissant
+// assistant chat qui lit toutes les transactions et répond même dans les détails".
+// Contrairement à tout le reste de l'app, ceci envoie les données à un service EXTERNE
+// (API Anthropic, via la fonction serveur /api/chat.ts qui protège la clé) — l'utilisateur
+// a été informé et a choisi cette option en connaissance de cause plutôt qu'un moteur
+// 100% local. Les transactions sont sérialisées en CSV compact (bien plus économe en
+// tokens qu'un JSON) plutôt qu'envoyées telles quelles.
+// ============================================================
+function transactionsToCompactCSV(transactions: Transaction[]): string {
+  const esc = (s: string) => (s || "").replace(/[\n\r;]/g, " ").trim();
+  const header = "date;type;categorie;sous_categorie;montant;compte;beneficiaire;note";
+  const rows = [...transactions]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .map((t) => [t.date, t.type, esc(t.category), esc(t.subcategory || ""), t.amount, esc(t.account || ""), esc(t.payee || ""), esc(t.note || "")].join(";"));
+  return [header, ...rows].join("\n");
+}
+
+function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurring }: {
+  transactions: Transaction[]; accounts: Account[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; recurring: RecurringTemplate[];
+}) {
+  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, loading]);
+
+  // Plafond de sécurité : borne le coût/la latence par message même sur un très gros
+  // historique. Les transactions les plus RÉCENTES sont prioritaires (les plus
+  // pertinentes pour la majorité des questions).
+  const MAX_TX = 4000;
+  const sortedForContext = useMemo(() => [...transactions].sort((a, b) => b.date.localeCompare(a.date)), [transactions]);
+  const truncated = sortedForContext.length > MAX_TX;
+  const csv = useMemo(() => transactionsToCompactCSV(sortedForContext.slice(0, MAX_TX)), [sortedForContext]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    const nextMessages = [...messages, { role: "user" as const, content: text }];
+    setMessages(nextMessages);
+    setInput("");
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchWithTimeout("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: nextMessages,
+          context: csv,
+          accounts: accounts.map((a) => a.name),
+          budgets: budgets.map((b) => `${b.category}: limite ${b.amount} FCFA/mois`),
+          recurring: recurring.map((r) => `${r.type} — ${r.category} — ${fmt(r.amount)} FCFA (${r.frequency}, prochaine échéance ${r.nextDate})`),
+        }),
+      }, 55000);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Erreur serveur (${res.status})`);
+      }
+      const data = await res.json();
+      setMessages((m) => [...m, { role: "assistant", content: data.reply || "Pas de réponse de l'assistant." }]);
+    } catch (e: any) {
+      setError(e?.message || "Impossible de contacter l'assistant. Vérifie que la clé API est bien configurée sur Vercel (ANTHROPIC_API_KEY), ou réessaie plus tard.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, height: "calc(100vh - 130px)", minHeight: 480 }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <MessageCircle size={18} color={COLOR.goldSoft} />
+          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 18, color: COLOR.ink }}>Assistant IA</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 10, borderRadius: 8, background: "rgba(193,84,63,0.10)", border: `1px solid ${COLOR.clay}55`, fontSize: 11.5, color: COLOR.inkMuted, marginTop: 8 }}>
+          <AlertTriangle size={13} color={COLOR.claySoft} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            Contrairement au reste de l'app, chaque message envoie tes transactions à un service externe (API Anthropic) pour générer la réponse — ces données quittent ton navigateur, et chaque message a un coût réel sur ta clé API.
+            {truncated && ` Limité aux ${MAX_TX} transactions les plus récentes sur ${sortedForContext.length} au total.`}
+          </span>
+        </div>
+      </div>
+
+      <div ref={scrollRef} className="gl-scroll" style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "4px 4px 4px 4px" }}>
+        {messages.length === 0 && (
+          <div style={{ margin: "auto", textAlign: "center", color: COLOR.inkMuted, fontSize: 12.5, maxWidth: 320 }}>
+            <MessageCircle size={28} color={COLOR.hairline} style={{ marginBottom: 10 }} />
+            <div>Pose une question sur tes transactions — ex. "Combien j'ai dépensé en Aliments en juillet ?", "Quelle est ma plus grosse dépense chez GRUNDFOS ?", "Compare mes dépenses non-productives de juin et août".</div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+            <div style={{
+              maxWidth: "80%", padding: "10px 14px", borderRadius: 14,
+              borderBottomRightRadius: m.role === "user" ? 4 : 14, borderBottomLeftRadius: m.role === "user" ? 14 : 4,
+              background: m.role === "user" ? "rgba(201,162,39,0.14)" : COLOR.surfaceRaised,
+              border: `1px solid ${m.role === "user" ? COLOR.gold + "55" : COLOR.hairline}`,
+              color: COLOR.ink, fontSize: 13, lineHeight: 1.55, whiteSpace: "pre-wrap",
+            }}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div style={{ display: "flex", justifyContent: "flex-start" }}>
+            <div style={{ padding: "10px 14px", borderRadius: 14, borderBottomLeftRadius: 4, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, display: "flex", alignItems: "center", gap: 8 }}>
+              <Loader2 size={14} color={COLOR.inkMuted} className="gl-spin" />
+              <span style={{ fontSize: 12, color: COLOR.inkMuted }}>L'assistant réfléchit…</span>
+            </div>
+          </div>
+        )}
+        {error && (
+          <div style={{ padding: "10px 14px", borderRadius: 10, background: "rgba(193,84,63,0.12)", border: `1px solid ${COLOR.clay}`, color: COLOR.claySoft, fontSize: 12 }}>{error}</div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        {messages.length > 0 && (
+          <button onClick={() => { setMessages([]); setError(null); }} title="Effacer la conversation" style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "11px", cursor: "pointer", display: "flex", flexShrink: 0 }}>
+            <RotateCcw size={15} />
+          </button>
+        )}
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Pose ta question…"
+          rows={1}
+          style={{ ...inputStyle, flex: 1, resize: "none", fontFamily: "'Inter', sans-serif" }}
+        />
+        <button onClick={send} disabled={loading || !input.trim()} style={{
+          background: input.trim() && !loading ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 8,
+          color: input.trim() && !loading ? "#0e1611" : COLOR.inkMuted, padding: "11px 16px", cursor: input.trim() && !loading ? "pointer" : "default",
+          display: "flex", alignItems: "center", flexShrink: 0,
+        }}>
+          <Send size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange, categoryGroups, categoryScope, recurring }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
   setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
+  categoryGroups: Record<string, Group>; categoryScope: Record<string, Scope>; recurring: RecurringTemplate[];
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
@@ -7414,6 +8384,14 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
   const windowMonths = useMemo(() => monthsSinceInception(transactions), [transactions]);
   const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange]);
   const asian = useMemo(() => computeAsianIndicators(transactions, chargeOverrides, includeGrundfosVoiture, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, periodRange]);
+  // Conseils critiques : toujours calculés sur les 6 derniers mois glissants à partir
+  // d'aujourd'hui, indépendamment du filtre "Du mois / Au mois" — un diagnostic de
+  // comportement financier n'a de sens que sur une fenêtre récente et fixe, pas sur une
+  // période arbitraire que l'utilisateur pourrait avoir sélectionnée pour autre chose.
+  const criticalAdvice = useMemo(
+    () => buildCriticalAdvice(transactions, categoryGroups, categoryScope, recurring),
+    [transactions, categoryGroups, categoryScope, recurring]
+  );
   // Nombre réel de mois couverts par l'analyse ci-dessous (respecte le filtre global
   // "Du mois / Au mois" quand il restreint la période, sinon = tout l'historique).
   const effectiveMonths = charges.lookback.length;
@@ -7690,6 +8668,32 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <PanelWithHelp title="Conseils critiques" subtitle="Lecture des 6 derniers mois glissants — catégories, sous-catégories, bénéficiaires et notes — pas de complaisance"
+        explain="Analyse 100% automatique sur tes 6 derniers mois glissants : taux d'épargne, dérive du Non-productif, habitudes de dépenses répétées, grosses dépenses individuelles, concentration excessive, argent non classifié, effet week-end, mots-clés répétés dans tes notes, et doublons de saisie probables. Recalculée à chaque ouverture, jamais un texte figé."
+        collapsible defaultOpen={false}
+        badge={criticalAdvice.items.filter((i) => i.severity === "critique").length > 0 ? `${criticalAdvice.items.filter((i) => i.severity === "critique").length} point(s) critique(s)` : undefined}
+        badgeColor={COLOR.claySoft}>
+        <div style={{ fontSize: 13, color: COLOR.ink, lineHeight: 1.5, marginBottom: criticalAdvice.items.length ? 16 : 0, fontStyle: "italic" }}>{criticalAdvice.opening}</div>
+        {criticalAdvice.items.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {criticalAdvice.items.map((item, i) => {
+              const tone = item.severity === "critique" ? COLOR.clay : item.severity === "attention" ? COLOR.gold : COLOR.emerald;
+              const toneSoft = item.severity === "critique" ? COLOR.claySoft : item.severity === "attention" ? COLOR.goldSoft : COLOR.emeraldSoft;
+              const Icon = item.severity === "critique" ? AlertTriangle : item.severity === "attention" ? AlertTriangle : TrendingUp;
+              return (
+                <div key={i} style={{ display: "flex", gap: 10, padding: "12px 14px", borderRadius: 10, background: `${tone}14`, border: `1px solid ${tone}55`, borderLeft: `3px solid ${tone}` }}>
+                  <Icon size={15} color={toneSoft} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: COLOR.ink, marginBottom: 3 }}>{item.title}</div>
+                    <div style={{ fontSize: 12, color: COLOR.inkMuted, lineHeight: 1.55 }}>{item.text}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </PanelWithHelp>
+
       <div style={{ display: "flex", alignItems: "center", gap: 12, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "12px 16px", flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
           <button onClick={() => setIncludeGrundfosVoiture(true)} style={{
@@ -7986,8 +8990,8 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
             const repayments = l.repayments || [];
             return (
               <div key={l.id} style={{ background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}`, overflow: "hidden" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px" }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", flexWrap: "wrap", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
                     <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       {l.person} <span style={{ color: COLOR.inkMuted, fontSize: 11.5 }}>· {monthLabel(l.dateGiven)}</span>
                       {repayments.length > 0 && (
@@ -8006,7 +9010,7 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
                       </div>
                     )}
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <div style={{ textAlign: "right" }}>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>{fmt(l.amount)}</div>
                       {status !== "Remboursé" && <div style={{ fontSize: 10.5, color: COLOR.claySoft }}>reste {fmt(remaining)}</div>}
@@ -8272,11 +9276,14 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   const exportComptesNarrativePdf = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -8337,7 +9344,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
 
         if (months.length >= 2) {
           if (y > pageHeight - 40) { doc.addPage(); y = 20; }
-          autoTable(doc, {
+          doc.autoTable({
             startY: y,
             head: [["Mois", "Mouvement net (FCFA)"]],
             body: months.map((m) => [monthLabel(m), ps(fmt(c.byMonth[m]))]),
@@ -8361,10 +9368,15 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   };
 
   // Avances entre comptes : regroupe toutes les transactions marquées "onBehalfOf" par
-  // paire débiteur→créancier, net des règlements déjà marqués. Sur demande explicite de
-  // l'utilisateur (10/08/2026) : le sens de la dette s'inverse selon le type — pour une
-  // DÉPENSE, le compte qui a payé est le créancier (on lui doit) ; pour un REVENU, le
-  // compte qui a encaissé est le débiteur (il doit reverser l'argent au bon compte).
+  // paire débiteur→créancier, net des règlements déjà marqués. Le sens de la dette
+  // s'inverse selon le type — pour une DÉPENSE, le compte qui a payé est le créancier (on
+  // lui doit) ; pour un REVENU, le compte qui a encaissé est le débiteur (il doit reverser
+  // l'argent au bon compte).
+  //
+  // Compensation automatique : si A doit B ET B doit A en même temps (deux dettes en sens
+  // opposé entre les deux mêmes comptes), ça n'a pas de sens d'afficher deux lignes
+  // contradictoires — seul le SOLDE NET doit apparaître, dans un seul sens. Sur demande
+  // explicite de l'utilisateur (10/08/2026), après avoir vu ce cas de figure en pratique.
   const advances = useMemo(() => {
     const groups: Record<string, { debtor: string; creditor: string; total: number; settled: number; tx: Transaction[] }> = {};
     transactions.forEach((t) => {
@@ -8377,7 +9389,24 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
       if (t.settled) groups[key].settled += t.amount;
       groups[key].tx.push(t);
     });
-    return Object.values(groups).map((g) => ({ ...g, outstanding: g.total - g.settled })).sort((a, b) => b.outstanding - a.outstanding);
+    const pairKeys = new Set<string>();
+    Object.values(groups).forEach((g) => pairKeys.add([g.debtor, g.creditor].sort().join("|")));
+    const netted: { debtor: string; creditor: string; outstanding: number; grossFwd: number; grossBwd: number; tx: Transaction[] }[] = [];
+    pairKeys.forEach((pk) => {
+      const [x, y] = pk.split("|");
+      const fwd = groups[`${x}→${y}`];
+      const bwd = groups[`${y}→${x}`];
+      const fwdOut = fwd ? fwd.total - fwd.settled : 0;
+      const bwdOut = bwd ? bwd.total - bwd.settled : 0;
+      const net = fwdOut - bwdOut;
+      const allTx = [...(fwd?.tx || []), ...(bwd?.tx || [])];
+      if (Math.abs(net) < 1 && fwdOut === 0 && bwdOut === 0) return; // rien à afficher
+      netted.push({
+        debtor: net >= 0 ? x : y, creditor: net >= 0 ? y : x, outstanding: Math.abs(net),
+        grossFwd: fwd?.total || 0, grossBwd: bwd?.total || 0, tx: allTx,
+      });
+    });
+    return netted.sort((a, b) => b.outstanding - a.outstanding);
   }, [transactions]);
   const [expandedAdvance, setExpandedAdvance] = useState<string | null>(null);
   const toggleSettled = (txId: string) => setTransactions(transactions.map((t) => t.id === txId ? { ...t, settled: !t.settled } : t));
@@ -8409,15 +9438,19 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
         <Panel title="Soldes corrigés — si les avances étaient réglées" subtitle="Ce que serait le solde de chaque compte si les avances en cours (non encore marquées réglées) étaient soldées aujourd'hui">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {correctedBalances.map((r) => (
-              <div key={r.account.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
-                <div style={{ fontSize: 13 }}>{r.account.name}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>
+              <div key={r.account.id} style={{ padding: "10px 14px", background: COLOR.surfaceRaised, borderRadius: 8, border: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>{r.account.name}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, flexWrap: "wrap" }}>
                   <span style={{ color: COLOR.inkMuted }}>{fmt(r.real)}</span>
-                  <ArrowRight size={12} color={COLOR.inkMuted} />
+                  <ArrowRight size={12} color={COLOR.inkMuted} style={{ flexShrink: 0 }} />
                   <span style={{ fontWeight: 600, color: r.corrected >= r.real ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(r.corrected)} FCFA</span>
-                  {r.receivable > 0 && <span style={{ fontSize: 10.5, color: COLOR.emeraldSoft }}>+{fmt(r.receivable)} à recevoir</span>}
-                  {r.payable > 0 && <span style={{ fontSize: 10.5, color: COLOR.claySoft }}>−{fmt(r.payable)} à payer</span>}
                 </div>
+                {(r.receivable > 0 || r.payable > 0) && (
+                  <div style={{ display: "flex", gap: 10, marginTop: 4, flexWrap: "wrap" }}>
+                    {r.receivable > 0 && <span style={{ fontSize: 10.5, color: COLOR.emeraldSoft }}>+{fmt(r.receivable)} à recevoir</span>}
+                    {r.payable > 0 && <span style={{ fontSize: 10.5, color: COLOR.claySoft }}>−{fmt(r.payable)} à payer</span>}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -8447,7 +9480,11 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: adv.outstanding > 0 ? COLOR.goldSoft : COLOR.emeraldSoft }}>
                         {adv.outstanding > 0 ? `${fmt(adv.outstanding)} dû` : "Réglé"}
                       </div>
-                      {adv.settled > 0 && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{fmt(adv.settled)} déjà réglé sur {fmt(adv.total)}</div>}
+                      {adv.grossFwd > 0 && adv.grossBwd > 0 && (
+                        <div style={{ fontSize: 10.5, color: COLOR.inkMuted }} title="Les deux comptes se devaient mutuellement — compensé automatiquement, seul le solde net reste dû">
+                          brut {fmt(adv.grossFwd)} / {fmt(adv.grossBwd)} — compensé
+                        </div>
+                      )}
                     </div>
                   </div>
                   {isExpanded && (
@@ -8651,8 +9688,8 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
 // ============================================================
 // BUDGETS PAR CATÉGORIE (avec reconduction, transfert)
 // ============================================================
-function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCategories }: {
-  transactions: Transaction[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void; allCategories: string[];
+function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCategories, recurring }: {
+  transactions: Transaction[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; setBudgets: (b: CategoryBudget[]) => void; allCategories: string[]; recurring: RecurringTemplate[];
 }) {
   const [adding, setAdding] = useState(false);
   const [budgetNarrativeOpen, setBudgetNarrativeOpen] = useState(false);
@@ -8681,6 +9718,69 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
     setTransferFrom(null); setTransferAmount(0); setTransferTo("");
   };
 
+  // --------------------------------------------------------------------------
+  // Budget suggéré du mois — sur demande explicite de l'utilisateur (14/08/2026).
+  // Logique en deux couches, comme le ferait un conseiller qui regarde d'abord ce qui
+  // est engagé, puis ce qui varie :
+  //  1) Récurrences ("Récurrences" du menu) : ce sont des engagements déjà connus
+  //     (loyer, abonnements, salaire...) — converties en équivalent mensuel selon leur
+  //     fréquence et prises telles quelles, catégorie par catégorie.
+  //  2) Catégories sans récurrence : moyenne des 3 derniers mois CALENDAIRES complets
+  //     (le mois en cours, encore partiel, est exclu pour ne pas sous-estimer) — une
+  //     base réaliste plutôt qu'un chiffre inventé.
+  // Intelligence de gestion, dans l'esprit du "verdict" déjà utilisé ailleurs dans
+  // l'app : compare le total suggéré aux revenus récurrents prévus, et alerte si le
+  // budget suggéré dépasserait les revenus, ou si le "Non-productif" prend une part
+  // jugée excessive (>35% des revenus, seuil indicatif inspiré du 50/30/20).
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestEdits, setSuggestEdits] = useState<Record<string, number>>({});
+  useEffect(() => { if (suggestOpen) setSuggestEdits({}); }, [suggestOpen]);
+  const buildBudgetSuggestion = () => {
+    const monthlyEquivalent = (r: RecurringTemplate) =>
+      r.frequency === "Mensuelle" ? r.amount : r.frequency === "Hebdomadaire" ? r.amount * (52 / 12) : r.amount / 12;
+
+    const recurringIncome = recurring.filter((r) => r.type === "Revenu").reduce((a, r) => a + monthlyEquivalent(r), 0);
+    const recurringByCategory: Record<string, number> = {};
+    recurring.filter((r) => r.type === "Dépense").forEach((r) => { recurringByCategory[r.category] = (recurringByCategory[r.category] || 0) + monthlyEquivalent(r); });
+
+    // 3 derniers mois calendaires complets (hors mois en cours)
+    const monthKeys: string[] = [];
+    const cursor = new Date(); cursor.setDate(1);
+    for (let i = 1; i <= 3; i++) {
+      const d = new Date(cursor); d.setMonth(d.getMonth() - i);
+      monthKeys.push(dateToMonthKey(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-01`));
+    }
+    const histCategories = categoriesForType(transactions, "Dépense").filter((c) => !recurringByCategory[c]);
+    const histAverage: Record<string, number> = {};
+    histCategories.forEach((c) => {
+      const total = monthKeys.reduce((a, mk) => a + spentInMonth(c, mk), 0);
+      const monthsWithData = monthKeys.filter((mk) => transactions.some((t) => t.type === "Dépense" && t.category === c && dateToMonthKey(t.date) === mk)).length || 1;
+      histAverage[c] = Math.round(total / monthsWithData);
+    });
+
+    const suggestions = [
+      ...Object.entries(recurringByCategory).map(([category, amount]) => ({ category, amount: Math.round(amount), source: "Récurrent" as const })),
+      ...Object.entries(histAverage).filter(([, amount]) => amount > 0).map(([category, amount]) => ({ category, amount, source: "Moyenne 3 mois" as const })),
+    ].sort((a, b) => b.amount - a.amount);
+
+    const total = suggestions.reduce((a, s) => a + s.amount, 0);
+    const nonProductifTotal = suggestions.filter((s) => (categoryGroups[s.category] || "Non classifié") === "Non-productif").reduce((a, s) => a + s.amount, 0);
+    const nonProductifShare = recurringIncome > 0 ? (nonProductifTotal / recurringIncome) * 100 : 0;
+
+    let advice = "";
+    if (recurringIncome === 0) {
+      advice = "Aucun revenu récurrent enregistré (voir Récurrences) — impossible d'évaluer si ce budget est tenable par rapport à tes rentrées d'argent prévisibles.";
+    } else if (total > recurringIncome) {
+      advice = `Ce budget suggéré (${fmt(total)} FCFA) dépasse tes revenus récurrents prévus (${fmt(recurringIncome)} FCFA) de ${fmt(total - recurringIncome)} FCFA. Commence par revoir les catégories "Non-productif" les plus élevées ci-dessous avant d'appliquer.`;
+    } else if (nonProductifShare > 35) {
+      advice = `Le "Non-productif" représenterait ${nonProductifShare.toFixed(0)}% de tes revenus prévus — au-delà du seuil indicatif de bon sens (~35%). Le budget reste tenable, mais il y a probablement de la marge à réorienter vers l'épargne ou l'investissement ("Productif").`;
+    } else {
+      advice = `Budget tenable : ${fmt(total)} FCFA suggérés pour ${fmt(recurringIncome)} FCFA de revenus récurrents prévus, soit ${fmt(recurringIncome - total)} FCFA de marge avant même de compter les dépenses variables imprévues.`;
+    }
+
+    return { suggestions, total, recurringIncome, advice };
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Budgets par catégorie" subtitle="Limite mensuelle, reconduction du solde non utilisé, transfert entre catégories"
@@ -8691,6 +9791,9 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
                 <BookOpen size={13} /> Rapport détaillé
               </button>
             )}
+            <button onClick={() => setSuggestOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(139,123,194,0.14)", border: `1px solid ${COLOR.violet}`, borderRadius: 6, color: COLOR.violetSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <TrendingUp size={13} /> Suggérer un budget
+            </button>
             <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
               {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Nouveau budget"}
             </button>
@@ -8769,6 +9872,75 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
         return <CalcDetailSheet open={budgetNarrativeOpen} onClose={() => setBudgetNarrativeOpen(false)}
           title="Budgets — analyse détaillée" headline={`${rows.filter((r) => r.overCount > 0).length} budget(s) dépassé(s) au moins une fois sur 6 mois`}
           formula="Comparaison dépense réelle vs limite, mois par mois, sur les 6 derniers mois" blocks={blocks} />;
+      })()}
+
+      {suggestOpen && (() => {
+        const s = buildBudgetSuggestion();
+        const editedTotal = s.suggestions.reduce((a, x) => a + (suggestEdits[x.category] ?? x.amount), 0);
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.5)", display: "flex", justifyContent: "center", alignItems: "center", padding: 16 }} onClick={() => setSuggestOpen(false)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 560, maxHeight: "88vh", display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, overflow: "hidden" }}>
+              <div style={{ padding: "18px 20px 12px 20px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                  <div>
+                    <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Budget suggéré du mois</div>
+                    <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 3, fontStyle: "italic" }}>Basé sur tes récurrences (engagements connus) et la moyenne de tes 3 derniers mois pour le reste — modifiable avant d'appliquer</div>
+                  </div>
+                  <button onClick={() => setSuggestOpen(false)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }}><X size={18} /></button>
+                </div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>
+                  <span style={{ color: COLOR.inkMuted }}>Revenus récurrents prévus <b style={{ color: COLOR.emeraldSoft }}>{fmt(s.recurringIncome)}</b></span>
+                  <span style={{ color: COLOR.inkMuted }}>Total suggéré <b style={{ color: editedTotal > s.recurringIncome && s.recurringIncome > 0 ? COLOR.claySoft : COLOR.goldSoft }}>{fmt(editedTotal)}</b></span>
+                </div>
+              </div>
+
+              <div style={{ padding: "14px 20px", overflowY: "auto", flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 12, borderRadius: 8, background: "rgba(139,123,194,0.10)", border: `1px solid rgba(139,123,194,0.35)`, marginBottom: 16 }}>
+                  <TrendingUp size={14} color={COLOR.violetSoft} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span style={{ fontSize: 12, color: COLOR.ink, lineHeight: 1.5 }}>{s.advice}</span>
+                </div>
+
+                {s.suggestions.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Pas assez d'historique ni de récurrences pour proposer un budget — ajoute quelques transactions ou récurrences d'abord.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {s.suggestions.map((x) => (
+                      <div key={x.category} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 10px", background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, flexWrap: "wrap" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, color: COLOR.ink }}>{x.category}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                            <span style={{ fontSize: 10, color: groupColor[categoryGroups[x.category] || "Non classifié"] }}>{categoryGroups[x.category] || "Non classifié"}</span>
+                            <span style={{ fontSize: 9.5, color: x.source === "Récurrent" ? COLOR.slateBlueSoft : COLOR.inkMuted, border: `1px solid ${x.source === "Récurrent" ? COLOR.slateBlue : COLOR.hairline}`, borderRadius: 10, padding: "1px 7px" }}>{x.source}</span>
+                          </div>
+                        </div>
+                        <input type="number" inputMode="numeric" value={suggestEdits[x.category] ?? x.amount}
+                          onChange={(e) => setSuggestEdits({ ...suggestEdits, [x.category]: Number(e.target.value) || 0 })}
+                          style={{ ...inputStyle, width: 120, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: 10, padding: "14px 20px", borderTop: `1px solid ${COLOR.hairline}` }}>
+                <button onClick={() => setSuggestOpen(false)} style={{ flex: 1, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+                <button onClick={() => {
+                  const updated = [...budgets];
+                  s.suggestions.forEach((x) => {
+                    const amount = suggestEdits[x.category] ?? x.amount;
+                    const idx = updated.findIndex((b) => b.category === x.category);
+                    if (idx >= 0) updated[idx] = { ...updated[idx], amount };
+                    else updated.push({ id: uid("b"), category: x.category, amount, rollover: false });
+                  });
+                  setBudgets(updated);
+                  setSuggestOpen(false);
+                }} disabled={!s.suggestions.length} style={{ flex: 2, background: s.suggestions.length ? COLOR.violet : COLOR.hairline, border: "none", borderRadius: 8, color: s.suggestions.length ? "#0e1611" : COLOR.inkMuted, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: s.suggestions.length ? "pointer" : "default" }}>
+                  Appliquer ce budget ({s.suggestions.length} catégorie{s.suggestions.length > 1 ? "s" : ""})
+                </button>
+              </div>
+            </div>
+          </div>
+        );
       })()}
     </div>
   );
@@ -8934,6 +10106,114 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // ============================================================
 // SAUVEGARDE & RESTAURATION
 // ============================================================
+// Écran bloquant affiché quand le stockage local semble vide — force un choix explicite
+// avant que quoi que ce soit ne soit sauvegardé, pour ne plus jamais transformer
+// silencieusement des données de secours en "vraies" données. Sur demande explicite de
+// l'utilisateur (11/08/2026), après une perte de données réelle causée par ce défaut.
+function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh }: {
+  onRestore: (data: any) => void; onConnectSync: (code: string) => Promise<boolean>; onStartFresh: () => void;
+}) {
+  const [mode, setMode] = useState<"choix" | "sync" | "confirmFresh">("choix");
+  const [codeInput, setCodeInput] = useState("");
+  const [syncTrying, setSyncTrying] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result as string);
+        if (!data || typeof data !== "object") throw new Error("format");
+        setFileError(null);
+        onRestore(data);
+      } catch {
+        setFileError("Fichier invalide — vérifie que c'est bien un export Grand Livre (.json).");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const tryConnect = async () => {
+    if (!codeInput.trim()) return;
+    setSyncTrying(true); setSyncError(null);
+    const ok = await onConnectSync(codeInput.trim());
+    setSyncTrying(false);
+    if (!ok) setSyncError("Aucune donnée trouvée pour ce code — vérifie qu'il est correct, ou essaie une autre option.");
+  };
+
+  const cardStyle: React.CSSProperties = { background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 20, cursor: "pointer", textAlign: "left", width: "100%" };
+
+  return (
+    <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ maxWidth: 460, width: "100%" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <AlertTriangle size={22} color={COLOR.claySoft} />
+          <h1 style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 500, margin: 0 }}>Aucune donnée trouvée ici</h1>
+        </div>
+        <p style={{ color: COLOR.inkMuted, fontSize: 13, lineHeight: 1.5, marginBottom: 24 }}>
+          Ce navigateur/appareil ne contient aucune donnée enregistrée. Si tu avais déjà utilisé l'app, tes données existent probablement encore ailleurs — choisis comment les retrouver avant de continuer. Rien ne sera sauvegardé tant que tu n'as pas fait un choix ici.
+        </p>
+
+        {mode === "choix" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <label style={cardStyle}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <UploadCloud size={16} color={COLOR.goldSoft} />
+                <strong style={{ fontSize: 14 }}>Importer une sauvegarde</strong>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Un fichier .json déjà exporté depuis Sauvegarde, sur cet appareil ou un autre.</div>
+              <input type="file" accept=".json" onChange={onFile} style={{ display: "none" }} />
+            </label>
+            {fileError && <div style={{ fontSize: 12, color: COLOR.claySoft }}>{fileError}</div>}
+
+            <button onClick={() => setMode("sync")} style={cardStyle}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <Repeat size={16} color={COLOR.slateBlueSoft} />
+                <strong style={{ fontSize: 14 }}>Se connecter à une synchronisation existante</strong>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Si tu avais déjà activé la synchronisation avant, entre ton code pour retrouver tes données.</div>
+            </button>
+
+            <button onClick={() => setMode("confirmFresh")} style={{ ...cardStyle, borderColor: COLOR.hairline, opacity: 0.85 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <Plus size={16} color={COLOR.inkMuted} />
+                <strong style={{ fontSize: 14, color: COLOR.inkMuted }}>Démarrer avec des données de démonstration</strong>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted }}>Seulement si c'est vraiment la première fois que tu utilises l'app sur cet appareil.</div>
+            </button>
+          </div>
+        )}
+
+        {mode === "sync" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <input value={codeInput} onChange={(e) => setCodeInput(e.target.value)} placeholder="ex: atelier-lagune-482" style={{ ...inputStyle, width: "100%", padding: "12px 14px", fontSize: 14 }} />
+            {syncError && <div style={{ fontSize: 12, color: COLOR.claySoft }}>{syncError}</div>}
+            <button onClick={tryConnect} disabled={syncTrying || !codeInput.trim()} style={{ background: COLOR.emerald, border: "none", borderRadius: 8, color: COLOR.bg, padding: "12px 14px", fontSize: 13.5, fontWeight: 600, cursor: syncTrying ? "default" : "pointer" }}>
+              {syncTrying ? "Connexion…" : "Se connecter"}
+            </button>
+            <button onClick={() => setMode("choix")} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 12.5, cursor: "pointer", padding: 6 }}>← Retour</button>
+          </div>
+        )}
+
+        {mode === "confirmFresh" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: "rgba(193,84,63,0.12)", border: `1px solid ${COLOR.clay}`, borderRadius: 8, padding: 14, fontSize: 12.5, color: COLOR.claySoft }}>
+              Confirme bien : si tu avais déjà de vraies données ailleurs et que tu choisis cette option par erreur, les données de démonstration commenceront à être sauvegardées ici à la place. Tu pourras toujours importer une sauvegarde plus tard depuis Sauvegarde.
+            </div>
+            <button onClick={onStartFresh} style={{ background: COLOR.clay, border: "none", borderRadius: 8, color: "#fff", padding: "12px 14px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+              Oui, démarrer avec les données de démonstration
+            </button>
+            <button onClick={() => setMode("choix")} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, fontSize: 12.5, cursor: "pointer", padding: 6 }}>← Retour</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected, undoSnapshotAt, onUndoRestore, settingsLog }: {
   getSnapshot: () => any; restore: (data: any) => void; syncCode: string; setSyncCode: (c: string) => void;
   syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void; realtimeConnected: boolean;
@@ -8943,6 +10223,25 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
   const [status, setStatus] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [codeInput, setCodeInput] = useState(syncCode);
+  // Les 3 dernières sauvegardes automatiques tournantes (une par jour calendaire où
+  // l'app a été ouverte, la plus récente écrasant la plus ancienne au-delà de 3) —
+  // écrites par runAutoBackupIfNeeded() au niveau racine, simplement lues ici.
+  const [autoBackups, setAutoBackups] = useState<{ date: string; savedAt: string; data: any }[]>(() => {
+    try { return JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    const refresh = () => { try { setAutoBackups(JSON.parse(localStorage.getItem("gl-auto-backups") || "[]")); } catch {} };
+    document.addEventListener("visibilitychange", refresh);
+    return () => document.removeEventListener("visibilitychange", refresh);
+  }, []);
+  const downloadAutoBackup = (entry: { date: string; data: any }) => {
+    const blob = new Blob([JSON.stringify(entry.data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `grand-livre-sauvegarde-auto-${entry.date}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const download = () => {
     const data = getSnapshot();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -9075,6 +10374,33 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
         <button onClick={download} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
           <Download size={15} /> Télécharger une sauvegarde complète (.json)
         </button>
+
+        <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${COLOR.hairline}` }}>
+          <div style={{ fontSize: 12.5, color: COLOR.ink, fontWeight: 600, marginBottom: 3 }}>Sauvegardes automatiques (3 dernières)</div>
+          <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 12, lineHeight: 1.5 }}>
+            Capturées automatiquement dans ce navigateur dès l'ouverture de l'app un nouveau jour — la plus récente remplace la plus ancienne au-delà de 3. Pas besoin de cliquer sur Télécharger : tu peux venir récupérer l'une d'elles ici à tout moment.
+          </div>
+          {autoBackups.length === 0 ? (
+            <div style={{ fontSize: 12, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune sauvegarde automatique pour l'instant — la première sera prise à ta prochaine ouverture de l'app.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {autoBackups.map((entry) => (
+                <div key={entry.date} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "9px 12px", background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <CalendarRange size={14} color={COLOR.slateBlueSoft} />
+                    <div>
+                      <div style={{ fontSize: 12.5, color: COLOR.ink }}>{dateLabelFull(entry.date)}</div>
+                      <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{entry.data?.transactions?.length ?? 0} transactions · sauvegardé à {new Date(entry.savedAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</div>
+                    </div>
+                  </div>
+                  <button onClick={() => downloadAutoBackup(entry)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "6px 12px", fontSize: 11.5, cursor: "pointer", flexShrink: 0 }}>
+                    <Download size={12} /> Télécharger
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </Panel>
       <Panel title="Restauration" subtitle="Remplace toutes les données actuelles par celles du fichier importé">
         <label style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
@@ -9130,6 +10456,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
   rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void; accounts: Account[];
 }) {
+  const isMobile = useIsMobile();
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions, accounts));
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -9158,6 +10485,26 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   useEffect(() => { setPage(0); }, [filtered]);
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = sorted.slice(safePage * pageSize, safePage * pageSize + pageSize);
+
+  // Regroupement par jour pour les bandeaux "rupture" (date + sous-total), à la manière
+  // d'un journal comptable classique / grille WinDev — demande explicite de l'utilisateur
+  // (13/08/2026). Regroupe seulement les lignes déjà présentes sur la page affichée : un
+  // jour dont les écritures sont réparties sur deux pages aura un sous-total par page.
+  const pageGroups = useMemo(() => {
+    const groups: { date: string; rows: typeof pageRows }[] = [];
+    pageRows.forEach((t) => {
+      const last = groups[groups.length - 1];
+      if (last && last.date === t.date) last.rows.push(t);
+      else groups.push({ date: t.date, rows: [t] });
+    });
+    return groups;
+  }, [pageRows]);
+  const dayTotals = (rows: typeof pageRows) => {
+    const rev = rows.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+    const dep = rows.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+    return { rev, dep, solde: rev - dep };
+  };
+
 
   const toggleSelect = (id: string) => setSelected((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const allPageSelected = pageRows.length > 0 && pageRows.every((t) => selected.has(t.id));
@@ -9316,10 +10663,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
         {selected.size > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: "rgba(201,162,39,0.1)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, color: COLOR.goldSoft }}>{selected.size} sélectionnée(s)</span>
-            <select style={{ ...inputStyle, width: 170 }} value={bulkCategory} onChange={(e) => setBulkCategory(e.target.value)}>
-              <option value="">Changer la catégorie…</option>
-              {allCategories.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <GroupedSingleSelect label="" allLabel="Changer la catégorie…" value={bulkCategory} onChange={setBulkCategory} options={groupedCategoryOptions(transactions)} />
             <button onClick={bulkChangeCategory} disabled={!bulkCategory} style={{ background: bulkCategory ? COLOR.emerald : COLOR.hairline, border: "none", borderRadius: 6, color: bulkCategory ? COLOR.bg : COLOR.inkMuted, padding: "6px 12px", fontSize: 11.5, cursor: bulkCategory ? "pointer" : "default" }}>Appliquer</button>
             <select style={{ ...inputStyle, width: 210 }} value={bulkOnBehalfOf} onChange={(e) => setBulkOnBehalfOf(e.target.value)} title="Marque ces dépenses comme réellement destinées à cet autre compte">
               <option value="">Marquer avance pour…</option>
@@ -9332,57 +10676,146 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
           </div>
         )}
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead><tr>
-              <th style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+        {!isMobile && (
+        <div className="gl-scroll" style={{ overflowX: "auto", border: `1px solid ${COLOR.hairline}`, borderRadius: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+            <thead><tr style={{ background: "linear-gradient(180deg, #1c2a22, #182119)" }}>
+              <th style={{ padding: "10px 10px", borderBottom: `2px solid ${COLOR.gold}`, borderRight: `1px solid ${COLOR.hairline}` }}>
                 <button onClick={toggleSelectAllPage} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}>
                   {allPageSelected ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
                 </button>
               </th>
-              {["Date", "Catégorie", "Type", "Groupe", "Montant", ""].map((h, i) => (
-              <th key={h} style={{ textAlign: i === 4 ? "right" : "left", padding: "8px 10px", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: `1px solid ${COLOR.hairline}` }}>{h}</th>
+              {["Heure", "Catégorie", "Type", "Groupe", "Montant", ""].map((h, i) => (
+              <th key={h} style={{ textAlign: i === 4 ? "right" : "left", padding: "10px 10px", fontSize: 10.5, color: COLOR.goldSoft, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, borderBottom: `2px solid ${COLOR.gold}`, borderRight: i < 5 ? `1px solid ${COLOR.hairline}` : "none" }}>{h}</th>
             ))}</tr></thead>
             <tbody>
-              {pageRows.map((t) => {
+              {pageGroups.map((g) => {
+                const dt = dayTotals(g.rows);
                 return (
-                  <tr key={t.id}>
-                    <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
-                      <button onClick={() => toggleSelect(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}>
-                        {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
-                      </button>
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>
-                      {dateLabelFull(t.date)}{t.time && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.time}</div>}
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, maxWidth: 260 }}>
-                      {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
-                      {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
-                      {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</div>}
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type}</td>
-                    <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
-                      {t.group}
-                      {t.account ? (
-                        <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
-                      ) : (
-                        <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
-                      )}
-                      {t.onBehalfOf && (
-                        <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }} title="Avance entre comptes">
-                          <ArrowRight size={9} /> pour {t.onBehalfOf}
+                  <React.Fragment key={g.date}>
+                    <tr>
+                      <td colSpan={7} style={{ padding: "8px 12px", background: "rgba(201,162,39,0.09)", borderTop: `1px solid ${COLOR.hairline}`, borderBottom: `1px solid ${COLOR.hairline}`, borderLeft: `3px solid ${COLOR.gold}` }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 13.5, color: COLOR.goldSoft, fontWeight: 600 }}>{weekdayLabel(g.date)} {dateLabelFull(g.date)}</span>
+                          <span style={{ fontSize: 10.5, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "1px 9px" }}>{g.rows.length} écriture{g.rows.length > 1 ? "s" : ""}</span>
                         </div>
-                      )}
-                    </td>
-                    <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
-                    <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
-                  </tr>
+                      </td>
+                    </tr>
+                    {g.rows.map((t, ri) => (
+                      <tr key={t.id} className="gl-journal-row" style={{ background: ri % 2 === 1 ? "rgba(255,255,255,0.015)" : "transparent" }}>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}` }}>
+                          <button onClick={() => toggleSelect(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex" }}>
+                            {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
+                          </button>
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>
+                          {t.time || "—"}
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 12.5, borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, maxWidth: 260 }}>
+                          {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted }}> · {t.subcategory}</span>}
+                          {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>{t.payee}</div>}
+                          {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>« {t.note} »</div>}
+                        </td>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}` }}>
+                          <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 9px", borderRadius: 20, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, background: t.type === "Revenu" ? "rgba(63,156,122,0.12)" : "rgba(193,84,63,0.12)" }}>{t.type}</span>
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 11.5, borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, color: groupColor[t.group] }}>
+                          {t.group}
+                          {t.account ? (
+                            <div style={{ color: COLOR.inkMuted, fontSize: 10.5, marginTop: 2 }}>{t.account}</div>
+                          ) : (
+                            <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                          )}
+                          {t.onBehalfOf && (
+                            <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }} title="Avance entre comptes">
+                              <ArrowRight size={9} /> pour {t.onBehalfOf}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type === "Revenu" ? "+" : "−"}{fmt(t.amount)}</td>
+                        <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td colSpan={7} style={{ padding: "7px 12px", background: "rgba(91,126,166,0.09)", borderBottom: `2px solid ${COLOR.slateBlue}`, borderLeft: `3px solid ${COLOR.slateBlue}` }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 18, flexWrap: "wrap", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
+                          <span style={{ color: COLOR.slateBlueSoft, fontFamily: "'Inter', sans-serif", fontWeight: 600, marginRight: "auto" }}>Sous-total du jour</span>
+                          <span style={{ color: COLOR.inkMuted }}>Revenus <b style={{ color: COLOR.emeraldSoft }}>{fmt(dt.rev)}</b></span>
+                          <span style={{ color: COLOR.inkMuted }}>Dépenses <b style={{ color: COLOR.claySoft }}>{fmt(dt.dep)}</b></span>
+                          <span style={{ color: COLOR.inkMuted }}>Solde <b style={{ color: dt.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(dt.solde)}</b></span>
+                        </div>
+                      </td>
+                    </tr>
+                  </React.Fragment>
                 );
               })}
               {!pageRows.length && <tr><td colSpan={7}><EmptyState /></td></tr>}
             </tbody>
           </table>
         </div>
+        )}
+
+        {isMobile && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {pageGroups.map((g) => {
+              const dt = dayTotals(g.rows);
+              return (
+                <div key={g.date} style={{ border: `1px solid ${COLOR.hairline}`, borderRadius: 12, overflow: "hidden" }}>
+                  <div style={{ padding: "10px 12px", background: "rgba(201,162,39,0.09)", borderLeft: `3px solid ${COLOR.gold}`, borderBottom: `1px solid ${COLOR.hairline}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontFamily: "'Fraunces', serif", fontSize: 13, color: COLOR.goldSoft, fontWeight: 600 }}>{weekdayLabel(g.date)} {dateLabelFull(g.date)}</span>
+                    <span style={{ fontSize: 10, color: COLOR.inkMuted, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "1px 8px", flexShrink: 0 }}>{g.rows.length} écriture{g.rows.length > 1 ? "s" : ""}</span>
+                  </div>
+                  <div>
+                    {g.rows.map((t, ri) => (
+                      <div key={t.id} className="gl-journal-row" style={{ padding: "10px 12px", background: ri % 2 === 1 ? "rgba(255,255,255,0.015)" : "transparent", borderBottom: `1px solid ${COLOR.hairline}`, display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <button onClick={() => toggleSelect(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", display: "flex", marginTop: 2, flexShrink: 0 }}>
+                          {selected.has(t.id) ? <CheckSquare size={14} color={COLOR.goldSoft} /> : <Square size={14} color={COLOR.inkMuted} />}
+                        </button>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: COLOR.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {t.category}{t.subcategory && <span style={{ color: COLOR.inkMuted, fontWeight: 400 }}> · {t.subcategory}</span>}
+                            </span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, flexShrink: 0 }}>
+                              {t.type === "Revenu" ? "+" : "−"}{fmt(t.amount)}
+                            </span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                            <span style={{ fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 20, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft, background: t.type === "Revenu" ? "rgba(63,156,122,0.12)" : "rgba(193,84,63,0.12)" }}>{t.type}</span>
+                            <span style={{ fontSize: 11, color: groupColor[t.group] }}>{t.group}</span>
+                            {t.time && <span style={{ fontSize: 10.5, color: COLOR.inkMuted, fontFamily: "'IBM Plex Mono', monospace" }}>· {t.time}</span>}
+                            {t.account && <span style={{ fontSize: 10.5, color: COLOR.inkMuted }}>· {t.account}</span>}
+                          </div>
+                          {!t.account && (
+                            <div style={{ color: COLOR.claySoft, fontSize: 10.5, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={9} /> sans compte</div>
+                          )}
+                          {t.onBehalfOf && (
+                            <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><ArrowRight size={9} /> pour {t.onBehalfOf}</div>
+                          )}
+                          {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginTop: 3 }}>{t.payee}</div>}
+                          {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", marginTop: 2 }}>« {t.note} »</div>}
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+                          <button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
+                          <button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ padding: "8px 12px", background: "rgba(91,126,166,0.09)", borderTop: `2px solid ${COLOR.slateBlue}` }}>
+                    <div style={{ fontSize: 10.5, color: COLOR.slateBlueSoft, fontWeight: 600, marginBottom: 3 }}>Sous-total du jour</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+                      <span style={{ color: COLOR.inkMuted }}>Revenus <b style={{ color: COLOR.emeraldSoft }}>{fmt(dt.rev)}</b></span>
+                      <span style={{ color: COLOR.inkMuted }}>Dépenses <b style={{ color: COLOR.claySoft }}>{fmt(dt.dep)}</b></span>
+                      <span style={{ color: COLOR.inkMuted }}>Solde <b style={{ color: dt.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(dt.solde)}</b></span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {!pageRows.length && <EmptyState />}
+          </div>
+        )}
         {pageCount > 1 && (
           <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 16 }}>
             <button disabled={safePage === 0} onClick={() => setPage((p) => p - 1)} style={pagerBtn(safePage === 0)}>Précédent</button>
@@ -9637,11 +11070,14 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
   const exportPDF = async () => {
     setPdfState("loading");
     try {
-      const [{ default: jsPDF }, autoTableModule] = await Promise.all([
+      const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
-      const autoTable = (autoTableModule as any).default || autoTableModule;
+      // jspdf@2.5.x expose le vrai constructeur sur l'export NOMMÉ "jsPDF", pas sur
+      // "default" (qui résout vers un objet inutilisable selon le mode d'interop
+      // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
 
@@ -9712,7 +11148,7 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       });
       pushSubtotal();
 
-      autoTable(doc, {
+      doc.autoTable({
         startY: chartBottom,
         head: [["Date", "Heure", "Catégorie", "Type", "Montant (FCFA)"]],
         body: rows,
@@ -9883,6 +11319,20 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const weekTotals = sumFor((t) => t.date >= weekAgo && t.date <= today);
   const monthTotals = sumFor((t) => dateToMonthKey(t.date) === currentMonthKey);
 
+  // Répartition des dépenses par nature (Nécessaire/Productif/Non-productif) pour une
+  // fenêtre donnée — sur demande explicite de l'utilisateur (11/08/2026), pour les
+  // cartes "Aujourd'hui" et "Mois en cours — dépenses".
+  const groupBreakdown = (pred: (t: any) => boolean) => {
+    const dep = withGroup.filter((t) => t.type === "Dépense" && pred(t));
+    const total = dep.reduce((a, t) => a + t.amount, 0) || 1;
+    const byGroup: Record<string, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
+    dep.forEach((t) => { byGroup[t.group] = (byGroup[t.group] || 0) + t.amount; });
+    return (["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const)
+      .map((g) => ({ group: g, value: byGroup[g], pct: (byGroup[g] / total) * 100 }))
+      .filter((r) => r.value > 0);
+  };
+  const [kpiDetail, setKpiDetail] = useState<{ mode: "today" | "month"; anchor: string } | null>(null);
+
   // Comparaisons "vs même période le mois dernier" — même logique que la carte déjà
   // existante dans le Conseiller quotidien ("Mieux que le mois dernier à la même date"),
   // reprise ici pour chacun des 5 indicateurs, sur demande explicite de l'utilisateur.
@@ -9896,6 +11346,101 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const todayLastMonthTotals = sumFor((t) => t.date === sameDayLastMonth);
   const weekLastMonthTotals = sumFor((t) => t.date >= weekStartDayLastMonth && t.date <= sameDayLastMonth);
   const monthLastMonthTotals = sumFor((t) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum);
+
+  // Construit la fiche de détail avec, pour chaque nature (Nécessaire/Productif/
+  // Non-productif), l'écart entre la période actuelle et la période comparative — pour
+  // répondre à la vraie question posée par l'utilisateur (11/08/2026) : une progression
+  // ou une régression du total est-elle fondée (portée par le Non-productif, qu'on
+  // maîtrise) ou inquiétante (si elle vient d'une baisse du Nécessaire, ce qui peut
+  // vouloir dire qu'on se prive de l'essentiel plutôt que de vraiment progresser) ?
+  // "anchor" est navigable (jour ou mois précédent/suivant) — corrigé le 12/08/2026 :
+  // la fiche était figée sur "aujourd'hui" et devenait invisible dès que le jour passait.
+  const buildKpiGroupDetail = (mode: "today" | "month", anchor: string) => {
+    const anchorMonthKey = mode === "today" ? dateToMonthKey(anchor) : anchor;
+    const anchorDayNum = mode === "today" ? new Date(anchor + "T00:00:00").getDate() : dayNum;
+    const prevAnchorMonthKey = prevMonthKey(anchorMonthKey);
+    const anchorSameDayLastMonth = mode === "today" ? mkDate(prevAnchorMonthKey, clampDay(prevAnchorMonthKey, anchorDayNum)) : "";
+
+    const curPred = mode === "today" ? (t: any) => t.date === anchor : (t: any) => dateToMonthKey(t.date) === anchorMonthKey;
+    const prevPred = mode === "today"
+      ? (t: any) => t.date === anchorSameDayLastMonth
+      : (t: any) => dateToMonthKey(t.date) === prevAnchorMonthKey && new Date(t.date + "T00:00:00").getDate() <= anchorDayNum;
+    const curRows = groupBreakdown(curPred);
+    const prevRows = groupBreakdown(prevPred);
+    const curTotal = curRows.reduce((a, r) => a + r.value, 0);
+    const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
+    const curLabel = mode === "today" ? dateLabelFull(anchor) : monthLabel(anchorMonthKey);
+    const prevLabel = `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
+    // Distingue la vraie période en cours (aujourd'hui / mois civil actuel) d'une période
+    // passée qu'on consulte via les flèches ◀▶ — demande explicite de l'utilisateur
+    // (13/08/2026) : le libellé de colonne "Ce mois" ne changeait jamais en naviguant,
+    // ce qui rendait impossible de savoir si on regardait bien le mois actuel ou un
+    // mois révolu. Sur une période passée, la colonne affiche maintenant le nom du mois
+    // lui-même (ex. "juil 26") au lieu du générique "Ce mois", et perd le surlignage doré
+    // réservé à la période réellement en cours.
+    const isCurrentPeriod = mode === "today" ? anchor === today : anchorMonthKey === currentMonthKey;
+    // Intitulés courts pour les en-têtes du tableau — la version complète reste dans la
+    // ligne "formula" juste au-dessus, pour ne pas forcer un défilement horizontal sur
+    // mobile avec des en-têtes trop longs, sur demande explicite de l'utilisateur (11/08/2026).
+    const curLabelShort = isCurrentPeriod
+      ? (mode === "today" ? "Ce jour" : "Ce mois")
+      : (mode === "today" ? dateLabelShort(anchor) : monthLabel(anchorMonthKey));
+    const prevLabelShort = "Mois dernier";
+
+    const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
+    const valueOf = (rows: typeof curRows, g: string) => rows.find((r) => r.group === g)?.value || 0;
+    const deltas = groups.map((g) => {
+      const cur = valueOf(curRows, g), prev = valueOf(prevRows, g), delta = cur - prev;
+      const pct = prev > 0 ? (delta / prev) * 100 : (cur > 0 ? 100 : 0);
+      return { group: g, cur, prev, delta, pct };
+    }).filter((d) => d.cur > 0 || d.prev > 0);
+
+    const totalDelta = curTotal - prevTotal;
+    // Repère la nature qui explique le plus l'évolution du total (en valeur absolue).
+    const biggestMover = [...deltas].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))[0];
+    let verdict = "";
+    if (Math.abs(totalDelta) < 1) {
+      verdict = "Total quasi stable sur les deux périodes — rien de notable à signaler.";
+    } else if (totalDelta < 0) {
+      // Baisse des dépenses = a priori une bonne nouvelle, mais tout dépend d'où elle vient.
+      if (biggestMover?.group === "Non-productif") verdict = `Baisse fondée : elle est portée principalement par le "Non-productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins), le poste le plus facile à maîtriser sans rien sacrifier d'essentiel.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `À surveiller : cette baisse vient surtout du "Nécessaire" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — vérifie qu'il ne s'agit pas d'une privation plutôt que d'une vraie économie.`;
+      else if (biggestMover?.group === "Productif") verdict = `Baisse portée par le "Productif" (${fmt(Math.abs(biggestMover.delta))} FCFA de moins) — à vérifier que ce n'est pas un investissement ou un remboursement simplement décalé dans le temps.`;
+      else verdict = "Baisse du total, sans nature clairement dominante.";
+    } else {
+      // Hausse des dépenses = a priori à surveiller, mais peut être un investissement sain.
+      if (biggestMover?.group === "Productif") verdict = `Hausse plutôt saine : elle est portée principalement par le "Productif" (${fmt(biggestMover.delta)} FCFA de plus), donc probablement de l'investissement plutôt que du gaspillage.`;
+      else if (biggestMover?.group === "Non-productif") verdict = `À surveiller : cette hausse vient surtout du "Non-productif" (${fmt(biggestMover.delta)} FCFA de plus) — c'est le premier poste à réduire si besoin.`;
+      else if (biggestMover?.group === "Nécessaire") verdict = `Hausse portée par le "Nécessaire" (${fmt(biggestMover.delta)} FCFA de plus) — vérifie si c'est ponctuel (ex: une charge exceptionnelle) ou un vrai changement de rythme.`;
+      else verdict = "Hausse du total, sans nature clairement dominante.";
+    }
+
+    const totalPct = prevTotal > 0 ? (totalDelta / prevTotal) * 100 : (curTotal > 0 ? 100 : 0);
+
+    return {
+      title: `${curLabel} — dépenses par nature`,
+      headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
+      formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
+      badge: { text: isCurrentPeriod ? (mode === "today" ? "Aujourd'hui" : "Mois en cours") : "Période passée", tone: (isCurrentPeriod ? "live" : "past") as "live" | "past" },
+      blocks: [
+        {
+          kind: "table" as const,
+          columns: ["Nature", curLabelShort, prevLabelShort, "Écart", "Évolution"],
+          highlightCol: isCurrentPeriod ? 1 : undefined,
+          rows: deltas.map((d) => [d.group, fmt(d.cur), fmt(d.prev), `${d.delta >= 0 ? "+" : ""}${fmt(d.delta)}`, `${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(0)}%`]),
+          // Vert quand les dépenses de cette nature ont baissé, rouge quand elles ont augmenté —
+          // la vraie lecture (bonne ou mauvaise nouvelle selon la nature) reste dans le verdict ci-dessous.
+          cellColors: deltas.map((d) => [undefined, undefined, undefined, undefined, Math.abs(d.delta) < 1 ? COLOR.inkMuted : d.delta < 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
+          // Ligne de totaux (toutes natures confondues) en bas du tableau, pour lire le
+          // solde global sans avoir à additionner les lignes soi-même — demande explicite
+          // de l'utilisateur (12/08/2026).
+          footerRow: ["Total", fmt(curTotal), fmt(prevTotal), `${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)}`, `${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(0)}%`],
+          footerColors: [undefined, undefined, undefined, undefined, Math.abs(totalDelta) < 1 ? COLOR.inkMuted : totalDelta < 0 ? COLOR.emeraldSoft : COLOR.claySoft],
+        },
+        { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
+      ],
+    };
+  };
 
   const pctDelta = (cur: number, prev: number) => (prev !== 0 ? ((cur - prev) / Math.abs(prev)) * 100 : null);
   const vsHint = (cur: number, prev: number, suffix: string) => {
@@ -9948,12 +11493,23 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} />
+        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetail({ mode: "today", anchor: today })} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
         <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.solde, monthLastMonthTotals.solde), "up")} />
-        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} />
+        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
         <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
+
+      {kpiDetail && (() => {
+        const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor);
+        const goPrev = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, -1) : prevMonthKey(kpiDetail.anchor) });
+        const goNext = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, 1) : nextMonthKey(kpiDetail.anchor) });
+        const atToday = kpiDetail.mode === "today" ? kpiDetail.anchor >= today : kpiDetail.anchor >= currentMonthKey;
+        return (
+          <CalcDetailSheet open={!!kpiDetail} onClose={() => setKpiDetail(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} badge={d.badge}
+            onPrev={goPrev} onNext={atToday ? undefined : goNext} />
+        );
+      })()}
 
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
         {(() => {
@@ -10190,16 +11746,31 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
 
+  // Verrou de scroll du fond — 12/08/2026 : `overflow: hidden` sur html/body ne suffit
+  // pas sur iOS Safari (le fond continue de scroller sous la modale au doigt). La
+  // technique fiable sur iOS est de figer le body en `position: fixed` à sa position de
+  // scroll actuelle, puis de la restaurer exactement à la fermeture.
   useEffect(() => {
     if (open) {
-      setTime(nowTime());
-      const prevHtmlOverflow = document.documentElement.style.overflow;
+      const scrollY = window.scrollY;
+      const prevBodyPosition = document.body.style.position;
+      const prevBodyTop = document.body.style.top;
+      const prevBodyWidth = document.body.style.width;
       const prevBodyOverflow = document.body.style.overflow;
-      document.documentElement.style.overflow = "hidden";
+      const prevHtmlOverflow = document.documentElement.style.overflow;
+      document.body.style.position = "fixed";
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.width = "100%";
       document.body.style.overflow = "hidden";
+      document.documentElement.style.overflow = "hidden";
+      setTime(nowTime());
       return () => {
-        document.documentElement.style.overflow = prevHtmlOverflow;
+        document.body.style.position = prevBodyPosition;
+        document.body.style.top = prevBodyTop;
+        document.body.style.width = prevBodyWidth;
         document.body.style.overflow = prevBodyOverflow;
+        document.documentElement.style.overflow = prevHtmlOverflow;
+        window.scrollTo(0, scrollY);
       };
     }
   }, [open]);
@@ -10245,15 +11816,20 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
         <div style={{
           position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg,
           display: "flex", justifyContent: "center", alignItems: isMobile ? "stretch" : "center",
+          height: isMobile ? "100dvh" : "100%",
         }}>
           <div style={{
-            width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100%" : "min(720px, 92vh)",
+            width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100dvh" : "min(720px, 92vh)",
             display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
             borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`,
             overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
-            {/* Header : fermer + sélecteur de type */}
-            <div className="gl-safe-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 20px 8px 20px" }}>
+            {/* Header : fermer + sélecteur de type — sticky pour rester joignable même en
+                plein défilement du formulaire. paddingTop géré en inline (pas via la classe
+                gl-safe-top) car un style inline React écrase toujours une classe CSS : c'est
+                justement ce qui rendait le bouton fermer inatteignable sous l'encoche/la
+                Dynamic Island sur iPhone (13/08/2026). */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingLeft: 20, paddingRight: 20, paddingBottom: 8, paddingTop: "max(20px, env(safe-area-inset-top))", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
               <button onClick={() => setOpen(false)} style={{
                 width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
                 color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
@@ -10298,7 +11874,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                 fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
               }}>FCFA</div>
               <input
-                type="number" inputMode="numeric" value={amount} placeholder="0" autoFocus
+                type="number" inputMode="numeric" value={amount} placeholder="0" autoFocus={!isMobile}
                 onChange={(e) => setAmount(e.target.value === "" ? "" : Number(e.target.value))}
                 onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                 style={{
@@ -10377,7 +11953,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "valeurnette" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "valeurnette" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde" | "assistant";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -10402,6 +11978,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "budgets", label: "Budgets par catégorie", icon: ClipboardList },
   ]},
   { section: "Outils", items: [
+    { id: "assistant", label: "Assistant IA", icon: MessageCircle },
     { id: "simulateur", label: "Simulateur", icon: SlidersHorizontal },
     { id: "objectif", label: "Objectifs & Projection", icon: Gauge },
     { id: "business", label: "Business / Personnel", icon: Briefcase },
@@ -10422,21 +11999,69 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
 ];
 
 export default function GrandLivre() {
-  const [transactions, setTransactions, txLoaded] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions);
-  const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups);
-  const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope);
-  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities);
-  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity);
-  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {});
-  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0);
-  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides);
-  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true);
+  // Contrôle le blocage complet des sauvegardes tant qu'un choix explicite n'a pas été
+  // fait après un démarrage à vide (voir plus bas : écran de blocage). Tant que
+  // holdSave=true, RIEN n'est écrit dans le localStorage, pour ne jamais transformer
+  // silencieusement les données de secours en "vraies" données.
+  const [dataGateResolved, setDataGateResolved] = useState(false);
+  const [transactions, setTransactions, txLoaded, txStartedEmpty] = usePersistentState<Transaction[]>("gl-transactions", seedTransactions, dataGateResolved);
+  // Corrigé le 11/08/2026 : ce verrou (voulu pour bloquer la sauvegarde tant que l'écran
+  // de choix "aucune donnée trouvée" n'est pas résolu) bloquait aussi, par effet de bord,
+  // toute clé fraîchement introduite dans le code (ex: "gl-deleted-tx-ids", qui n'existait
+  // jamais avant) sur un appareil qui a pourtant déjà de vraies données ailleurs. Une
+  // suppression de transaction n'était donc jamais vraiment mémorisée d'une session à
+  // l'autre, et revenait à chaque rechargement de page. Le verrou ne doit s'appliquer que
+  // si CE périphérique démarre vraiment à vide (txStartedEmpty) — jamais pour une clé
+  // simplement nouvelle sur un appareil qui a déjà d'autres données établies.
+  const canSaveGated = !txStartedEmpty || dataGateResolved;
+  // Corrigé le 11/08/2026 : une transaction supprimée revenait toute seule après une
+  // synchronisation — cause identifiée avec certitude : la fusion (mergeById) ne fait
+  // qu'AJOUTER ce qui manque d'un côté, elle ne peut pas distinguer "l'autre appareil a
+  // ajouté ça, je ne le connais pas encore" de "j'ai supprimé ça volontairement, l'autre
+  // appareil n'est pas encore au courant". Sans mémoire des suppressions, toute
+  // transaction supprimée localement mais encore présente côté serveur revenait à la
+  // prochaine synchronisation. On garde donc la liste des identifiants supprimés
+  // (jamais oubliée), qui a toujours le dernier mot sur une fusion.
+  const [deletedTransactionIds, setDeletedTransactionIds] = usePersistentState<Record<string, string>>("gl-deleted-tx-ids", {}, canSaveGated);
+  const setTransactionsTracked = (next: Transaction[]) => {
+    const nextIds = new Set(next.map((t) => t.id));
+    const removedIds = transactions.filter((t) => !nextIds.has(t.id)).map((t) => t.id);
+    if (removedIds.length) {
+      const now = new Date().toISOString();
+      setDeletedTransactionIds({ ...deletedTransactionIds, ...Object.fromEntries(removedIds.map((id) => [id, now])) });
+    }
+    // Pose automatiquement un horodatage sur toute transaction NOUVELLE ou dont le
+    // contenu a réellement changé par rapport à ce qu'on connaissait avant — peu importe
+    // le formulaire ou le bouton utilisé pour la modifier. C'est cet horodatage que la
+    // fusion de synchronisation utilise pour départager deux versions d'une même
+    // transaction (voir mergeById) — poser l'horodatage ici, une seule fois, garantit
+    // que ça marche pour TOUS les points de saisie sans avoir à y penser à chaque fois.
+    const now = new Date().toISOString();
+    const prevById = new Map(transactions.map((t) => [t.id, t]));
+    const stamped = next.map((t) => {
+      const prev = prevById.get(t.id);
+      if (!prev) return { ...t, updatedAt: now };
+      const { updatedAt: _p, ...prevRest } = prev;
+      const { updatedAt: _n, ...tRest } = t;
+      if (JSON.stringify(prevRest) !== JSON.stringify(tRest)) return { ...t, updatedAt: now };
+      return t;
+    });
+    setTransactions(stamped);
+  };
+  const [categoryGroups, setCategoryGroups, groupsLoaded] = usePersistentState<Record<string, Group>>("gl-category-groups", defaultCategoryGroups, canSaveGated);
+  const [categoryScope, setCategoryScope, scopeLoaded] = usePersistentState<Record<string, Scope>>("gl-category-scope", defaultCategoryScope, canSaveGated);
+  const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities, canSaveGated);
+  const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity, canSaveGated);
+  const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {}, canSaveGated);
+  const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0, canSaveGated);
+  const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, canSaveGated);
+  const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, canSaveGated);
   const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
   const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
   const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
   const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
-  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories);
-  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories);
+  const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories, canSaveGated);
+  const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, canSaveGated);
   CUSTOM_DEP_SUBCATS = customDepSubcategories;
   CUSTOM_REV_SUBCATS = customRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
@@ -10481,13 +12106,13 @@ export default function GrandLivre() {
     });
     setCategoryScope(next);
   };
-  const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules);
-  const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans);
-  const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000);
-  const [accounts, setAccounts, accountsLoaded] = usePersistentState<Account[]>("gl-accounts", seedAccounts);
-  const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets);
-  const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals);
-  const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring);
+  const [rules, setRules, rulesLoaded] = usePersistentState<CategorizationRule[]>("gl-rules", defaultRules, canSaveGated);
+  const [loans, setLoans, loansLoaded] = usePersistentState<Loan[]>("gl-loans", seedLoans, canSaveGated);
+  const [envelopeCap, setEnvelopeCap, capLoaded] = usePersistentState<number>("gl-envelope-cap", 600000, canSaveGated);
+  const [accounts, setAccounts, accountsLoaded] = usePersistentState<Account[]>("gl-accounts", seedAccounts, canSaveGated);
+  const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets, canSaveGated);
+  const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals, canSaveGated);
+  const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring, canSaveGated);
   const [tab, setTab] = useState<Tab>("saisie");
   // Navigation contextuelle entre pages : navigateTo("categoryoverview", { category: "Shopping" })
   // change d'onglet ET transmet un contexte que la page de destination applique à son
@@ -10531,8 +12156,6 @@ export default function GrandLivre() {
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const skipNextPush = useRef(false);
-  const pushTimer = useRef<any>(null);
-
   const allMonths = useMemo(() => {
     const s = new Set(transactions.filter((t) => t).map((t) => dateToMonthKey(t.date)));
     return Array.from(s).sort((a, b) => monthSortKey(a) - monthSortKey(b));
@@ -10542,6 +12165,7 @@ export default function GrandLivre() {
     const s = new Set(transactions.map((t) => t.category));
     return Array.from(s).sort();
   }, [transactions]);
+  const groupedCatOptions = useMemo(() => groupedCategoryOptions(transactions), [transactions]);
 
   const defaultFilters: Filters = {
     from: allMonths[0] || "2024_6", to: allMonths[allMonths.length - 1] || "2026_8",
@@ -10601,55 +12225,288 @@ export default function GrandLivre() {
 
   const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded;
 
-  // Tire l'état distant et hydrate les états locaux. Réutilisé au chargement,
-  // sur demande (forcer la sync) et à chaque notification temps réel.
-  const pullAndHydrate = React.useCallback(async (code: string) => {
-    setSyncStatus("syncing");
-    const remote = await fetchRemoteState(code);
-    if (remote) {
-      skipNextPush.current = true;
-      if (remote.transactions) setTransactions(remote.transactions);
-      if (remote.categoryGroups) setCategoryGroups(remote.categoryGroups);
-      if (remote.categoryScope) setCategoryScope(remote.categoryScope);
-      if (remote.rules) setRules(remote.rules);
-      if (remote.loans) setLoans(remote.loans);
-      if (typeof remote.envelopeCap === "number") setEnvelopeCap(remote.envelopeCap);
-      if (remote.accounts) setAccounts(remote.accounts);
-      if (remote.budgets) setBudgets(remote.budgets);
-      if (remote.goals) setGoals(remote.goals);
-      if (remote.recurring) setRecurring(remote.recurring);
-      if (remote.activities) setActivities(remote.activities);
-      if (remote.categoryActivity) setCategoryActivity(remote.categoryActivity);
-      if (remote.activityCapital) setActivityCapital(remote.activityCapital);
-      if (typeof remote.monthlyObjective === "number") setMonthlyObjective(remote.monthlyObjective);
-      if (remote.chargeOverrides) setChargeOverrides(remote.chargeOverrides);
-      if (typeof remote.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(remote.includeGrundfosVoiture);
-      if (remote.customDepSubcategories) setCustomDepSubcategories(remote.customDepSubcategories);
-      if (remote.customRevSubcategories) setCustomRevSubcategories(remote.customRevSubcategories);
-      setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+  // ============================================================
+  // MOTEUR DE SYNCHRONISATION UNIFIÉ — reconstruit le 11/08/2026
+  // ============================================================
+  // Avant : 6 mécanismes séparés (chargement, édition, reconnexion réseau, retour au
+  // premier plan, intervalle, notification temps réel) coordonnés entre eux par un
+  // drapeau partagé fragile ("skipNextPush") — d'où des incohérences observées en
+  // pratique (suppressions qui reviennent, statut qui s'affole, appareils qui ne se
+  // rejoignent pas). Reconstruit en un seul moteur (runSync), appelé par tous ces
+  // déclencheurs, avec deux garanties strictes :
+  //   1. Jamais deux synchronisations en même temps (une file d'attente d'une place).
+  //   2. Toujours les données les plus fraîches, lues via une référence mise à jour à
+  //      CHAQUE rendu — plus aucun risque de "fermeture périmée" (stale closure), quel
+  //      que soit le déclencheur ou son ancienneté.
+
+  // Référence toujours à jour de tout l'état synchronisé — mise à jour à chaque rendu,
+  // jamais figée dans la fermeture d'un effet créé plus tôt.
+  const syncedRef = useRef({
+    transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+    activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds,
+  });
+  useEffect(() => {
+    syncedRef.current = {
+      transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+      activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds,
+    };
+  });
+  const syncCodeRef = useRef(syncCode);
+  useEffect(() => { syncCodeRef.current = syncCode; }, [syncCode]);
+
+  // Sauvegardes automatiques tournantes (max 3, la plus récente écrase la plus
+  // ancienne) — remplace le besoin de cliquer "Télécharger" chaque jour, sur demande
+  // explicite de l'utilisateur (13/08/2026). Important : un navigateur ne peut pas
+  // s'exécuter à minuit pile si l'app n'est pas ouverte — ce n'est donc PAS un vrai
+  // "tous les jours à 00:00", mais une capture dès l'ouverture/le retour au premier
+  // plan sur un nouveau jour calendaire, équivalent en pratique pour une app ouverte au
+  // moins une fois par jour. Vit dans localStorage comme le reste des données : ni iOS
+  // Safari ni la plupart des navigateurs ne permettent d'écrire des fichiers sur le
+  // disque du téléphone sans interaction manuelle à chaque fois.
+  const runAutoBackupIfNeeded = React.useCallback(() => {
+    try {
+      const todayKey = todayISO();
+      const snap = syncedRef.current;
+      if (!snap.transactions || !snap.transactions.length) return; // rien à sauvegarder tant que le DataRecoveryGate n'a pas résolu
+      let list: { date: string; savedAt: string; data: any }[] = [];
+      try { list = JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { list = []; }
+      const existingToday = list.find((b) => b.date === todayKey);
+      // Ré-écrit l'entrée du jour tant que le nombre de transactions vu diffère de la
+      // dernière sauvegarde du jour (nouvelles écritures locales OU arrivées par synchro
+      // depuis un autre appareil) — pas juste "une fois par jour". Corrige le bug du
+      // 13/08/2026 : une première capture prise avant la fin de la synchro du jour
+      // restait figée sur un état incomplet (3046 transactions sauvegardées contre 3103
+      // réellement présentes une fois la synchro terminée) jusqu'au lendemain.
+      if (existingToday && existingToday.data?.transactions?.length === snap.transactions.length) return;
+      const data = {
+        transactions: snap.transactions, categoryGroups: snap.categoryGroups, categoryScope: snap.categoryScope,
+        rules: snap.rules, loans: snap.loans, envelopeCap: snap.envelopeCap, accounts: snap.accounts,
+        budgets: snap.budgets, goals: snap.goals, recurring: snap.recurring, activities: snap.activities,
+        categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
+        chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
+        customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
+      };
+      list = list.filter((b) => b.date !== todayKey);
+      list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
+      list = list.slice(0, 3);
+      localStorage.setItem("gl-auto-backups", JSON.stringify(list));
+    } catch {
+      // Quota localStorage dépassé ou autre — on retentera au prochain déclencheur,
+      // sans jamais faire échouer le reste de l'app pour ça.
     }
-    setSyncStatus("synced");
+  }, []);
+
+  useEffect(() => {
+    // Ne PAS capturer dès le montage : au premier chargement, la synchro avec les
+    // autres appareils (déclenchée par le trigger "chargement" de runSync) n'a pas
+    // encore fini de fusionner les transactions distantes — une sauvegarde prise trop
+    // tôt "photographiait" un état local incomplet, avant l'arrivée des écritures faites
+    // sur l'autre appareil (13/08/2026 : 3046 transactions sauvegardées contre 3103
+    // réellement présentes une fois la synchro terminée). On attend donc soit une synchro
+    // réussie (lastSyncedAt), soit un court délai de secours si la synchro n'est pas
+    // configurée sur cet appareil.
+    const t = setTimeout(runAutoBackupIfNeeded, 8000);
+    const onVisible = () => { if (document.visibilityState === "visible") runAutoBackupIfNeeded(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", runAutoBackupIfNeeded);
+    const interval = setInterval(runAutoBackupIfNeeded, 60 * 60 * 1000); // filet de sécurité si l'app reste ouverte en continu sans jamais repasser en arrière-plan
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", runAutoBackupIfNeeded);
+      clearInterval(interval);
+    };
+  }, [runAutoBackupIfNeeded]);
+  // Redéclenche la vérification après chaque synchro réussie — c'est le signal le plus
+  // fiable que syncedRef.current reflète bien l'état fusionné le plus à jour (donc le
+  // vrai déclencheur normal, le setTimeout ci-dessus n'étant qu'un filet de secours).
+  useEffect(() => { if (lastSyncedAt) runAutoBackupIfNeeded(); }, [lastSyncedAt, runAutoBackupIfNeeded]);
+
+  // Retient la date de la dernière VRAIE modification locale (persistée, pour survivre à
+  // un rechargement) — comparée à la date de dernière mise à jour distante pour les
+  // réglages scalaires (pas de fusion possible pour un simple nombre ou booléen) :
+  // celui modifié le plus récemment l'emporte.
+  const lastLocalChangeRef = useRef<string>((() => { try { return localStorage.getItem("gl-last-local-change") || ""; } catch { return ""; } })());
+  const localChangeTrackInit = useRef(false);
+  const syncInFlight = useRef(false);
+  const syncQueued = useRef(false);
+
+  // Le moteur lui-même : AUCUNE dépendance (tableau vide) — reste la même fonction sur
+  // toute la durée de vie du composant, donc toujours sûr à passer à n'importe quel
+  // écouteur ou intervalle créé une seule fois, sans jamais devenir périmé, puisqu'il
+  // ne lit l'état qu'au travers de syncedRef.current au moment de l'exécution.
+  const runSync = React.useCallback(async () => {
+    const code = syncCodeRef.current;
+    if (!SYNC_ENABLED || !code) return;
+    if (syncInFlight.current) { syncQueued.current = true; return; }
+    syncInFlight.current = true;
+    setSyncStatus("syncing");
+    try {
+      const s = syncedRef.current;
+      const remote = await fetchRemoteState(code);
+      if (!remote) { setSyncStatus("error"); return; }
+      const d = remote.data || {};
+      const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+
+      const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...s.deletedTransactionIds } : s.deletedTransactionIds;
+      // Calculée en premier : décide qui gagne un vrai conflit (même id modifié des deux
+      // côtés) dans les fusions ci-dessous — voir la note sur mergeById plus haut.
+      const localIsNewer = !!(lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt)));
+      const mergedTransactions = (d.transactions ? mergeById(s.transactions, d.transactions) : s.transactions).filter((t: Transaction) => !mergedDeletedIds[t.id]);
+      const mergedLoans = d.loans ? mergeById(s.loans, d.loans) : s.loans;
+      const mergedBudgets = d.budgets ? mergeById(s.budgets, d.budgets) : s.budgets;
+      const mergedGoals = d.goals ? mergeById(s.goals, d.goals) : s.goals;
+      const mergedRecurring = d.recurring ? mergeById(s.recurring, d.recurring) : s.recurring;
+      const mergedRules = d.rules ? mergeById(s.rules, d.rules) : s.rules;
+      const mergedAccounts = d.accounts ? mergeById(s.accounts, d.accounts) : s.accounts;
+      const mergedActivities = d.activities ? Array.from(new Set([...s.activities, ...d.activities])) : s.activities;
+      const mergedCategoryGroups = d.categoryGroups ? { ...d.categoryGroups, ...s.categoryGroups } : s.categoryGroups;
+      const mergedCategoryScope = d.categoryScope ? { ...d.categoryScope, ...s.categoryScope } : s.categoryScope;
+      const mergedChargeOverrides = d.chargeOverrides ? { ...d.chargeOverrides, ...s.chargeOverrides } : s.chargeOverrides;
+      const mergedCategoryActivity = d.categoryActivity ? { ...d.categoryActivity, ...s.categoryActivity } : s.categoryActivity;
+      const mergedActivityCapital = d.activityCapital ? { ...d.activityCapital, ...s.activityCapital } : s.activityCapital;
+      const mergedCustomDep = d.customDepSubcategories ? { ...d.customDepSubcategories, ...s.customDepSubcategories } : s.customDepSubcategories;
+      const mergedCustomRev = d.customRevSubcategories ? { ...d.customRevSubcategories, ...s.customRevSubcategories } : s.customRevSubcategories;
+
+      const finalEnvelopeCap = localIsNewer || typeof d.envelopeCap !== "number" ? s.envelopeCap : d.envelopeCap;
+      const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? s.monthlyObjective : d.monthlyObjective;
+      const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? s.includeGrundfosVoiture : d.includeGrundfosVoiture;
+
+      const localChanged = !eq(mergedTransactions, s.transactions) || !eq(mergedLoans, s.loans) || !eq(mergedBudgets, s.budgets)
+        || !eq(mergedGoals, s.goals) || !eq(mergedRecurring, s.recurring) || !eq(mergedRules, s.rules) || !eq(mergedAccounts, s.accounts)
+        || !eq(mergedActivities, s.activities) || !eq(mergedCategoryGroups, s.categoryGroups) || !eq(mergedCategoryScope, s.categoryScope)
+        || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
+        || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
+        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture;
+      const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
+        || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
+        || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
+        || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
+        || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
+        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
+
+      if (localChanged) {
+        skipNextPush.current = true;
+        setTransactions(mergedTransactions);
+        setLoans(mergedLoans);
+        setBudgets(mergedBudgets);
+        setGoals(mergedGoals);
+        setRecurring(mergedRecurring);
+        setRules(mergedRules);
+        setAccounts(mergedAccounts);
+        setActivities(mergedActivities);
+        setCategoryGroups(mergedCategoryGroups);
+        setCategoryScope(mergedCategoryScope);
+        setChargeOverrides(mergedChargeOverrides);
+        setCategoryActivity(mergedCategoryActivity);
+        setActivityCapital(mergedActivityCapital);
+        setCustomDepSubcategories(mergedCustomDep);
+        setCustomRevSubcategories(mergedCustomRev);
+        setEnvelopeCap(finalEnvelopeCap);
+        setMonthlyObjective(finalMonthlyObjective);
+        setIncludeGrundfosVoiture(finalIncludeGrundfos);
+        setDeletedTransactionIds(mergedDeletedIds);
+        // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
+        // une synchronisation en attente se déclenche tout de suite après, elle reparte
+        // bien de ce résultat fusionné plutôt que de l'ancien état.
+        syncedRef.current = {
+          transactions: mergedTransactions, loans: mergedLoans, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
+          rules: mergedRules, accounts: mergedAccounts, activities: mergedActivities, categoryGroups: mergedCategoryGroups,
+          categoryScope: mergedCategoryScope, chargeOverrides: mergedChargeOverrides, categoryActivity: mergedCategoryActivity,
+          activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
+          envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
+          deletedTransactionIds: mergedDeletedIds,
+        };
+      }
+
+      if (!remoteNeedsUpdate) {
+        setSyncStatus("synced");
+        setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+      } else {
+        const ok = await pushRemoteState(code, {
+          transactions: mergedTransactions, categoryGroups: mergedCategoryGroups, categoryScope: mergedCategoryScope, rules: mergedRules,
+          loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
+          activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
+          chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
+          deletedTransactionIds: mergedDeletedIds,
+        });
+        setSyncStatus(ok ? "synced" : "error");
+        if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
+      }
+    } catch {
+      setSyncStatus("error");
+    } finally {
+      syncInFlight.current = false;
+      // Une demande est arrivée pendant qu'on synchronisait déjà — on la rejoue une
+      // seule fois, avec les données les plus fraîches (pas d'accumulation infinie).
+      if (syncQueued.current) { syncQueued.current = false; runSync(); }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Tire l'état distant au chargement si un code de synchronisation est défini.
+  // Chargement initial (ou reconnexion via ?sync=... dans l'URL) : synchronise dès que
+  // possible, et débloque l'écran de choix (données de démarrage à vide) si ça réussit.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    let cancelled = false;
-    (async () => { if (!cancelled) await pullAndHydrate(syncCode); })();
-    return () => { cancelled = true; };
+    (async () => {
+      await runSync();
+      if (txStartedEmpty) setDataGateResolved(true);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Abonnement temps réel : dès qu'un autre appareil modifie la ligne distante, on la
-  // retire immédiatement — sans avoir à recharger la page. Repli silencieux si le canal
-  // temps réel n'est pas disponible (ex: aperçu Claude) ; le pull différé continue seul.
+  // Note la date de toute VRAIE modification locale (pas une fusion venue d'ailleurs,
+  // filtrée via skipNextPush, ni le tout premier rendu au chargement) — persistée pour
+  // survivre à un rechargement.
+  useEffect(() => {
+    if (!allLoaded) return;
+    if (!localChangeTrackInit.current) { localChangeTrackInit.current = true; return; }
+    if (skipNextPush.current) { skipNextPush.current = false; return; }
+    const now = new Date().toISOString();
+    lastLocalChangeRef.current = now;
+    try { localStorage.setItem("gl-last-local-change", now); } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, allLoaded]);
+
+  // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
+  // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
+  const editSyncTimer = useRef<any>(null);
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    if (editSyncTimer.current) clearTimeout(editSyncTimer.current);
+    editSyncTimer.current = setTimeout(runSync, 500);
+    return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
+
+  // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
+  // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
+  // plan de l'app, et un sondage toutes les 20 secondes en dernier recours.
+  useEffect(() => {
+    if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
+    const onOnline = () => runSync();
+    const onVisible = () => { if (document.visibilityState === "visible") runSync(); };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+    const interval = setInterval(runSync, 20000);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allLoaded, syncCode]);
+
+  // Abonnement temps réel : dès qu'un autre appareil modifie la ligne distante, on
+  // resynchronise immédiatement — sans avoir à recharger la page.
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) { setRealtimeConnected(false); return; }
     let unsub: (() => void) | null = null;
     let cancelled = false;
     (async () => {
-      const fn = await subscribeRealtime(syncCode, () => { pullAndHydrate(syncCode); });
+      const fn = await subscribeRealtime(syncCode, () => runSync());
       if (cancelled) { fn?.(); return; }
       unsub = fn;
       setRealtimeConnected(!!fn);
@@ -10658,27 +12515,89 @@ export default function GrandLivre() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allLoaded, syncCode]);
 
-  // Pousse l'état local vers le cloud après chaque modification (avec un court délai
-  // pour regrouper les changements rapprochés et éviter de spammer l'API).
+  // Filet de sécurité final : si l'app se ferme/passe en arrière-plan alors qu'une
+  // synchronisation est encore en attente, tentative d'envoi immédiat "best effort" via
+  // fetch+keepalive (fonctionne pendant la fermeture, contrairement à un fetch normal —
+  // et contrairement à sendBeacon, supporte les en-têtes d'authentification requis).
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
-    if (skipNextPush.current) { skipNextPush.current = false; return; }
-    if (pushTimer.current) clearTimeout(pushTimer.current);
-    pushTimer.current = setTimeout(async () => {
-      setSyncStatus("syncing");
-      const ok = await pushRemoteState(syncCode, {
-        transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-        activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-      });
-      setSyncStatus(ok ? "synced" : "error");
-      if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-    }, 1500);
-    return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, syncCode, allLoaded]);
+    const flush = () => {
+      if (!editSyncTimer.current) return;
+      const s = syncedRef.current;
+      try {
+        fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=sync_code`, {
+          method: "POST",
+          keepalive: true,
+          headers: {
+            apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+            "Content-Type": "application/json", Prefer: "resolution=merge-duplicates",
+          },
+          body: JSON.stringify({ sync_code: syncCode, updated_at: new Date().toISOString(), data: s }),
+        }).catch(() => {});
+      } catch {}
+    };
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); });
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("blur", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("blur", flush);
+    };
+  }, [allLoaded, syncCode]);
+
+  // Réutilisée par le Sauvegarde et par l'écran de choix ci-dessous.
+  const restoreFromBackup = (data: any) => {
+    setPreRestoreSnapshot({
+      transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+      activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+    });
+    setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
+    if (data.transactions) setTransactions(data.transactions);
+    if (data.categoryGroups) setCategoryGroups(data.categoryGroups);
+    if (data.categoryScope) setCategoryScope(data.categoryScope);
+    if (data.rules) setRules(data.rules);
+    if (data.loans) setLoans(data.loans);
+    if (typeof data.envelopeCap === "number") setEnvelopeCap(data.envelopeCap);
+    if (data.accounts) setAccounts(data.accounts);
+    if (data.budgets) setBudgets(data.budgets);
+    if (data.goals) setGoals(data.goals);
+    if (data.recurring) setRecurring(data.recurring);
+    if (data.activities) setActivities(data.activities);
+    if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
+    if (data.activityCapital) setActivityCapital(data.activityCapital);
+    if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
+    if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
+    if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
+    if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
+    if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
+  };
 
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
+  }
+
+  // Écran de choix bloquant : rien n'est jamais sauvegardé tant qu'un choix explicite
+  // n'a pas été fait ici. Corrige la cause de fond d'une perte de données passée : avant,
+  // dès que le stockage local était vide, l'app se mettait à sauvegarder silencieusement
+  // les données de démonstration comme si c'était les vraies. Sur demande explicite de
+  // l'utilisateur (11/08/2026) : "résoudre ça une fois pour de bon".
+  if (txStartedEmpty && !dataGateResolved) {
+    return (
+      <DataRecoveryGate
+        onRestore={(data) => { restoreFromBackup(data); setDataGateResolved(true); }}
+        onConnectSync={async (code) => {
+          setSyncCode(code);
+          const remote = await fetchRemoteState(code);
+          if (remote?.data?.transactions?.length) {
+            restoreFromBackup(remote.data);
+            setDataGateResolved(true);
+            return true;
+          }
+          return false;
+        }}
+        onStartFresh={() => setDataGateResolved(true)}
+      />
+    );
   }
 
   const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
@@ -10700,7 +12619,7 @@ export default function GrandLivre() {
             zIndex: isMobile ? 220 : "auto", background: isMobile ? COLOR.bg : "transparent",
             WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
           }}>
-            <div className="gl-safe-top" style={{ width: isMobile ? 268 : 226, padding: "24px 16px" }}>
+            <div className="gl-safe-top" style={{ width: isMobile ? 268 : 226, paddingLeft: 16, paddingRight: 16, paddingBottom: 24, paddingTop: isMobile ? "max(24px, env(safe-area-inset-top))" : 24 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.16em", color: COLOR.gold, textTransform: "uppercase", paddingLeft: 8 }}>XOF</div>
                 {isMobile && (
@@ -10736,7 +12655,7 @@ export default function GrandLivre() {
 
       {/* MAIN */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <header className="gl-safe-top" style={{ borderBottom: `1px solid ${COLOR.hairline}`, padding: isMobile ? "16px 16px" : "20px 32px" }}>
+        <header className="gl-safe-top" style={{ borderBottom: `1px solid ${COLOR.hairline}`, paddingLeft: isMobile ? 16 : 32, paddingRight: isMobile ? 16 : 32, paddingBottom: isMobile ? 16 : 20, paddingTop: isMobile ? "max(16px, env(safe-area-inset-top))" : 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", flexWrap: "wrap", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <button className="gl-noprint" onClick={() => (isMobile ? setMobileMenuOpen(true) : setSidebarOpen((s) => !s))} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: 7, cursor: "pointer", display: "flex" }}>
@@ -10777,29 +12696,29 @@ export default function GrandLivre() {
                   </button>
                   {filtersOpen && (
                     <div style={{ marginTop: 10 }}>
-                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
+                      <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} categoryOptions={groupedCatOptions} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
                     </div>
                   )}
                 </div>
               ) : (
-                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
+                <FilterBar filters={filters} setFilters={setFilters} allMonths={allMonths} allCategories={allCategories} categoryOptions={groupedCatOptions} allAccounts={accounts.map((a) => a.name)} onReset={() => setFilters(defaultFilters)} />
               )}
             </div>
           )}
 
-          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} />}
+          {tab === "apercu" && <ApercuTab filtered={filtered} filters={filters} accounts={accounts} transactions={transactions} categoryGroups={resolvedGroups} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} monthlyObjective={monthlyObjective} recurring={recurring} budgets={budgets} />}
           {tab === "valeurnette" && <NetWorthTab accounts={accounts} transactions={transactions} filters={filters} />}
           {tab === "flux" && <FluxTab filtered={filtered} />}
           {tab === "comparatif" && <ComparatifTab transactions={transactions} categoryGroups={resolvedGroups} />}
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
-          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactions} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
+          {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} navContext={navContext} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
           {tab === "gestioncategories" && <CategoryManagementTab
-            transactions={transactions} setTransactions={setTransactions}
+            transactions={transactions} setTransactions={setTransactionsTracked}
             customDepSubcategories={customDepSubcategories} setCustomDepSubcategories={setCustomDepSubcategories}
             customRevSubcategories={customRevSubcategories} setCustomRevSubcategories={setCustomRevSubcategories}
             categoryGroups={categoryGroups} setCategoryGroups={setCategoryGroups}
@@ -10809,7 +12728,7 @@ export default function GrandLivre() {
           />}
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
           {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
-          {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} />}
+          {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} recurring={recurring} />}
           {tab === "simulateur" && <SimulateurTab filtered={filtered} accounts={accounts} transactions={transactions} />}
           {tab === "objectif" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -10819,15 +12738,16 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactions} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactions} accounts={accounts} />}
+          {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
+          {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
-          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactions} />}
+          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
-          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactions} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
-          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactions} rules={rules} setRules={setRules} accounts={accounts} />}
+          {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactionsTracked} rules={rules} setRules={setRules} accounts={accounts} />}
           {tab === "export" && <ExportTab filtered={filtered} filters={filters} setFilters={setFilters} allMonths={allMonths} />}
           {tab === "sauvegarde" && (
             <SauvegardeTab
@@ -10835,34 +12755,7 @@ export default function GrandLivre() {
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
               })}
-              restore={(data: any) => {
-                // Filet de sécurité : on garde un instantané de l'état actuel avant
-                // d'écraser quoi que ce soit, pour permettre une annulation en un clic.
-                setPreRestoreSnapshot({
-                  transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                  activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                });
-                setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
-
-                if (data.transactions) setTransactions(data.transactions);
-                if (data.categoryGroups) setCategoryGroups(data.categoryGroups);
-                if (data.categoryScope) setCategoryScope(data.categoryScope);
-                if (data.rules) setRules(data.rules);
-                if (data.loans) setLoans(data.loans);
-                if (typeof data.envelopeCap === "number") setEnvelopeCap(data.envelopeCap);
-                if (data.accounts) setAccounts(data.accounts);
-                if (data.budgets) setBudgets(data.budgets);
-                if (data.goals) setGoals(data.goals);
-                if (data.recurring) setRecurring(data.recurring);
-                if (data.activities) setActivities(data.activities);
-                if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
-                if (data.activityCapital) setActivityCapital(data.activityCapital);
-                if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
-                if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
-                if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
-                if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
-                if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
-              }}
+              restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
               settingsLog={settingsLog}
               onUndoRestore={() => {
@@ -10894,15 +12787,7 @@ export default function GrandLivre() {
               syncStatus={syncStatus}
               lastSyncedAt={lastSyncedAt}
               realtimeConnected={realtimeConnected}
-              onForceSync={async () => {
-                if (!syncCode) return;
-                setSyncStatus("syncing");
-                const ok = await pushRemoteState(syncCode, {
-                  transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                });
-                setSyncStatus(ok ? "synced" : "error");
-                if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
-              }}
+              onForceSync={() => { runSync(); }}
             />
           )}
         </main>
@@ -10948,7 +12833,7 @@ export default function GrandLivre() {
       )}
 
       {tab !== "saisie" && (
-        <QuickAddFAB transactions={transactions} setTransactions={setTransactions} accounts={accounts} categoryGroups={resolvedGroups} isMobile={isMobile} />
+        <QuickAddFAB transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} categoryGroups={resolvedGroups} isMobile={isMobile} />
       )}
     </div>
   );
