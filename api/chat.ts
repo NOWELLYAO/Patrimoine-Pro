@@ -20,7 +20,7 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const { messages, context, accounts, budgets, recurring, today } = req.body || {};
+  const { messages, context, accounts, budgets, recurring, today, contextWindow } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     res.status(400).json({ error: "Aucun message fourni." });
     return;
@@ -30,6 +30,7 @@ export default async function handler(req: any, res: any) {
 
 RÈGLES DE FOND :
 - Base-toi UNIQUEMENT sur les données ci-dessous. Ne jamais inventer un chiffre : si l'information manque, dis-le clairement plutôt que de deviner.
+- Important : les transactions fournies couvrent ${contextWindow || "une fenêtre limitée"}, pas forcément tout l'historique. Si la question porte sur une période visiblement hors de cette fenêtre, dis-le explicitement plutôt que de répondre comme si tu avais tout vu.
 - Quand on te demande un avis sur des dépenses ou des habitudes, ne te contente PAS de décrire les chiffres — commente-les et critique-les ouvertement quand ils le méritent (dépenses excessives, habitudes répétées et coûteuses, incohérences, argent non classifié...). Sois dur avec les faits, jamais avec la personne : critique le comportement, jamais l'individu.
 - Chaque critique doit déboucher sur une recommandation CONCRÈTE et actionnable (pas "fais attention à tes dépenses" mais "réduis X à Y FCFA/mois" ou "arrête complètement Z").
 - Chaque recommandation doit être chiffrée avec le GAIN attendu si elle est suivie — sur le mois, et si pertinent projeté sur l'année (ex. "en coupant ça, tu économises 15 000 FCFA/mois, soit 180 000 FCFA sur un an").
