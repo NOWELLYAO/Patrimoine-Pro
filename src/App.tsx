@@ -8266,6 +8266,49 @@ function detectMonthKeysInQuestion(question: string, today: string): string[] | 
   return Array.from(found);
 }
 
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Détection élargie de la portée d'une question — au-delà du mois : catégorie,
+// bénéficiaire, compte, nature (Nécessaire/Productif/Non-productif), type
+// (revenus/dépenses). Sur remarque explicite de l'utilisateur (16/08/2026) : "qu'il
+// analyse bien mes questions avant de fouiller inutilement". Chaque dimension
+// détectée réduit le contexte envoyé ; les dimensions non détectées ne filtrent rien.
+interface QueryScope {
+  monthKeys: string[] | null; categories: string[]; payees: string[]; groups: string[]; accounts: string[]; type: TxType | null;
+  anyDetected: boolean;
+}
+function detectQueryScope(question: string, today: string, allCategories: string[], allPayees: string[], allAccounts: string[]): QueryScope {
+  const q = normalizeForMatch(question);
+  const monthKeys = detectMonthKeysInQuestion(question, today);
+
+  const matchNames = (names: string[]) => names.filter((n) => {
+    const norm = normalizeForMatch(n);
+    return norm.length >= 3 && new RegExp(`\\b${escapeRegex(norm)}`, "i").test(q);
+  });
+  const categories = matchNames(allCategories);
+  const payees = matchNames(allPayees);
+  const accounts = matchNames(allAccounts);
+
+  const groups: string[] = [];
+  if (/\bnon[\s-]?productif/.test(q)) groups.push("Non-productif");
+  else if (/\bproductif/.test(q)) groups.push("Productif");
+  if (/\bnecessaire/.test(q)) groups.push("Nécessaire");
+  if (/\bnon[\s-]?classifi/.test(q)) groups.push("Non classifié");
+
+  let type: TxType | null = null;
+  const hasDep = /\bdepenses?\b/.test(q), hasRev = /\brevenus?\b/.test(q);
+  if (hasDep && !hasRev) type = "Dépense";
+  else if (hasRev && !hasDep) type = "Revenu";
+
+  const anyDetected = !!(monthKeys || categories.length || payees.length || groups.length || accounts.length || type);
+  return { monthKeys, categories, payees, groups, accounts, type, anyDetected };
+}
+
 function transactionsToCompactCSV(transactions: Transaction[]): string {
   const esc = (s: string) => (s || "").replace(/[\n\r;]/g, " ").trim();
   const header = "date;type;categorie;sous_categorie;montant;compte;beneficiaire;note";
@@ -8298,6 +8341,9 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
   const [fullHistory, setFullHistory] = useState(false);
   const MAX_TX = 2000;
   const sortedForContext = useMemo(() => [...transactions].sort((a, b) => b.date.localeCompare(a.date)), [transactions]);
+  const allCategoriesInData = useMemo(() => Array.from(new Set(transactions.map((t) => t.category))), [transactions]);
+  const allPayeesInData = useMemo(() => Array.from(new Set(transactions.map((t) => t.payee).filter(Boolean))) as string[], [transactions]);
+  const allAccountNames = useMemo(() => accounts.map((a) => a.name), [accounts]);
   const windowedForContext = useMemo(() => {
     if (fullHistory) return sortedForContext;
     const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 12);
@@ -8315,24 +8361,51 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
     setLoading(true);
     setError(null);
 
-    // Si la question mentionne un mois précis ("août 2026", "ce mois-ci"...), on
-    // n'envoie QUE ce(s) mois (+ le précédent, pour permettre une comparaison
-    // naturelle) au lieu de la fenêtre par défaut — beaucoup plus rapide pour le cas
-    // le plus courant : une question ciblée sur une période précise.
-    const detectedMonths = fullHistory ? null : detectMonthKeysInQuestion(text, todayISO());
+    // Analyse la question pour ne cibler que ce qui est réellement pertinent (mois,
+    // catégorie, bénéficiaire, compte, nature, type) au lieu de fouiller toute la
+    // fenêtre par défaut à chaque fois — sur remarque explicite de l'utilisateur
+    // (16/08/2026). Une dimension non détectée ne filtre rien ; si RIEN n'est
+    // détecté, on retombe sur la fenêtre par défaut (12 derniers mois).
+    const scope = fullHistory ? null : detectQueryScope(text, todayISO(), allCategoriesInData, allPayeesInData, allAccountNames);
     let contextTx: Transaction[];
     let windowLabel: string;
     if (fullHistory) {
       contextTx = sortedForContext;
       windowLabel = "historique complet";
-    } else if (detectedMonths) {
-      const monthSet = new Set(detectedMonths);
-      detectedMonths.forEach((mk) => monthSet.add(prevMonthKey(mk)));
-      contextTx = sortedForContext.filter((t) => monthSet.has(dateToMonthKey(t.date)));
-      windowLabel = `${detectedMonths.map((mk) => monthLabel(mk)).join(", ")} (+ mois précédent pour comparaison) — détecté automatiquement dans la question`;
+    } else if (scope && scope.anyDetected) {
+      let filtered = sortedForContext;
+      const labelParts: string[] = [];
+      if (scope.monthKeys) {
+        const monthSet = new Set(scope.monthKeys);
+        scope.monthKeys.forEach((mk) => monthSet.add(prevMonthKey(mk)));
+        filtered = filtered.filter((t) => monthSet.has(dateToMonthKey(t.date)));
+        labelParts.push(`mois : ${scope.monthKeys.map((mk) => monthLabel(mk)).join(", ")} (+ mois précédent pour comparaison)`);
+      }
+      if (scope.categories.length) {
+        filtered = filtered.filter((t) => scope.categories.includes(t.category));
+        labelParts.push(`catégorie(s) : ${scope.categories.join(", ")}`);
+      }
+      if (scope.payees.length) {
+        filtered = filtered.filter((t) => t.payee && scope.payees.includes(t.payee));
+        labelParts.push(`bénéficiaire(s) : ${scope.payees.join(", ")}`);
+      }
+      if (scope.groups.length) {
+        filtered = filtered.filter((t) => scope.groups.includes(t.type === "Revenu" ? "Revenu" : (categoryGroups[t.category] || "Non classifié")));
+        labelParts.push(`nature : ${scope.groups.join(", ")}`);
+      }
+      if (scope.accounts.length) {
+        filtered = filtered.filter((t) => t.account && scope.accounts.includes(t.account));
+        labelParts.push(`compte(s) : ${scope.accounts.join(", ")}`);
+      }
+      if (scope.type) {
+        filtered = filtered.filter((t) => t.type === scope.type);
+        labelParts.push(`type : ${scope.type}`);
+      }
+      contextTx = filtered;
+      windowLabel = `filtré selon la question (détecté automatiquement) — ${labelParts.join(" ; ")}`;
     } else {
       contextTx = windowedForContext;
-      windowLabel = "12 derniers mois glissants (aucune période précise détectée dans la question)";
+      windowLabel = "12 derniers mois glissants (aucun critère précis détecté dans la question)";
     }
     const sendCsv = transactionsToCompactCSV(contextTx.slice(0, MAX_TX));
 
