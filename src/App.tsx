@@ -8273,8 +8273,9 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
         body: JSON.stringify({
           messages: nextMessages,
           context: csv,
-          accounts: accounts.map((a) => a.name),
-          budgets: budgets.map((b) => `${b.category}: limite ${b.amount} FCFA/mois`),
+          today: todayISO(),
+          accounts: accounts.map((a) => `${a.name} : solde actuel ${fmt(accountBalance(a, transactions))} FCFA`),
+          budgets: budgets.map((b) => `${b.category}: limite ${fmt(b.amount)} FCFA/mois`),
           recurring: recurring.map((r) => `${r.type} — ${r.category} — ${fmt(r.amount)} FCFA (${r.frequency}, prochaine échéance ${r.nextDate})`),
         }),
       }, 55000);
@@ -8311,7 +8312,7 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
         {messages.length === 0 && (
           <div style={{ margin: "auto", textAlign: "center", color: COLOR.inkMuted, fontSize: 12.5, maxWidth: 320 }}>
             <MessageCircle size={28} color={COLOR.hairline} style={{ marginBottom: 10 }} />
-            <div>Pose une question sur tes transactions — ex. "Combien j'ai dépensé en Aliments en juillet ?", "Quelle est ma plus grosse dépense chez GRUNDFOS ?", "Compare mes dépenses non-productives de juin et août".</div>
+            <div>Pose une question sur tes transactions, demande un avis franc sur tes habitudes, ou demande-lui si une dépense que tu envisages est raisonnable — ex. "Critique mes dépenses non-productives de juillet", "Est-ce que je peux me permettre 40 000 FCFA pour X ?", "Quelle est ma plus grosse habitude coûteuse en ce moment ?".</div>
           </div>
         )}
         {messages.map((m, i) => (
@@ -12808,8 +12809,8 @@ export default function GrandLivre() {
           {[
             { id: "saisie" as Tab, label: "Saisie", icon: Clock },
             { id: "apercu" as Tab, label: "Aperçu", icon: LayoutDashboard },
-            { id: "journal" as Tab, label: "Journal", icon: BookOpen },
-            { id: "comptes" as Tab, label: "Comptes", icon: Wallet },
+            { id: "assistant" as Tab, label: "Assistant", icon: MessageCircle },
+            { id: "topcategories" as Tab, label: "Catégories", icon: PieChartIcon },
           ].map((item) => {
             const Icon = item.icon; const active = tab === item.id;
             return (
@@ -12832,7 +12833,7 @@ export default function GrandLivre() {
         </nav>
       )}
 
-      {tab !== "saisie" && (
+      {tab !== "saisie" && tab !== "assistant" && (
         <QuickAddFAB transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} categoryGroups={resolvedGroups} isMobile={isMobile} />
       )}
     </div>
