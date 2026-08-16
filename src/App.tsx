@@ -13,6 +13,7 @@ import {
   Users, Repeat, ClipboardList, UploadCloud, CheckSquare, Square, Menu, ChevronDown,
   Download, Printer, Bell, Sparkles, Gauge, ArrowRight, Percent, Upload, Mail, Rocket, Compass,
   FileSpreadsheet, FileText, Loader2, Minus, GitCompare, HelpCircle, PieChart as PieChartIcon, Activity,
+  MessageCircle, Send,
 } from "lucide-react";
 
 // ============================================================
@@ -50,6 +51,8 @@ const fontImport = `
 .gl-journal-row { transition: background 0.1s ease; }
 .gl-journal-row:hover { background: rgba(201,162,39,0.06) !important; }
 .gl-journal-row:hover td { border-color: rgba(201,162,39,0.25) !important; }
+.gl-spin { animation: gl-spin-rotate 0.9s linear infinite; }
+@keyframes gl-spin-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @supports (padding: max(0px)) {
   .gl-safe-bottom { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   .gl-safe-top { padding-top: max(0px, env(safe-area-inset-top)); }
@@ -8216,6 +8219,153 @@ function RatiosNarrativeSheet({ open, onClose, ratios }: { open: boolean; onClos
   );
 }
 
+// ============================================================
+// ASSISTANT IA — sur demande explicite de l'utilisateur (14/08/2026) : "un puissant
+// assistant chat qui lit toutes les transactions et répond même dans les détails".
+// Contrairement à tout le reste de l'app, ceci envoie les données à un service EXTERNE
+// (API Anthropic, via la fonction serveur /api/chat.ts qui protège la clé) — l'utilisateur
+// a été informé et a choisi cette option en connaissance de cause plutôt qu'un moteur
+// 100% local. Les transactions sont sérialisées en CSV compact (bien plus économe en
+// tokens qu'un JSON) plutôt qu'envoyées telles quelles.
+// ============================================================
+function transactionsToCompactCSV(transactions: Transaction[]): string {
+  const esc = (s: string) => (s || "").replace(/[\n\r;]/g, " ").trim();
+  const header = "date;type;categorie;sous_categorie;montant;compte;beneficiaire;note";
+  const rows = [...transactions]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .map((t) => [t.date, t.type, esc(t.category), esc(t.subcategory || ""), t.amount, esc(t.account || ""), esc(t.payee || ""), esc(t.note || "")].join(";"));
+  return [header, ...rows].join("\n");
+}
+
+function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurring }: {
+  transactions: Transaction[]; accounts: Account[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; recurring: RecurringTemplate[];
+}) {
+  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, loading]);
+
+  // Plafond de sécurité : borne le coût/la latence par message même sur un très gros
+  // historique. Les transactions les plus RÉCENTES sont prioritaires (les plus
+  // pertinentes pour la majorité des questions).
+  const MAX_TX = 4000;
+  const sortedForContext = useMemo(() => [...transactions].sort((a, b) => b.date.localeCompare(a.date)), [transactions]);
+  const truncated = sortedForContext.length > MAX_TX;
+  const csv = useMemo(() => transactionsToCompactCSV(sortedForContext.slice(0, MAX_TX)), [sortedForContext]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    const nextMessages = [...messages, { role: "user" as const, content: text }];
+    setMessages(nextMessages);
+    setInput("");
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchWithTimeout("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: nextMessages,
+          context: csv,
+          accounts: accounts.map((a) => a.name),
+          budgets: budgets.map((b) => `${b.category}: limite ${b.amount} FCFA/mois`),
+          recurring: recurring.map((r) => `${r.type} — ${r.category} — ${fmt(r.amount)} FCFA (${r.frequency}, prochaine échéance ${r.nextDate})`),
+        }),
+      }, 55000);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Erreur serveur (${res.status})`);
+      }
+      const data = await res.json();
+      setMessages((m) => [...m, { role: "assistant", content: data.reply || "Pas de réponse de l'assistant." }]);
+    } catch (e: any) {
+      setError(e?.message || "Impossible de contacter l'assistant. Vérifie que la clé API est bien configurée sur Vercel (ANTHROPIC_API_KEY), ou réessaie plus tard.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, height: "calc(100vh - 130px)", minHeight: 480 }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <MessageCircle size={18} color={COLOR.goldSoft} />
+          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 18, color: COLOR.ink }}>Assistant IA</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 10, borderRadius: 8, background: "rgba(193,84,63,0.10)", border: `1px solid ${COLOR.clay}55`, fontSize: 11.5, color: COLOR.inkMuted, marginTop: 8 }}>
+          <AlertTriangle size={13} color={COLOR.claySoft} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            Contrairement au reste de l'app, chaque message envoie tes transactions à un service externe (API Anthropic) pour générer la réponse — ces données quittent ton navigateur, et chaque message a un coût réel sur ta clé API.
+            {truncated && ` Limité aux ${MAX_TX} transactions les plus récentes sur ${sortedForContext.length} au total.`}
+          </span>
+        </div>
+      </div>
+
+      <div ref={scrollRef} className="gl-scroll" style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "4px 4px 4px 4px" }}>
+        {messages.length === 0 && (
+          <div style={{ margin: "auto", textAlign: "center", color: COLOR.inkMuted, fontSize: 12.5, maxWidth: 320 }}>
+            <MessageCircle size={28} color={COLOR.hairline} style={{ marginBottom: 10 }} />
+            <div>Pose une question sur tes transactions — ex. "Combien j'ai dépensé en Aliments en juillet ?", "Quelle est ma plus grosse dépense chez GRUNDFOS ?", "Compare mes dépenses non-productives de juin et août".</div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+            <div style={{
+              maxWidth: "80%", padding: "10px 14px", borderRadius: 14,
+              borderBottomRightRadius: m.role === "user" ? 4 : 14, borderBottomLeftRadius: m.role === "user" ? 14 : 4,
+              background: m.role === "user" ? "rgba(201,162,39,0.14)" : COLOR.surfaceRaised,
+              border: `1px solid ${m.role === "user" ? COLOR.gold + "55" : COLOR.hairline}`,
+              color: COLOR.ink, fontSize: 13, lineHeight: 1.55, whiteSpace: "pre-wrap",
+            }}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div style={{ display: "flex", justifyContent: "flex-start" }}>
+            <div style={{ padding: "10px 14px", borderRadius: 14, borderBottomLeftRadius: 4, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, display: "flex", alignItems: "center", gap: 8 }}>
+              <Loader2 size={14} color={COLOR.inkMuted} className="gl-spin" />
+              <span style={{ fontSize: 12, color: COLOR.inkMuted }}>L'assistant réfléchit…</span>
+            </div>
+          </div>
+        )}
+        {error && (
+          <div style={{ padding: "10px 14px", borderRadius: 10, background: "rgba(193,84,63,0.12)", border: `1px solid ${COLOR.clay}`, color: COLOR.claySoft, fontSize: 12 }}>{error}</div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        {messages.length > 0 && (
+          <button onClick={() => { setMessages([]); setError(null); }} title="Effacer la conversation" style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "11px", cursor: "pointer", display: "flex", flexShrink: 0 }}>
+            <RotateCcw size={15} />
+          </button>
+        )}
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Pose ta question…"
+          rows={1}
+          style={{ ...inputStyle, flex: 1, resize: "none", fontFamily: "'Inter', sans-serif" }}
+        />
+        <button onClick={send} disabled={loading || !input.trim()} style={{
+          background: input.trim() && !loading ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 8,
+          color: input.trim() && !loading ? "#0e1611" : COLOR.inkMuted, padding: "11px 16px", cursor: input.trim() && !loading ? "pointer" : "default",
+          display: "flex", alignItems: "center", flexShrink: 0,
+        }}>
+          <Send size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange, categoryGroups, categoryScope, recurring }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
   setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
@@ -11803,7 +11953,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "valeurnette" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde";
+type Tab = "saisie" | "apercu" | "valeurnette" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde" | "assistant";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -11828,6 +11978,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
     { id: "budgets", label: "Budgets par catégorie", icon: ClipboardList },
   ]},
   { section: "Outils", items: [
+    { id: "assistant", label: "Assistant IA", icon: MessageCircle },
     { id: "simulateur", label: "Simulateur", icon: SlidersHorizontal },
     { id: "objectif", label: "Objectifs & Projection", icon: Gauge },
     { id: "business", label: "Business / Personnel", icon: Briefcase },
@@ -12589,6 +12740,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
