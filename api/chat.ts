@@ -65,7 +65,7 @@ ${context || "aucune transaction"}`;
       },
       body: JSON.stringify({
         model: "claude-sonnet-5",
-        max_tokens: 1500,
+        max_tokens: 4096,
         system: systemPrompt,
         messages: messages.map((m: any) => ({ role: m.role, content: m.content })),
       }),
@@ -84,6 +84,23 @@ ${context || "aucune transaction"}`;
       .filter((block: any) => block.type === "text")
       .map((block: any) => block.text)
       .join("\n");
+
+    if (!reply) {
+      // Réponse HTTP 200 mais aucun bloc texte exploitable — arrivé au moins une fois
+      // avec un très gros contexte (14/08/2026). On journalise le corps brut côté
+      // serveur (visible dans Vercel → Deployments → Functions → /api/chat → Logs)
+      // et on renvoie un diagnostic exploitable au lieu d'un silence total.
+      console.error("Réponse Anthropic sans texte exploitable :", JSON.stringify(data));
+      res.status(200).json({
+        reply: "",
+        debug: {
+          stop_reason: data.stop_reason,
+          usage: data.usage,
+          content_types: (data.content || []).map((b: any) => b.type),
+        },
+      });
+      return;
+    }
 
     res.status(200).json({ reply });
   } catch (e: any) {
