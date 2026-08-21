@@ -271,6 +271,34 @@ interface RecurringTemplate {
   account?: string;
   payee?: string;
 }
+// Portefeuille Bourse / FCP — sur demande explicite de l'utilisateur (21/08/2026),
+// inspiré d'un relevé NSIA Asset Management. Trois briques distinctes, comme sur un
+// vrai relevé : le fonds lui-même, ses opérations (souscription/rachat, qui font
+// varier la quantité de parts détenues), et un historique de VL (valeur liquidative)
+// saisi au jour le jour, à partir duquel tout le reste (valorisation, plus-value
+// latente, variation du jour) se calcule automatiquement — jamais saisi à la main.
+interface Fund {
+  id: string;
+  name: string;
+  category: "Monétaire" | "Diversifié" | "Actions" | "Autre";
+}
+interface FundOperation {
+  id: string;
+  fundId: string;
+  date: string;
+  type: "Souscription" | "Rachat";
+  quantite: number;
+  vl: number;
+  montant: number;
+  account: string;
+  linkedTransactionId?: string; // transaction Journal créée automatiquement (Productif)
+}
+interface FundDailyValue {
+  id: string;
+  fundId: string;
+  date: string;
+  vl: number;
+}
 interface Loan {
   id: string;
   person: string;
@@ -8318,6 +8346,330 @@ function transactionsToCompactCSV(transactions: Transaction[]): string {
   return [header, ...rows].join("\n");
 }
 
+// ============================================================
+// BOURSE (FCP) — portefeuille d'investissement en fonds communs de placement, sur
+// demande explicite de l'utilisateur (21/08/2026), inspiré d'un relevé NSIA Asset
+// Management. Coût moyen pondéré (comme un vrai relevé "Prix de revient") : chaque
+// souscription augmente le coût total proportionnellement, chaque rachat retire le
+// coût au prorata des parts vendues — le prix de revient unitaire ne bouge donc QUE
+// sur souscription, jamais sur un rachat (méthode standard en gestion de portefeuille).
+// ============================================================
+const INVESTMENT_CATEGORY = "Investissement bourse";
+
+function computeFundPosition(fundId: string, operations: FundOperation[], dailyValues: FundDailyValue[]) {
+  const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  let qty = 0, costTotal = 0, realizedGain = 0;
+  ops.forEach((o) => {
+    if (o.type === "Souscription") {
+      qty += o.quantite;
+      costTotal += o.montant;
+    } else {
+      const avgCost = qty > 0 ? costTotal / qty : 0;
+      const costRemoved = avgCost * o.quantite;
+      realizedGain += o.montant - costRemoved;
+      qty = Math.max(0, qty - o.quantite);
+      costTotal = Math.max(0, costTotal - costRemoved);
+    }
+  });
+  const avgCost = qty > 0 ? costTotal / qty : 0;
+
+  const values = dailyValues.filter((v) => v.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date));
+  const lastValue = values[values.length - 1];
+  const prevValue = values[values.length - 2];
+  const lastOp = ops[ops.length - 1];
+  const currentVL = lastValue?.vl ?? lastOp?.vl ?? 0;
+  const valorisation = qty * currentVL;
+  const plusValueLatente = valorisation - costTotal;
+  const prevValorisation = prevValue ? qty * prevValue.vl : null;
+  const dayChange = prevValorisation !== null ? valorisation - prevValorisation : null;
+  const dayChangePct = prevValorisation && prevValorisation !== 0 ? (dayChange! / prevValorisation) * 100 : null;
+
+  return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
+}
+
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, transactions, setTransactions, categoryGroups, setCategoryGroups }: {
+  funds: Fund[]; setFunds: (f: Fund[]) => void;
+  fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
+  fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
+  accounts: Account[]; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
+  categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
+}) {
+  const [addFundOpen, setAddFundOpen] = useState(false);
+  const [newFundName, setNewFundName] = useState("");
+  const [newFundCategory, setNewFundCategory] = useState<Fund["category"]>("Diversifié");
+
+  const [vlFormFundId, setVlFormFundId] = useState<string | null>(null);
+  const [vlDate, setVlDate] = useState(todayISO());
+  const [vlValue, setVlValue] = useState<number>(0);
+
+  const [opFormFundId, setOpFormFundId] = useState<string | null>(null);
+  const [opType, setOpType] = useState<"Souscription" | "Rachat">("Souscription");
+  const [opDate, setOpDate] = useState(todayISO());
+  const [opQty, setOpQty] = useState<number>(0);
+  const [opVl, setOpVl] = useState<number>(0);
+  const [opMontant, setOpMontant] = useState<number>(0);
+  const [opAccount, setOpAccount] = useState(accounts[0]?.name || "");
+  const [expandedFundId, setExpandedFundId] = useState<string | null>(null);
+
+  const ensureInvestmentCategory = () => {
+    if (categoryGroups[INVESTMENT_CATEGORY] !== "Productif") {
+      setCategoryGroups({ ...categoryGroups, [INVESTMENT_CATEGORY]: "Productif" });
+    }
+  };
+
+  const addFund = () => {
+    if (!newFundName.trim()) return;
+    setFunds([...funds, { id: uid("fund"), name: newFundName.trim(), category: newFundCategory }]);
+    setNewFundName(""); setAddFundOpen(false);
+  };
+  const deleteFund = (id: string) => {
+    if (fundOperations.some((o) => o.fundId === id)) {
+      if (!confirm("Ce fonds a des opérations enregistrées. Les supprimer aussi ? (les transactions liées dans le Journal ne seront PAS supprimées automatiquement)")) return;
+      setFundOperations(fundOperations.filter((o) => o.fundId !== id));
+      setFundDailyValues(fundDailyValues.filter((v) => v.fundId !== id));
+    }
+    setFunds(funds.filter((f) => f.id !== id));
+  };
+
+  const saveVl = () => {
+    if (!vlFormFundId || vlValue <= 0) return;
+    const existing = fundDailyValues.find((v) => v.fundId === vlFormFundId && v.date === vlDate);
+    if (existing) {
+      setFundDailyValues(fundDailyValues.map((v) => (v.id === existing.id ? { ...v, vl: vlValue } : v)));
+    } else {
+      setFundDailyValues([...fundDailyValues, { id: uid("vl"), fundId: vlFormFundId, date: vlDate, vl: vlValue }]);
+    }
+    setVlFormFundId(null); setVlValue(0);
+  };
+
+  const saveOperation = () => {
+    if (!opFormFundId || opQty <= 0 || opVl <= 0 || !opAccount) return;
+    const fund = funds.find((f) => f.id === opFormFundId);
+    if (!fund) return;
+    const montant = opMontant > 0 ? opMontant : Math.round(opQty * opVl);
+    ensureInvestmentCategory();
+    const opId = uid("fundop");
+    const txId = uid("t");
+    const op: FundOperation = { id: opId, fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, account: opAccount, linkedTransactionId: txId };
+    setFundOperations([...fundOperations, op]);
+    // Transaction liée automatiquement dans le Journal — Productif, pour que le solde
+    // du compte reste cohérent avec l'argent réellement sorti/rentré, sur demande
+    // explicite de l'utilisateur (21/08/2026).
+    const linkedTx: Transaction = {
+      id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
+      category: INVESTMENT_CATEGORY, subcategory: fund.name, amount: montant, account: opAccount,
+      note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}`,
+    } as Transaction;
+    setTransactions([...transactions, linkedTx]);
+    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0);
+  };
+
+  const positions = useMemo(() => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })), [funds, fundOperations, fundDailyValues]);
+  const totalValorisation = positions.reduce((a, p) => a + p.pos.valorisation, 0);
+  const totalCost = positions.reduce((a, p) => a + p.pos.costTotal, 0);
+  const totalPlusValue = totalValorisation - totalCost;
+  const totalDayChange = positions.reduce((a, p) => a + (p.pos.dayChange || 0), 0);
+  const totalPrevValorisation = totalValorisation - totalDayChange;
+  const totalDayChangePct = totalPrevValorisation !== 0 ? (totalDayChange / totalPrevValorisation) * 100 : 0;
+
+  // Courbe d'évolution du portefeuille — reconstruit la quantité détenue à chaque date
+  // de VL connue (toutes fonds confondus) pour tracer la valorisation totale dans le temps.
+  const chartData = useMemo(() => {
+    const allDates = Array.from(new Set(fundDailyValues.map((v) => v.date))).sort();
+    return allDates.map((date) => {
+      let total = 0;
+      funds.forEach((f) => {
+        const opsUntil = fundOperations.filter((o) => o.fundId === f.id && o.date <= date).sort((a, b) => a.date.localeCompare(b.date));
+        let qty = 0;
+        opsUntil.forEach((o) => { qty += o.type === "Souscription" ? o.quantite : -o.quantite; });
+        const valuesUntil = fundDailyValues.filter((v) => v.fundId === f.id && v.date <= date).sort((a, b) => a.date.localeCompare(b.date));
+        const vl = valuesUntil[valuesUntil.length - 1]?.vl || 0;
+        total += qty * vl;
+      });
+      return { date, valeur: Math.round(total) };
+    });
+  }, [funds, fundOperations, fundDailyValues]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ background: `linear-gradient(135deg, #0d1f3d, #142b52)`, borderRadius: 16, padding: 24, border: `1px solid ${COLOR.hairline}` }}>
+        <div style={{ fontSize: 12, color: "#9fb3d9", textTransform: "uppercase", letterSpacing: "0.05em" }}>Valeur du portefeuille Bourse</div>
+        <div style={{ fontSize: 34, fontWeight: 700, color: "#fff", marginTop: 6, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(totalValorisation)} <span style={{ fontSize: 15, fontWeight: 400, color: "#9fb3d9" }}>FCFA</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+          {totalDayChange !== 0 && (
+            <span style={{ display: "flex", alignItems: "center", gap: 4, color: totalDayChange >= 0 ? "#5fc298" : "#dd7b64", fontSize: 13, fontWeight: 600 }}>
+              {totalDayChange >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+              {fmt(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
+            </span>
+          )}
+          <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b></span>
+        </div>
+        {chartData.length > 1 && (
+          <div style={{ height: 100, marginTop: 16 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData}>
+                <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Fonds ({funds.length})</span>
+        <button onClick={() => setAddFundOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
+          <Plus size={13} /> Ajouter un fonds
+        </button>
+      </div>
+
+      {addFundOpen && (
+        <Panel title="Nouveau fonds" subtitle="">
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>Nom du fonds</div>
+              <input value={newFundName} onChange={(e) => setNewFundName(e.target.value)} placeholder="ex: AURORE OPPORTUNITES" style={inputStyle} />
+            </div>
+            <div>
+              <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>Catégorie</div>
+              <select value={newFundCategory} onChange={(e) => setNewFundCategory(e.target.value as Fund["category"])} style={inputStyle}>
+                <option value="Monétaire">Monétaire</option>
+                <option value="Diversifié">Diversifié</option>
+                <option value="Actions">Actions</option>
+                <option value="Autre">Autre</option>
+              </select>
+            </div>
+            <button onClick={addFund} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ajouter</button>
+            <button onClick={() => setAddFundOpen(false)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </Panel>
+      )}
+
+      {!funds.length && !addFundOpen && <EmptyState />}
+
+      {positions.map(({ fund, pos }) => (
+        <Panel key={fund.id} title={fund.name} subtitle={`${fund.category} · ${pos.qty.toFixed(4)} parts détenues`}>
+          <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Valorisation</div>
+              <div style={{ fontSize: 17, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(pos.valorisation)} FCFA</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Investi (prix de revient)</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(Math.round(pos.costTotal))} FCFA</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Plus-value latente</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.plusValueLatente >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.plusValueLatente >= 0 ? "+" : ""}{fmt(Math.round(pos.plusValueLatente))} FCFA</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>VL actuelle {pos.lastValueDate && `(${dateLabelFull(pos.lastValueDate)})`}</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(pos.currentVL)} FCFA</div>
+            </div>
+            {pos.dayChangePct !== null && (
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Variation du jour</div>
+                <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.dayChangePct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.dayChangePct >= 0 ? "+" : ""}{pos.dayChangePct.toFixed(2)}%</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => { setVlFormFundId(fund.id); setVlDate(todayISO()); setVlValue(pos.currentVL || 0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+              <TrendingUp size={12} /> Renseigner la VL du jour
+            </button>
+            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+              <Plus size={12} /> Souscription
+            </button>
+            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+              <Minus size={12} /> Rachat
+            </button>
+            <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+              {expandedFundId === fund.id ? "Masquer" : "Voir"} l'historique ({pos.opsCount})
+            </button>
+            <button onClick={() => deleteFund(fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: COLOR.claySoft, padding: "7px 4px", fontSize: 12, cursor: "pointer", marginLeft: "auto" }}>
+              <Trash2 size={12} />
+            </button>
+          </div>
+
+          {vlFormFundId === fund.id && (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Date</div>
+                <input type="date" value={vlDate} onChange={(e) => setVlDate(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>VL (valeur liquidative)</div>
+                <input type="number" value={vlValue || ""} onChange={(e) => setVlValue(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace" }} />
+              </div>
+              <button onClick={saveVl} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+              <button onClick={() => setVlFormFundId(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+            </div>
+          )}
+
+          {opFormFundId === fund.id && (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Type</div>
+                <select value={opType} onChange={(e) => setOpType(e.target.value as "Souscription" | "Rachat")} style={inputStyle}>
+                  <option value="Souscription">Souscription</option>
+                  <option value="Rachat">Rachat</option>
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Date</div>
+                <input type="date" value={opDate} onChange={(e) => setOpDate(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Quantité (parts)</div>
+                <input type="number" value={opQty || ""} onChange={(e) => setOpQty(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 110 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>VL</div>
+                <input type="number" value={opVl || ""} onChange={(e) => setOpVl(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 110 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Montant net (optionnel — sinon qté × VL)</div>
+                <input type="number" value={opMontant || ""} onChange={(e) => setOpMontant(Number(e.target.value) || 0)} placeholder={fmt(Math.round(opQty * opVl))} style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 140 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Compte</div>
+                <select value={opAccount} onChange={(e) => setOpAccount(e.target.value)} style={inputStyle}>
+                  {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
+              <button onClick={saveOperation} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+              <button onClick={() => setOpFormFundId(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+              <div style={{ width: "100%", fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
+                Crée automatiquement une transaction {opType === "Souscription" ? "Dépense" : "Revenu"} (Productif) dans le Journal, pour que le solde de {opAccount || "ce compte"} reste cohérent.
+              </div>
+            </div>
+          )}
+
+          {expandedFundId === fund.id && (
+            <div style={{ marginTop: 14, overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead><tr>{["Date", "Sens", "Quantité", "VL", "Montant"].map((h) => <th key={h} style={{ textAlign: "left", padding: "6px 8px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}` }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {fundOperations.filter((o) => o.fundId === fund.id).sort((a, b) => b.date.localeCompare(a.date)).map((o) => (
+                    <tr key={o.id}>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(o.date)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: o.type === "Souscription" ? COLOR.emeraldSoft : COLOR.claySoft }}>{o.type}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{o.quantite.toFixed(4)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.montant)}</td>
+                    </tr>
+                  ))}
+                  {!fundOperations.filter((o) => o.fundId === fund.id).length && <tr><td colSpan={5} style={{ padding: 10, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune opération</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      ))}
+    </div>
+  );
+}
+
 function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurring }: {
   transactions: Transaction[]; accounts: Account[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; recurring: RecurringTemplate[];
 }) {
@@ -12106,7 +12458,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
 // ============================================================
 // MAIN APP
 // ============================================================
-type Tab = "saisie" | "apercu" | "valeurnette" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde" | "assistant";
+type Tab = "saisie" | "apercu" | "valeurnette" | "bourse" | "flux" | "comparatif" | "comparateur" | "topcategories" | "categoryoverview" | "mensuel" | "journalier" | "categories" | "gestioncategories" | "groupes" | "enveloppes" | "budgets" | "simulateur" | "objectif" | "business" | "activites" | "charges" | "diagnostic" | "rapprochement" | "creances" | "comptes" | "payees" | "recurrences" | "journal" | "export" | "sauvegarde" | "assistant";
 
 const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[] = [
   { section: "Saisie rapide", items: [
@@ -12115,6 +12467,7 @@ const NAV: { section: string; items: { id: Tab; label: string; icon: any }[] }[]
   { section: "Tableau de bord", items: [
     { id: "apercu", label: "Aperçu", icon: LayoutDashboard },
     { id: "valeurnette", label: "Valeur nette", icon: Wallet },
+    { id: "bourse", label: "Bourse (FCP)", icon: Rocket },
     { id: "flux", label: "Flux & Calendrier", icon: Workflow },
     { id: "comparatif", label: "Comparatif annuel", icon: BarChart3 },
     { id: "comparateur", label: "Comparateur", icon: GitCompare },
@@ -12266,6 +12619,9 @@ export default function GrandLivre() {
   const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets, canSaveGated);
   const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals, canSaveGated);
   const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring, canSaveGated);
+  const [funds, setFunds, fundsLoaded] = usePersistentState<Fund[]>("gl-funds", [], canSaveGated);
+  const [fundOperations, setFundOperations, fundOperationsLoaded] = usePersistentState<FundOperation[]>("gl-fund-operations", [], canSaveGated);
+  const [fundDailyValues, setFundDailyValues, fundDailyValuesLoaded] = usePersistentState<FundDailyValue[]>("gl-fund-daily-values", [], canSaveGated);
   const [tab, setTab] = useState<Tab>("saisie");
   // Navigation contextuelle entre pages : navigateTo("categoryoverview", { category: "Shopping" })
   // change d'onglet ET transmet un contexte que la page de destination applique à son
@@ -12397,13 +12753,13 @@ export default function GrandLivre() {
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-    customDepSubcategories, customRevSubcategories, deletedTransactionIds,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-      customDepSubcategories, customRevSubcategories, deletedTransactionIds,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues,
     };
   });
   const syncCodeRef = useRef(syncCode);
@@ -12440,6 +12796,7 @@ export default function GrandLivre() {
         categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
+        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues,
       };
       list = list.filter((b) => b.date !== todayKey);
       list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
@@ -12514,6 +12871,9 @@ export default function GrandLivre() {
       const mergedRecurring = d.recurring ? mergeById(s.recurring, d.recurring) : s.recurring;
       const mergedRules = d.rules ? mergeById(s.rules, d.rules) : s.rules;
       const mergedAccounts = d.accounts ? mergeById(s.accounts, d.accounts) : s.accounts;
+      const mergedFunds = d.funds ? mergeById(s.funds, d.funds) : s.funds;
+      const mergedFundOperations = d.fundOperations ? mergeById(s.fundOperations, d.fundOperations) : s.fundOperations;
+      const mergedFundDailyValues = d.fundDailyValues ? mergeById(s.fundDailyValues, d.fundDailyValues) : s.fundDailyValues;
       const mergedActivities = d.activities ? Array.from(new Set([...s.activities, ...d.activities])) : s.activities;
       const mergedCategoryGroups = d.categoryGroups ? { ...d.categoryGroups, ...s.categoryGroups } : s.categoryGroups;
       const mergedCategoryScope = d.categoryScope ? { ...d.categoryScope, ...s.categoryScope } : s.categoryScope;
@@ -12532,12 +12892,14 @@ export default function GrandLivre() {
         || !eq(mergedActivities, s.activities) || !eq(mergedCategoryGroups, s.categoryGroups) || !eq(mergedCategoryScope, s.categoryScope)
         || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
+        || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues)
         || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture;
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
+        || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues)
         || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
 
       if (localChanged) {
@@ -12561,6 +12923,9 @@ export default function GrandLivre() {
         setMonthlyObjective(finalMonthlyObjective);
         setIncludeGrundfosVoiture(finalIncludeGrundfos);
         setDeletedTransactionIds(mergedDeletedIds);
+        setFunds(mergedFunds);
+        setFundOperations(mergedFundOperations);
+        setFundDailyValues(mergedFundDailyValues);
         // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
         // une synchronisation en attente se déclenche tout de suite après, elle reparte
         // bien de ce résultat fusionné plutôt que de l'ancien état.
@@ -12570,7 +12935,7 @@ export default function GrandLivre() {
           categoryScope: mergedCategoryScope, chargeOverrides: mergedChargeOverrides, categoryActivity: mergedCategoryActivity,
           activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
-          deletedTransactionIds: mergedDeletedIds,
+          deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
         };
       }
 
@@ -12583,7 +12948,7 @@ export default function GrandLivre() {
           loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
           activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
-          deletedTransactionIds: mergedDeletedIds,
+          deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
         });
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -12703,6 +13068,7 @@ export default function GrandLivre() {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+      funds, fundOperations, fundDailyValues,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
     if (data.transactions) setTransactions(data.transactions);
@@ -12723,6 +13089,9 @@ export default function GrandLivre() {
     if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
     if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
     if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
+    if (data.funds) setFunds(data.funds);
+    if (data.fundOperations) setFundOperations(data.fundOperations);
+    if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
   };
 
   if (!allLoaded) {
@@ -12893,6 +13262,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
@@ -12907,6 +13277,7 @@ export default function GrandLivre() {
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+                funds, fundOperations, fundDailyValues,
               })}
               restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
@@ -12932,6 +13303,9 @@ export default function GrandLivre() {
                 if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
                 if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
                 if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
+                if (data.funds) setFunds(data.funds);
+                if (data.fundOperations) setFundOperations(data.fundOperations);
+                if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
                 setPreRestoreSnapshot(null);
                 setPreRestoreSnapshotAt(null);
               }}
