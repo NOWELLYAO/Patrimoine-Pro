@@ -247,6 +247,11 @@ interface Account {
   name: string;
   kind: "Espèces" | "Banque" | "Mobile Money" | "Carte de crédit" | "Autre";
   openingBalance: number; // solde au moment où le suivi dans l'app a commencé
+  updatedAt?: string; // horodatage posé à chaque création/modification — sans lui,
+  // mergeById ne peut pas arbitrer un conflit entre deux appareils et fait
+  // systématiquement gagner la version distante, même si elle est plus ancienne
+  // (bug identifié le 21/08/2026 : un solde de départ modifié hors-ligne pouvait être
+  // silencieusement écrasé à la prochaine synchro).
 }
 interface CategoryBudget {
   id: string;
@@ -9221,8 +9226,8 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [confirmMerge, setConfirmMerge] = useState(false);
 
-  const add = () => { if (!form.name) return; setAccounts([...accounts, { ...form, id: uid("a") }]); setForm({ name: "", kind: "Banque", openingBalance: 0 }); setAdding(false); };
-  const update = (id: string, patch: Partial<Account>) => setAccounts(accounts.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const add = () => { if (!form.name) return; setAccounts([...accounts, { ...form, id: uid("a"), updatedAt: new Date().toISOString() }]); setForm({ name: "", kind: "Banque", openingBalance: 0 }); setAdding(false); };
+  const update = (id: string, patch: Partial<Account>) => setAccounts(accounts.map((a) => (a.id === id ? { ...a, ...patch, updatedAt: new Date().toISOString() } : a)));
   const remove = (id: string) => setAccounts(accounts.filter((a) => a.id !== id));
   const total = totalAccountsBalance(accounts, transactions);
 
@@ -9243,7 +9248,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
       if (next.account === next.onBehalfOf) next = { ...next, onBehalfOf: undefined };
       return next;
     }));
-    setAccounts(accounts.filter((a) => a.id !== source.id).map((a) => a.id === target.id ? { ...a, openingBalance: a.openingBalance + source.openingBalance } : a));
+    setAccounts(accounts.filter((a) => a.id !== source.id).map((a) => a.id === target.id ? { ...a, openingBalance: a.openingBalance + source.openingBalance, updatedAt: new Date().toISOString() } : a));
     setMerging(false); setMergeSourceId(""); setMergeTargetId(""); setConfirmMerge(false);
   };
 
