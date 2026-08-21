@@ -8473,28 +8473,17 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const totalDayChangePct = totalPrevValorisation !== 0 ? (totalDayChange / totalPrevValorisation) * 100 : 0;
 
   // Courbe d'évolution du portefeuille — reconstruit la quantité détenue à chaque date
-  // de VL connue (toutes fonds confondus) pour tracer la valorisation totale dans le
-  // temps. Les dates d'opération (souscription/rachat) comptent aussi comme des points
-  // — chacune porte sa propre VL — pas seulement les VL saisies explicitement, pour que
-  // la courbe apparaisse dès la 2e donnée disponible plutôt que d'attendre 2 VL
-  // saisies à la main (14/08/2026, suite à une question de l'utilisateur).
+  // de VL connue (toutes fonds confondus) pour tracer la valorisation totale dans le temps.
   const chartData = useMemo(() => {
-    const allDates = Array.from(new Set([
-      ...fundDailyValues.map((v) => v.date),
-      ...fundOperations.map((o) => o.date),
-    ])).sort();
+    const allDates = Array.from(new Set(fundDailyValues.map((v) => v.date))).sort();
     return allDates.map((date) => {
       let total = 0;
       funds.forEach((f) => {
         const opsUntil = fundOperations.filter((o) => o.fundId === f.id && o.date <= date).sort((a, b) => a.date.localeCompare(b.date));
         let qty = 0;
         opsUntil.forEach((o) => { qty += o.type === "Souscription" ? o.quantite : -o.quantite; });
-        // VL du jour : priorité à une VL explicitement saisie ce jour-là ou avant, sinon
-        // celle de la dernière opération connue à cette date (une souscription/un rachat
-        // porte toujours sa propre VL, exactement comme sur un relevé).
         const valuesUntil = fundDailyValues.filter((v) => v.fundId === f.id && v.date <= date).sort((a, b) => a.date.localeCompare(b.date));
-        const opsWithVlUntil = opsUntil; // déjà trié, déjà filtré ≤ date
-        const vl = valuesUntil[valuesUntil.length - 1]?.vl ?? opsWithVlUntil[opsWithVlUntil.length - 1]?.vl ?? 0;
+        const vl = valuesUntil[valuesUntil.length - 1]?.vl || 0;
         total += qty * vl;
       });
       return { date, valeur: Math.round(total) };
@@ -8515,17 +8504,13 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           )}
           <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b></span>
         </div>
-        {chartData.length > 1 ? (
+        {chartData.length > 1 && (
           <div style={{ height: 100, marginTop: 16 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData}>
                 <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
-          </div>
-        ) : (
-          <div style={{ marginTop: 16, fontSize: 11.5, color: "#9fb3d9", fontStyle: "italic" }}>
-            La courbe apparaîtra ici dès qu'un deuxième point sera disponible — renseigne la VL d'un fonds un autre jour, ou fais une nouvelle opération.
           </div>
         )}
       </div>
@@ -12747,7 +12732,7 @@ export default function GrandLivre() {
     });
   }, [txWithGroup, filters]);
 
-  const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded && fundsLoaded && fundOperationsLoaded && fundDailyValuesLoaded;
+  const allLoaded = txLoaded && groupsLoaded && scopeLoaded && rulesLoaded && loansLoaded && capLoaded && accountsLoaded && budgetsLoaded && goalsLoaded && recurringLoaded && syncCodeLoaded;
 
   // ============================================================
   // MOTEUR DE SYNCHRONISATION UNIFIÉ — reconstruit le 11/08/2026
@@ -13001,7 +12986,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -13012,7 +12997,7 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
