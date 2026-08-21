@@ -8397,12 +8397,13 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
 }
 
-function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, transactions, setTransactions, categoryGroups, setCategoryGroups }: {
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, transactions, setTransactions, categoryGroups, setCategoryGroups, deletedFundIds, setDeletedFundIds }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
   fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
   accounts: Account[]; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
   categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
+  deletedFundIds: Record<string, string>; setDeletedFundIds: (d: Record<string, string>) => void;
 }) {
   const [addFundOpen, setAddFundOpen] = useState(false);
   const [newFundName, setNewFundName] = useState("");
@@ -8439,6 +8440,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       setFundDailyValues(fundDailyValues.filter((v) => v.fundId !== id));
     }
     setFunds(funds.filter((f) => f.id !== id));
+    // Tombstone — sans lui, le fonds réapparaîtrait au prochain merge depuis un
+    // appareil qui ne l'a pas encore vu supprimé (corrigé le 21/08/2026).
+    setDeletedFundIds({ ...deletedFundIds, [id]: new Date().toISOString() });
   };
 
   const saveVl = () => {
@@ -12551,6 +12555,12 @@ export default function GrandLivre() {
   // prochaine synchronisation. On garde donc la liste des identifiants supprimés
   // (jamais oubliée), qui a toujours le dernier mot sur une fusion.
   const [deletedTransactionIds, setDeletedTransactionIds] = usePersistentState<Record<string, string>>("gl-deleted-tx-ids", {}, canSaveGated);
+  // Tombstone dédié aux fonds Bourse — sans lui, supprimer un fonds ne fait
+  // "disparaître" que localement : au prochain merge, mergeById voit l'absence comme
+  // "pas encore synchronisé" plutôt que "supprimé", et le fait réapparaître depuis
+  // l'autre appareil. Corrigé le 21/08/2026. La suppression est cascadée : les
+  // opérations et VL de ce fonds sont aussi retirées du merge via leur fundId.
+  const [deletedFundIds, setDeletedFundIds] = usePersistentState<Record<string, string>>("gl-deleted-fund-ids", {}, canSaveGated);
   const setTransactionsTracked = (next: Transaction[]) => {
     const nextIds = new Set(next.map((t) => t.id));
     const removedIds = transactions.filter((t) => !nextIds.has(t.id)).map((t) => t.id);
@@ -12775,13 +12785,13 @@ export default function GrandLivre() {
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds,
     };
   });
   const syncCodeRef = useRef(syncCode);
@@ -12818,7 +12828,7 @@ export default function GrandLivre() {
         categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
-        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues,
+        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds,
       };
       list = list.filter((b) => b.date !== todayKey);
       list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
@@ -12883,6 +12893,7 @@ export default function GrandLivre() {
       const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
 
       const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...s.deletedTransactionIds } : s.deletedTransactionIds;
+      const mergedDeletedFundIds = d.deletedFundIds ? { ...d.deletedFundIds, ...s.deletedFundIds } : s.deletedFundIds;
       // Calculée en premier : décide qui gagne un vrai conflit (même id modifié des deux
       // côtés) dans les fusions ci-dessous — voir la note sur mergeById plus haut.
       const localIsNewer = !!(lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt)));
@@ -12893,9 +12904,12 @@ export default function GrandLivre() {
       const mergedRecurring = d.recurring ? mergeById(s.recurring, d.recurring) : s.recurring;
       const mergedRules = d.rules ? mergeById(s.rules, d.rules) : s.rules;
       const mergedAccounts = d.accounts ? mergeById(s.accounts, d.accounts) : s.accounts;
-      const mergedFunds = d.funds ? mergeById(s.funds, d.funds) : s.funds;
-      const mergedFundOperations = d.fundOperations ? mergeById(s.fundOperations, d.fundOperations) : s.fundOperations;
-      const mergedFundDailyValues = d.fundDailyValues ? mergeById(s.fundDailyValues, d.fundDailyValues) : s.fundDailyValues;
+      const mergedFunds = (d.funds ? mergeById(s.funds, d.funds) : s.funds).filter((f: Fund) => !mergedDeletedFundIds[f.id]);
+      // Suppression cascadée : les opérations/VL d'un fonds tombstoné sortent aussi du
+      // merge, sinon elles resteraient orphelines (rattachées à un fundId qui n'existe
+      // plus) sans jamais être nettoyées.
+      const mergedFundOperations = (d.fundOperations ? mergeById(s.fundOperations, d.fundOperations) : s.fundOperations).filter((o: FundOperation) => !mergedDeletedFundIds[o.fundId]);
+      const mergedFundDailyValues = (d.fundDailyValues ? mergeById(s.fundDailyValues, d.fundDailyValues) : s.fundDailyValues).filter((v: FundDailyValue) => !mergedDeletedFundIds[v.fundId]);
       const mergedActivities = d.activities ? Array.from(new Set([...s.activities, ...d.activities])) : s.activities;
       const mergedCategoryGroups = d.categoryGroups ? { ...d.categoryGroups, ...s.categoryGroups } : s.categoryGroups;
       const mergedCategoryScope = d.categoryScope ? { ...d.categoryScope, ...s.categoryScope } : s.categoryScope;
@@ -12914,14 +12928,14 @@ export default function GrandLivre() {
         || !eq(mergedActivities, s.activities) || !eq(mergedCategoryGroups, s.categoryGroups) || !eq(mergedCategoryScope, s.categoryScope)
         || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
-        || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues)
+        || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds)
         || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture;
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
-        || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues)
+        || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds)
         || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
 
       if (localChanged) {
@@ -12948,6 +12962,7 @@ export default function GrandLivre() {
         setFunds(mergedFunds);
         setFundOperations(mergedFundOperations);
         setFundDailyValues(mergedFundDailyValues);
+        setDeletedFundIds(mergedDeletedFundIds);
         // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
         // une synchronisation en attente se déclenche tout de suite après, elle reparte
         // bien de ce résultat fusionné plutôt que de l'ancien état.
@@ -12958,6 +12973,7 @@ export default function GrandLivre() {
           activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
+          deletedFundIds: mergedDeletedFundIds,
         };
       }
 
@@ -12971,6 +12987,7 @@ export default function GrandLivre() {
           activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
+          deletedFundIds: mergedDeletedFundIds,
         });
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -13008,7 +13025,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -13019,7 +13036,7 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
@@ -13090,7 +13107,7 @@ export default function GrandLivre() {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-      funds, fundOperations, fundDailyValues,
+      funds, fundOperations, fundDailyValues, deletedFundIds,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
     if (data.transactions) setTransactions(data.transactions);
@@ -13114,6 +13131,7 @@ export default function GrandLivre() {
     if (data.funds) setFunds(data.funds);
     if (data.fundOperations) setFundOperations(data.fundOperations);
     if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
+    if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
   };
 
   if (!allLoaded) {
@@ -13284,7 +13302,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
+          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
@@ -13299,7 +13317,7 @@ export default function GrandLivre() {
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                funds, fundOperations, fundDailyValues,
+                funds, fundOperations, fundDailyValues, deletedFundIds,
               })}
               restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
@@ -13328,6 +13346,7 @@ export default function GrandLivre() {
                 if (data.funds) setFunds(data.funds);
                 if (data.fundOperations) setFundOperations(data.fundOperations);
                 if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
+                if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
                 setPreRestoreSnapshot(null);
                 setPreRestoreSnapshotAt(null);
               }}
