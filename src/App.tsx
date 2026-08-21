@@ -8397,13 +8397,14 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
 }
 
-function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, transactions, setTransactions, categoryGroups, setCategoryGroups, deletedFundIds, setDeletedFundIds }: {
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, transactions, setTransactions, categoryGroups, setCategoryGroups, deletedFundIds, setDeletedFundIds, isMobile }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
   fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
   accounts: Account[]; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
   categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
   deletedFundIds: Record<string, string>; setDeletedFundIds: (d: Record<string, string>) => void;
+  isMobile: boolean;
 }) {
   const [addFundOpen, setAddFundOpen] = useState(false);
   const [newFundName, setNewFundName] = useState("");
@@ -8421,6 +8422,40 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [opMontant, setOpMontant] = useState<number>(0);
   const [opAccount, setOpAccount] = useState(accounts[0]?.name || "");
   const [expandedFundId, setExpandedFundId] = useState<string | null>(null);
+  // Confirmation systématique avant suppression — corrigé le 21/08/2026 : un fonds
+  // sans opération se supprimait auparavant d'un clic sec, sans rien demander (seul le
+  // cas "avec opérations" passait par une confirmation native du navigateur). Utilise
+  // désormais le ConfirmDialog déjà utilisé partout ailleurs dans l'app, dans tous les
+  // cas de figure.
+  const [confirmDeleteFundId, setConfirmDeleteFundId] = useState<string | null>(null);
+
+  // Même verrou de scroll iOS-safe que la Saisie du jour (QuickAddFAB) — figer le body
+  // en position fixed à sa position de scroll exacte, plutôt que overflow:hidden qui
+  // ne suffit pas sur iOS Safari.
+  const anyModalOpen = !!vlFormFundId || !!opFormFundId;
+  useEffect(() => {
+    if (anyModalOpen) {
+      const scrollY = window.scrollY;
+      const prevBodyPosition = document.body.style.position;
+      const prevBodyTop = document.body.style.top;
+      const prevBodyWidth = document.body.style.width;
+      const prevBodyOverflow = document.body.style.overflow;
+      const prevHtmlOverflow = document.documentElement.style.overflow;
+      document.body.style.position = "fixed";
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.width = "100%";
+      document.body.style.overflow = "hidden";
+      document.documentElement.style.overflow = "hidden";
+      return () => {
+        document.body.style.position = prevBodyPosition;
+        document.body.style.top = prevBodyTop;
+        document.body.style.width = prevBodyWidth;
+        document.body.style.overflow = prevBodyOverflow;
+        document.documentElement.style.overflow = prevHtmlOverflow;
+        window.scrollTo(0, scrollY);
+      };
+    }
+  }, [anyModalOpen]);
 
   const ensureInvestmentCategory = () => {
     if (categoryGroups[INVESTMENT_CATEGORY] !== "Productif") {
@@ -8434,11 +8469,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setNewFundName(""); setAddFundOpen(false);
   };
   const deleteFund = (id: string) => {
-    if (fundOperations.some((o) => o.fundId === id)) {
-      if (!confirm("Ce fonds a des opérations enregistrées. Les supprimer aussi ? (les transactions liées dans le Journal ne seront PAS supprimées automatiquement)")) return;
-      setFundOperations(fundOperations.filter((o) => o.fundId !== id));
-      setFundDailyValues(fundDailyValues.filter((v) => v.fundId !== id));
-    }
+    setFundOperations(fundOperations.filter((o) => o.fundId !== id));
+    setFundDailyValues(fundDailyValues.filter((v) => v.fundId !== id));
     setFunds(funds.filter((f) => f.id !== id));
     // Tombstone — sans lui, le fonds réapparaîtrait au prochain merge depuis un
     // appareil qui ne l'a pas encore vu supprimé (corrigé le 21/08/2026).
@@ -8612,64 +8644,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               {expandedFundId === fund.id ? "Masquer" : "Voir"} l'historique ({pos.opsCount})
             </button>
-            <button onClick={() => deleteFund(fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: COLOR.claySoft, padding: "7px 4px", fontSize: 12, cursor: "pointer", marginLeft: "auto" }}>
+            <button onClick={() => setConfirmDeleteFundId(fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: COLOR.claySoft, padding: "7px 4px", fontSize: 12, cursor: "pointer", marginLeft: "auto" }}>
               <Trash2 size={12} />
             </button>
           </div>
-
-          {vlFormFundId === fund.id && (
-            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Date</div>
-                <input type="date" value={vlDate} onChange={(e) => setVlDate(e.target.value)} style={inputStyle} />
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>VL (valeur liquidative)</div>
-                <input type="number" value={vlValue || ""} onChange={(e) => setVlValue(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace" }} />
-              </div>
-              <button onClick={saveVl} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
-              <button onClick={() => setVlFormFundId(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
-            </div>
-          )}
-
-          {opFormFundId === fund.id && (
-            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Type</div>
-                <select value={opType} onChange={(e) => setOpType(e.target.value as "Souscription" | "Rachat")} style={inputStyle}>
-                  <option value="Souscription">Souscription</option>
-                  <option value="Rachat">Rachat</option>
-                </select>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Date</div>
-                <input type="date" value={opDate} onChange={(e) => setOpDate(e.target.value)} style={inputStyle} />
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Quantité (parts)</div>
-                <input type="number" value={opQty || ""} onChange={(e) => setOpQty(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 110 }} />
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>VL</div>
-                <input type="number" value={opVl || ""} onChange={(e) => setOpVl(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 110 }} />
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Montant net (optionnel — sinon qté × VL)</div>
-                <input type="number" value={opMontant || ""} onChange={(e) => setOpMontant(Number(e.target.value) || 0)} placeholder={fmt(Math.round(opQty * opVl))} style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 140 }} />
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Compte</div>
-                <select value={opAccount} onChange={(e) => setOpAccount(e.target.value)} style={inputStyle}>
-                  {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
-                </select>
-              </div>
-              <button onClick={saveOperation} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
-              <button onClick={() => setOpFormFundId(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
-              <div style={{ width: "100%", fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
-                Crée automatiquement une transaction {opType === "Souscription" ? "Dépense" : "Revenu"} (Productif) dans le Journal, pour que le solde de {opAccount || "ce compte"} reste cohérent.
-              </div>
-            </div>
-          )}
 
           {expandedFundId === fund.id && (
             <div style={{ marginTop: 14, overflowX: "auto" }}>
@@ -8692,6 +8670,209 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           )}
         </Panel>
       ))}
+
+      {vlFormFundId && (() => {
+        const fund = funds.find((f) => f.id === vlFormFundId);
+        if (!fund) return null;
+        return (
+          <div style={{
+            position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg,
+            display: "flex", justifyContent: "center", alignItems: isMobile ? "stretch" : "center",
+            height: isMobile ? "100dvh" : "100%",
+          }}>
+            <div style={{
+              width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100dvh" : "min(560px, 92vh)",
+              display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
+              borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`,
+              overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
+            }}>
+              {/* Header — même chrome que la Saisie du jour : bouton fermer circulaire, pastille centrale */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingLeft: 20, paddingRight: 20, paddingBottom: 8, paddingTop: "max(20px, env(safe-area-inset-top))", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
+                <button onClick={() => setVlFormFundId(null)} style={{
+                  width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
+                  color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+                }}>
+                  <X size={18} />
+                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, background: COLOR.surface, borderRadius: 24, padding: "8px 16px", border: `1px solid ${COLOR.hairline}` }}>
+                  <TrendingUp size={15} color={COLOR.slateBlueSoft} />
+                  <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: COLOR.ink }}>VL du jour</span>
+                </div>
+                <div style={{ width: 40 }} />
+              </div>
+
+              {/* Fonds + date */}
+              <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
+                <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{fund.name}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 10 }}>
+                <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
+                  <input type="date" value={vlDate} onChange={(e) => setVlDate(e.target.value)}
+                    style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+                </div>
+              </div>
+
+              {/* VL — zone centrale, même esprit que le montant de la Saisie du jour */}
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative", padding: "10px 24px", minHeight: 0 }}>
+                <div style={{
+                  position: "absolute", fontSize: 60, fontWeight: 700, color: COLOR.slateBlue, opacity: 0.07,
+                  fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
+                }}>FCFA</div>
+                <input
+                  type="number" inputMode="numeric" value={vlValue || ""} placeholder="0" autoFocus={!isMobile}
+                  onChange={(e) => setVlValue(Number(e.target.value) || 0)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveVl(); }}
+                  style={{
+                    position: "relative", background: "transparent", border: "none", outline: "none",
+                    color: COLOR.ink, fontSize: 48, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace",
+                    textAlign: "center", width: "100%", maxWidth: 280,
+                  }}
+                />
+                <span style={{ position: "relative", fontSize: 12, color: COLOR.inkMuted, marginTop: 4 }}>Valeur liquidative</span>
+              </div>
+
+              <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 20px", background: COLOR.surface }} className="gl-safe-bottom">
+                <button onClick={saveVl} disabled={vlValue <= 0} style={{
+                  width: "100%", background: vlValue > 0 ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 12,
+                  color: vlValue > 0 ? "#0e1611" : COLOR.inkMuted, padding: "14px 0", fontSize: 15, fontWeight: 700, cursor: vlValue > 0 ? "pointer" : "default",
+                }}>
+                  Enregistrer
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {opFormFundId && (() => {
+        const fund = funds.find((f) => f.id === opFormFundId);
+        if (!fund) return null;
+        const opColor = opType === "Souscription" ? COLOR.emerald : COLOR.clay;
+        return (
+          <div style={{
+            position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg,
+            display: "flex", justifyContent: "center", alignItems: isMobile ? "stretch" : "center",
+            height: isMobile ? "100dvh" : "100%",
+          }}>
+            <div style={{
+              width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100dvh" : "min(720px, 92vh)",
+              display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
+              borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`,
+              overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
+            }}>
+              {/* Header — bouton fermer + bascule Souscription/Rachat, même chrome que
+                  le sélecteur Dépense/Revenu de la Saisie du jour */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingLeft: 20, paddingRight: 20, paddingBottom: 8, paddingTop: "max(20px, env(safe-area-inset-top))", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
+                <button onClick={() => setOpFormFundId(null)} style={{
+                  width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
+                  color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+                }}>
+                  <X size={18} />
+                </button>
+                <div style={{ display: "flex", gap: 10, background: COLOR.surface, borderRadius: 24, padding: 5, border: `1px solid ${COLOR.hairline}` }}>
+                  <button onClick={() => setOpType("Souscription")} title="Souscription" style={{
+                    width: 38, height: 38, borderRadius: "50%", border: "none", cursor: "pointer",
+                    background: opType === "Souscription" ? COLOR.emerald : "transparent", color: opType === "Souscription" ? COLOR.bg : COLOR.emeraldSoft,
+                    display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s",
+                  }}>
+                    <Plus size={18} strokeWidth={2.5} />
+                  </button>
+                  <button onClick={() => setOpType("Rachat")} title="Rachat" style={{
+                    width: 38, height: 38, borderRadius: "50%", border: "none", cursor: "pointer",
+                    background: opType === "Rachat" ? COLOR.clay : "transparent", color: opType === "Rachat" ? COLOR.bg : COLOR.claySoft,
+                    display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s",
+                  }}>
+                    <Minus size={18} strokeWidth={2.5} />
+                  </button>
+                </div>
+                <div style={{ width: 40 }} />
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
+                <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{fund.name}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 10 }}>
+                <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
+                  <input type="date" value={opDate} onChange={(e) => setOpDate(e.target.value)}
+                    style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+                </div>
+              </div>
+
+              {/* Montant — zone centrale, comme la Saisie du jour. Quantité de parts
+                  calculée automatiquement à partir du montant et de la VL saisie
+                  ci-dessous (modifiable manuellement si besoin via le champ Quantité). */}
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative", padding: "10px 24px", minHeight: 0 }}>
+                <div style={{
+                  position: "absolute", fontSize: 60, fontWeight: 700, color: opColor, opacity: 0.07,
+                  fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
+                }}>FCFA</div>
+                <input
+                  type="number" inputMode="numeric" value={opMontant || ""} placeholder="0" autoFocus={!isMobile}
+                  onChange={(e) => {
+                    const m = Number(e.target.value) || 0;
+                    setOpMontant(m);
+                    if (opVl > 0) setOpQty(Math.round((m / opVl) * 10000) / 10000);
+                  }}
+                  style={{
+                    position: "relative", background: "transparent", border: "none", outline: "none",
+                    color: COLOR.ink, fontSize: 48, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace",
+                    textAlign: "center", width: "100%", maxWidth: 280,
+                  }}
+                />
+                <span style={{ position: "relative", fontSize: 12, color: COLOR.inkMuted, marginTop: 4 }}>
+                  {opVl > 0 ? `= ${opQty.toFixed(4)} parts à VL ${fmt(opVl)}` : "Montant net"}
+                </span>
+              </div>
+
+              {/* Bas : VL / quantité / compte — même esprit que Compte/Catégorie de la Saisie du jour */}
+              <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 20px", background: COLOR.surface }} className="gl-safe-bottom">
+                <div style={{ display: "flex", gap: 20 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>VL</div>
+                    <input type="number" inputMode="numeric" value={opVl || ""} placeholder="0"
+                      onChange={(e) => {
+                        const v = Number(e.target.value) || 0;
+                        setOpVl(v);
+                        if (v > 0 && opMontant > 0) setOpQty(Math.round((opMontant / v) * 10000) / 10000);
+                      }}
+                      style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", padding: 0, width: "100%", outline: "none" }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, textAlign: "right" }}>
+                    <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6, textAlign: "right" }}>Compte</div>
+                    <select value={opAccount} onChange={(e) => setOpAccount(e.target.value)} style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600, fontFamily: "'Fraunces', serif", padding: 0, width: "100%", textAlign: "right", cursor: "pointer", appearance: "none", WebkitAppearance: "none" }}>
+                      {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}`, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
+                  Crée automatiquement une transaction {opType === "Souscription" ? "Dépense" : "Revenu"} (Productif) dans le Journal, pour que le solde de {opAccount || "ce compte"} reste cohérent.
+                </div>
+                <button onClick={saveOperation} disabled={opQty <= 0 || opVl <= 0 || !opAccount} style={{
+                  width: "100%", marginTop: 14, background: (opQty > 0 && opVl > 0 && opAccount) ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 12,
+                  color: (opQty > 0 && opVl > 0 && opAccount) ? "#0e1611" : COLOR.inkMuted, padding: "14px 0", fontSize: 15, fontWeight: 700, cursor: (opQty > 0 && opVl > 0 && opAccount) ? "pointer" : "default",
+                }}>
+                  Enregistrer
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      <ConfirmDialog
+        open={!!confirmDeleteFundId}
+        title="Supprimer ce fonds ?"
+        message={(() => {
+          const f = funds.find((x) => x.id === confirmDeleteFundId);
+          const opsCount = confirmDeleteFundId ? fundOperations.filter((o) => o.fundId === confirmDeleteFundId).length : 0;
+          const base = `Cette action est définitive.`;
+          return opsCount > 0
+            ? `${base} "${f?.name}" a ${opsCount} opération${opsCount > 1 ? "s" : ""} enregistrée${opsCount > 1 ? "s" : ""} — elles seront aussi supprimées. Les transactions déjà créées dans le Journal, elles, ne seront PAS supprimées automatiquement.`
+            : `${base} "${f?.name}" sera retiré de ton portefeuille Bourse.`;
+        })()}
+        onConfirm={() => { if (confirmDeleteFundId) deleteFund(confirmDeleteFundId); setConfirmDeleteFundId(null); }}
+        onCancel={() => setConfirmDeleteFundId(null)}
+      />
     </div>
   );
 }
@@ -13302,7 +13483,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} />}
+          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} isMobile={isMobile} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
