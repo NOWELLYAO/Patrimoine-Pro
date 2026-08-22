@@ -296,6 +296,10 @@ interface FundOperation {
   quantite: number;
   vl: number;
   montant: number;
+  frais?: number; // ajouté au prix de revient (uniquement pour une souscription) — sur
+  // demande explicite de l'utilisateur (21/08/2026), pour combler l'écart observé
+  // entre le PRU recalculé par l'app à partir du seul "Montant net" et celui affiché
+  // sur le relevé NSIA (les frais de souscription n'apparaissaient pas dans le relevé).
   account: string;
   updatedAt?: string;
 }
@@ -475,6 +479,49 @@ const seedBudgets: CategoryBudget[] = [
   { id: "b1", category: "Cadeaux", amount: 300000, rollover: false },
   { id: "b2", category: "Divertissement", amount: 200000, rollover: false },
   { id: "b3", category: "Invitation", amount: 100000, rollover: false },
+];
+
+// Données de départ Bourse (FCP) — importées le 21/08/2026 depuis le relevé de
+// portefeuille NSIA Asset Management (01/05/2025 au 21/08/2026, compte P21136), sur
+// demande explicite de l'utilisateur. Les quantités additionnées par fonds
+// correspondent exactement aux positions finales du relevé (vérifié à l'import :
+// 2,1760 / 14,8711 / 42,7455 parts) — l'historique est donc complet, pas partiel.
+// Le "Prix de revient" (PRU) recalculé par l'app à partir de ces opérations
+// correspond au relevé à quelques dizaines de FCFA près pour AURORE MONETAIRE (5 975
+// vs 6 016 sur le relevé) — écart probablement dû à des frais de souscription non
+// détaillés dans le relevé ; NSIA FONDS DIVERSIFIE et AURORE OPPORTUNITES, eux,
+// correspondent exactement.
+const seedFunds: Fund[] = [
+  { id: "fund-aurore-monetaire", name: "FCP AURORE MONETAIRE", category: "Monétaire", updatedAt: "2025-05-01T00:00:00.000Z" },
+  { id: "fund-nsia-diversifie", name: "NSIA FONDS DIVERSIFIE", category: "Diversifié", updatedAt: "2025-05-01T00:00:00.000Z" },
+  { id: "fund-aurore-opportunites", name: "AURORE OPPORTUNITES", category: "Actions", updatedAt: "2025-05-01T00:00:00.000Z" },
+];
+const seedFundOperations: FundOperation[] = [
+  { id: "fundop-1", fundId: "fund-aurore-opportunites", date: "2025-06-05", type: "Souscription", quantite: 0.6060, vl: 8249.7037, montant: 5000, account: "SGO", updatedAt: "2025-06-05T00:00:00.000Z" },
+  { id: "fundop-2", fundId: "fund-nsia-diversifie", date: "2025-06-10", type: "Souscription", quantite: 0.2574, vl: 6750.8487, montant: 1700, account: "SGO", updatedAt: "2025-06-10T00:00:00.000Z" },
+  { id: "fundop-3", fundId: "fund-aurore-opportunites", date: "2025-06-10", type: "Souscription", quantite: 0.3681, vl: 8332.4340, montant: 3000, account: "SGO", updatedAt: "2025-06-10T00:00:01.000Z" },
+  { id: "fundop-4", fundId: "fund-aurore-opportunites", date: "2025-06-10", type: "Souscription", quantite: 3.6251, vl: 8332.4340, montant: 30000, account: "SGO", updatedAt: "2025-06-10T00:00:02.000Z" },
+  { id: "fundop-5", fundId: "fund-aurore-opportunites", date: "2025-06-25", type: "Rachat", quantite: 4.5944, vl: 8448.7590, montant: 38428.83, account: "SGO", updatedAt: "2025-06-25T00:00:00.000Z" },
+  { id: "fundop-6", fundId: "fund-nsia-diversifie", date: "2025-08-13", type: "Souscription", quantite: 4.4224, vl: 6830.2735, montant: 30000, account: "SGO", updatedAt: "2025-08-13T00:00:00.000Z" },
+  { id: "fundop-7", fundId: "fund-aurore-opportunites", date: "2025-08-13", type: "Souscription", quantite: 5.9618, vl: 8452.9367, montant: 50000, account: "SGO", updatedAt: "2025-08-13T00:00:01.000Z" },
+  { id: "fundop-8", fundId: "fund-aurore-opportunites", date: "2025-08-18", type: "Souscription", quantite: 3.5563, vl: 8502.2800, montant: 30000, account: "SGO", updatedAt: "2025-08-18T00:00:00.000Z" },
+  { id: "fundop-9", fundId: "fund-aurore-opportunites", date: "2025-08-25", type: "Souscription", quantite: 11.7370, vl: 8587.3752, montant: 100000, account: "SGO", updatedAt: "2025-08-25T00:00:00.000Z" },
+  { id: "fundop-10", fundId: "fund-nsia-diversifie", date: "2025-09-11", type: "Souscription", quantite: 2.8973, vl: 6950.6004, montant: 20000, account: "SGO", updatedAt: "2025-09-11T00:00:00.000Z" },
+  { id: "fundop-11", fundId: "fund-aurore-opportunites", date: "2025-09-11", type: "Souscription", quantite: 9.1903, vl: 8773.6425, montant: 80000, account: "SGO", updatedAt: "2025-09-11T00:00:01.000Z" },
+  { id: "fundop-12", fundId: "fund-aurore-opportunites", date: "2025-09-15", type: "Rachat", quantite: 1.1402, vl: 8867.7915, montant: 9999.78, account: "SGO", updatedAt: "2025-09-15T00:00:00.000Z" },
+  { id: "fundop-13", fundId: "fund-nsia-diversifie", date: "2025-09-16", type: "Souscription", quantite: 1.4397, vl: 6993.7967, montant: 10000, account: "SGO", updatedAt: "2025-09-16T00:00:00.000Z" },
+  { id: "fundop-14", fundId: "fund-aurore-opportunites", date: "2025-09-16", type: "Souscription", quantite: 4.5463, vl: 8867.7915, montant: 40000, account: "SGO", updatedAt: "2025-09-16T00:00:01.000Z" },
+  { id: "fundop-15", fundId: "fund-nsia-diversifie", date: "2026-02-12", type: "Souscription", quantite: 2.0505, vl: 7365.4269, montant: 15000, account: "SGO", updatedAt: "2026-02-12T00:00:00.000Z" },
+  { id: "fundop-16", fundId: "fund-aurore-opportunites", date: "2026-02-12", type: "Souscription", quantite: 3.5997, vl: 9799.9604, montant: 35000, account: "SGO", updatedAt: "2026-02-12T00:00:01.000Z" },
+  { id: "fundop-17", fundId: "fund-aurore-monetaire", date: "2026-03-19", type: "Souscription", quantite: 0.5079, vl: 5947.7271, montant: 3000, account: "SGO", updatedAt: "2026-03-19T00:00:00.000Z" },
+  { id: "fundop-18", fundId: "fund-aurore-monetaire", date: "2026-06-08", type: "Souscription", quantite: 1.6681, vl: 6036.9327, montant: 10000, account: "SGO", updatedAt: "2026-06-08T00:00:00.000Z" },
+  { id: "fundop-19", fundId: "fund-nsia-diversifie", date: "2026-06-08", type: "Souscription", quantite: 3.8037, vl: 7898.9915, montant: 30000, account: "SGO", updatedAt: "2026-06-08T00:00:01.000Z" },
+  { id: "fundop-20", fundId: "fund-aurore-opportunites", date: "2026-06-08", type: "Souscription", quantite: 5.2895, vl: 11432.8455, montant: 60000, account: "SGO", updatedAt: "2026-06-08T00:00:02.000Z" },
+];
+const seedFundDailyValues: FundDailyValue[] = [
+  { id: "vl-aurore-monetaire-1", fundId: "fund-aurore-monetaire", date: "2026-08-18", vl: 6094.4973, updatedAt: "2026-08-21T00:00:00.000Z" },
+  { id: "vl-nsia-diversifie-1", fundId: "fund-nsia-diversifie", date: "2026-08-18", vl: 8515.8215, updatedAt: "2026-08-21T00:00:00.000Z" },
+  { id: "vl-aurore-opportunites-1", fundId: "fund-aurore-opportunites", date: "2026-08-18", vl: 13067.7049, updatedAt: "2026-08-21T00:00:00.000Z" },
 ];
 
 const seedGoals: Goal[] = [
@@ -8381,7 +8428,7 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   ops.forEach((o) => {
     if (o.type === "Souscription") {
       qty += o.quantite;
-      costTotal += o.montant;
+      costTotal += o.montant + (o.frais || 0);
     } else {
       const avgCost = qty > 0 ? costTotal / qty : 0;
       const costRemoved = avgCost * o.quantite;
@@ -8406,14 +8453,19 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
 }
 
-function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, isMobile }: {
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, deletedFundOperationIds, setDeletedFundOperationIds, isMobile }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
   fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
   accounts: Account[];
   deletedFundIds: Record<string, string>; setDeletedFundIds: (d: Record<string, string>) => void;
+  deletedFundOperationIds: Record<string, string>; setDeletedFundOperationIds: (d: Record<string, string>) => void;
   isMobile: boolean;
 }) {
+  // Bascule Tableau de bord / Journal FCP — sur demande explicite de l'utilisateur
+  // (21/08/2026) : un vrai journal dédié aux opérations Bourse, séparé du reste, avec
+  // sa propre vue plutôt qu'un historique replié par fonds.
+  const [view, setView] = useState<"dashboard" | "journal">("dashboard");
   const [addFundOpen, setAddFundOpen] = useState(false);
   const [newFundName, setNewFundName] = useState("");
   const [newFundCategory, setNewFundCategory] = useState<Fund["category"]>("Diversifié");
@@ -8428,6 +8480,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [opQty, setOpQty] = useState<number>(0);
   const [opVl, setOpVl] = useState<number>(0);
   const [opMontant, setOpMontant] = useState<number>(0);
+  const [opFrais, setOpFrais] = useState<number>(0);
   const [opAccount, setOpAccount] = useState(accounts[0]?.name || "");
   const [expandedFundId, setExpandedFundId] = useState<string | null>(null);
   // Confirmation systématique avant suppression — corrigé le 21/08/2026 : un fonds
@@ -8479,6 +8532,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     // appareil qui ne l'a pas encore vu supprimé (corrigé le 21/08/2026).
     setDeletedFundIds({ ...deletedFundIds, [id]: new Date().toISOString() });
   };
+  const deleteOperation = (id: string) => {
+    setFundOperations(fundOperations.filter((o) => o.id !== id));
+    setDeletedFundOperationIds({ ...deletedFundOperationIds, [id]: new Date().toISOString() });
+  };
 
   const saveVl = () => {
     if (!vlFormFundId || vlValue <= 0) return;
@@ -8499,9 +8556,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     const fund = funds.find((f) => f.id === opFormFundId);
     if (!fund) return;
     const montant = opMontant > 0 ? opMontant : Math.round(opQty * opVl);
-    const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, account: opAccount, updatedAt: new Date().toISOString() };
+    const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, updatedAt: new Date().toISOString() };
     setFundOperations([...fundOperations, op]);
-    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0);
+    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0);
   };
 
   const positions = useMemo(() => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })), [funds, fundOperations, fundDailyValues]);
@@ -8567,6 +8624,19 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         )}
       </div>
 
+      {/* Bascule Tableau de bord / Journal FCP */}
+      <div style={{ display: "flex", gap: 8, background: COLOR.surface, borderRadius: 10, padding: 4, border: `1px solid ${COLOR.hairline}`, width: "fit-content" }}>
+        <button onClick={() => setView("dashboard")} style={{
+          padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+          background: view === "dashboard" ? COLOR.gold : "transparent", color: view === "dashboard" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "dashboard" ? 700 : 400,
+        }}>Tableau de bord</button>
+        <button onClick={() => setView("journal")} style={{
+          padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+          background: view === "journal" ? COLOR.gold : "transparent", color: view === "journal" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "journal" ? 700 : 400,
+        }}>Journal FCP ({fundOperations.length})</button>
+      </div>
+
+      {view === "dashboard" && (<>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontFamily: "'Fraunces', serif", fontSize: 16, color: COLOR.ink }}>Fonds ({funds.length})</span>
         <button onClick={() => setAddFundOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" }}>
@@ -8606,7 +8676,15 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               <div style={{ fontSize: 17, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(pos.valorisation)} FCFA</div>
             </div>
             <div>
-              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Investi (prix de revient)</div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Allocation</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(2) : "0.00"}%</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Prix de revient (PRU)</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(pos.avgCost)} FCFA</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Investi (montant total)</div>
               <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(Math.round(pos.costTotal))} FCFA</div>
             </div>
             <div>
@@ -8629,10 +8707,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => { setVlFormFundId(fund.id); setVlDate(todayISO()); setVlValue(pos.currentVL || 0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <TrendingUp size={12} /> Renseigner la VL du jour
             </button>
-            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Plus size={12} /> Souscription
             </button>
-            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Minus size={12} /> Rachat
             </button>
             <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
@@ -8664,6 +8742,64 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           )}
         </Panel>
       ))}
+      </>)}
+
+      {view === "journal" && (
+        <Panel title="Journal FCP" subtitle={`Toutes les opérations, tous fonds confondus, triées par date — ${fundOperations.length} opération${fundOperations.length > 1 ? "s" : ""}`}>
+          {!fundOperations.length ? <EmptyState /> : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                <thead>
+                  <tr>
+                    {["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Plus-value réalisée", "Compte", ""].map((h) => (
+                      <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...fundOperations].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)).map((o) => {
+                    const fund = funds.find((f) => f.id === o.fundId);
+                    // Plus-value réalisée recalculée au fil de l'eau (coût moyen pondéré
+                    // jusqu'à CETTE opération incluse), pour l'afficher ligne par ligne
+                    // exactement comme la colonne du relevé NSIA.
+                    let realizedHere: number | null = null;
+                    if (o.type === "Rachat") {
+                      const priorOps = fundOperations.filter((x) => x.fundId === o.fundId && (x.date < o.date || (x.date === o.date && x.id <= o.id))).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+                      let qty = 0, cost = 0;
+                      for (const x of priorOps) {
+                        if (x.id === o.id) break;
+                        if (x.type === "Souscription") { qty += x.quantite; cost += x.montant + (x.frais || 0); }
+                        else { const avg = qty > 0 ? cost / qty : 0; cost -= avg * x.quantite; qty -= x.quantite; }
+                      }
+                      const avgBefore = qty > 0 ? cost / qty : 0;
+                      realizedHere = o.montant - avgBefore * o.quantite;
+                    }
+                    return (
+                      <tr key={o.id}>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(o.date)}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: o.type === "Souscription" ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{o.type}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>{fund?.name || "(fonds supprimé)"}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{o.quantite.toFixed(4)}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{fmt(o.montant)}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: realizedHere !== null ? (realizedHere >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted }}>
+                          {realizedHere !== null ? `${realizedHere >= 0 ? "+" : ""}${fmt(Math.round(realizedHere))}` : "—"}
+                        </td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{o.account}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                          <button onClick={() => setConfirmDeleteOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", padding: 4, display: "flex" }}>
+                            <Trash2 size={13} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      )}
 
       {vlFormFundId && (() => {
         const fund = funds.find((f) => f.id === vlFormFundId);
@@ -8838,6 +8974,13 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                     </select>
                   </div>
                 </div>
+                {opType === "Souscription" && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Frais de souscription (optionnel — ajouté au prix de revient)</div>
+                    <input type="number" inputMode="numeric" value={opFrais || ""} placeholder="0" onChange={(e) => setOpFrais(Number(e.target.value) || 0)}
+                      style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", padding: 0, width: "100%", outline: "none" }} />
+                  </div>
+                )}
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}`, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
                   Enregistrée uniquement dans le journal Bourse — n'affecte ni le Journal principal, ni le solde de {opAccount || "ce compte"}.
                 </div>
@@ -8861,11 +9004,19 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           const opsCount = confirmDeleteFundId ? fundOperations.filter((o) => o.fundId === confirmDeleteFundId).length : 0;
           const base = `Cette action est définitive.`;
           return opsCount > 0
-            ? `${base} "${f?.name}" a ${opsCount} opération${opsCount > 1 ? "s" : ""} enregistrée${opsCount > 1 ? "s" : ""} — elles seront aussi supprimées. Les transactions déjà créées dans le Journal, elles, ne seront PAS supprimées automatiquement.`
+            ? `${base} "${f?.name}" a ${opsCount} opération${opsCount > 1 ? "s" : ""} enregistrée${opsCount > 1 ? "s" : ""} dans le Journal FCP — elles seront aussi supprimées.`
             : `${base} "${f?.name}" sera retiré de ton portefeuille Bourse.`;
         })()}
         onConfirm={() => { if (confirmDeleteFundId) deleteFund(confirmDeleteFundId); setConfirmDeleteFundId(null); }}
         onCancel={() => setConfirmDeleteFundId(null)}
+      />
+
+      <ConfirmDialog
+        open={!!confirmDeleteOpId}
+        title="Supprimer cette opération ?"
+        message="Cette action est définitive. La position du fonds (quantité, prix de revient, plus-value) sera recalculée automatiquement sans cette opération."
+        onConfirm={() => { if (confirmDeleteOpId) deleteOperation(confirmDeleteOpId); setConfirmDeleteOpId(null); }}
+        onCancel={() => setConfirmDeleteOpId(null)}
       />
     </div>
   );
@@ -12829,9 +12980,9 @@ export default function GrandLivre() {
   const [budgets, setBudgets, budgetsLoaded] = usePersistentState<CategoryBudget[]>("gl-budgets", seedBudgets, canSaveGated);
   const [goals, setGoals, goalsLoaded] = usePersistentState<Goal[]>("gl-goals", seedGoals, canSaveGated);
   const [recurring, setRecurring, recurringLoaded] = usePersistentState<RecurringTemplate[]>("gl-recurring", seedRecurring, canSaveGated);
-  const [funds, setFunds, fundsLoaded] = usePersistentState<Fund[]>("gl-funds", [], canSaveGated);
-  const [fundOperations, setFundOperations, fundOperationsLoaded] = usePersistentState<FundOperation[]>("gl-fund-operations", [], canSaveGated);
-  const [fundDailyValues, setFundDailyValues, fundDailyValuesLoaded] = usePersistentState<FundDailyValue[]>("gl-fund-daily-values", [], canSaveGated);
+  const [funds, setFunds, fundsLoaded] = usePersistentState<Fund[]>("gl-funds", seedFunds, canSaveGated);
+  const [fundOperations, setFundOperations, fundOperationsLoaded] = usePersistentState<FundOperation[]>("gl-fund-operations", seedFundOperations, canSaveGated);
+  const [fundDailyValues, setFundDailyValues, fundDailyValuesLoaded] = usePersistentState<FundDailyValue[]>("gl-fund-daily-values", seedFundDailyValues, canSaveGated);
   const [tab, setTab] = useState<Tab>("saisie");
   // Navigation contextuelle entre pages : navigateTo("categoryoverview", { category: "Shopping" })
   // change d'onglet ET transmet un contexte que la page de destination applique à son
@@ -13482,7 +13633,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} isMobile={isMobile} />}
+          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} isMobile={isMobile} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
