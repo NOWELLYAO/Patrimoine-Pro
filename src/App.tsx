@@ -8490,6 +8490,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // cas de figure.
   const [confirmDeleteFundId, setConfirmDeleteFundId] = useState<string | null>(null);
   const [confirmDeleteOpId, setConfirmDeleteOpId] = useState<string | null>(null);
+  const [confirmImportOpen, setConfirmImportOpen] = useState(false);
 
   // Même verrou de scroll iOS-safe que la Saisie du jour (QuickAddFAB) — figer le body
   // en position fixed à sa position de scroll exacte, plutôt que overflow:hidden qui
@@ -8535,6 +8536,55 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const deleteOperation = (id: string) => {
     setFundOperations(fundOperations.filter((o) => o.id !== id));
     setDeletedFundOperationIds({ ...deletedFundOperationIds, [id]: new Date().toISOString() });
+  };
+
+  // Import explicite du relevé NSIA — plus robuste que le "seed au premier chargement"
+  // (qui ne s'applique que si la clé de stockage est totalement vide) : ici, on
+  // n'ajoute QUE ce qui manque, en dédupliquant par nom de fonds et par
+  // (fonds, date, type, quantité, montant) pour les opérations — jamais de doublon,
+  // même si l'utilisateur a déjà saisi une partie du relevé à la main. Corrigé le
+  // 21/08/2026 après un import "silencieux" resté sans effet car la clé de stockage
+  // n'était déjà plus vide.
+  const [importResult, setImportResult] = useState<{ funds: number; ops: number; vls: number } | null>(null);
+  const importStatementData = () => {
+    const nameToExistingId = new Map(funds.map((f) => [f.name.trim().toLowerCase(), f.id]));
+    const idMap = new Map<string, string>();
+    const newFunds: Fund[] = [];
+    seedFunds.forEach((sf) => {
+      const existingId = nameToExistingId.get(sf.name.trim().toLowerCase());
+      if (existingId) { idMap.set(sf.id, existingId); }
+      else { idMap.set(sf.id, sf.id); newFunds.push({ ...sf, updatedAt: new Date().toISOString() }); }
+    });
+
+    const opKey = (fundId: string, date: string, type: string, qty: number, montant: number) => `${fundId}|${date}|${type}|${qty.toFixed(4)}|${Math.round(montant)}`;
+    const existingOpKeys = new Set(fundOperations.map((o) => opKey(o.fundId, o.date, o.type, o.quantite, o.montant)));
+    const newOps: FundOperation[] = [];
+    seedFundOperations.forEach((so) => {
+      const fundId = idMap.get(so.fundId)!;
+      const key = opKey(fundId, so.date, so.type, so.quantite, so.montant);
+      if (!existingOpKeys.has(key)) {
+        newOps.push({ ...so, id: uid("fundop"), fundId, updatedAt: new Date().toISOString() });
+        existingOpKeys.add(key);
+      }
+    });
+
+    const vlKey = (fundId: string, date: string) => `${fundId}|${date}`;
+    const existingVlKeys = new Set(fundDailyValues.map((v) => vlKey(v.fundId, v.date)));
+    const newVls: FundDailyValue[] = [];
+    seedFundDailyValues.forEach((sv) => {
+      const fundId = idMap.get(sv.fundId)!;
+      const key = vlKey(fundId, sv.date);
+      if (!existingVlKeys.has(key)) {
+        newVls.push({ ...sv, id: uid("vl"), fundId, updatedAt: new Date().toISOString() });
+        existingVlKeys.add(key);
+      }
+    });
+
+    if (newFunds.length) setFunds([...funds, ...newFunds]);
+    if (newOps.length) setFundOperations([...fundOperations, ...newOps]);
+    if (newVls.length) setFundDailyValues([...fundDailyValues, ...newVls]);
+    setImportResult({ funds: newFunds.length, ops: newOps.length, vls: newVls.length });
+    setConfirmImportOpen(false);
   };
 
   const saveVl = () => {
@@ -8624,17 +8674,35 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         )}
       </div>
 
-      {/* Bascule Tableau de bord / Journal FCP */}
-      <div style={{ display: "flex", gap: 8, background: COLOR.surface, borderRadius: 10, padding: 4, border: `1px solid ${COLOR.hairline}`, width: "fit-content" }}>
-        <button onClick={() => setView("dashboard")} style={{
-          padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
-          background: view === "dashboard" ? COLOR.gold : "transparent", color: view === "dashboard" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "dashboard" ? 700 : 400,
-        }}>Tableau de bord</button>
-        <button onClick={() => setView("journal")} style={{
-          padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
-          background: view === "journal" ? COLOR.gold : "transparent", color: view === "journal" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "journal" ? 700 : 400,
-        }}>Journal FCP ({fundOperations.length})</button>
+      {/* Bascule Tableau de bord / Journal FCP + import du relevé */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, background: COLOR.surface, borderRadius: 10, padding: 4, border: `1px solid ${COLOR.hairline}`, width: "fit-content" }}>
+          <button onClick={() => setView("dashboard")} style={{
+            padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+            background: view === "dashboard" ? COLOR.gold : "transparent", color: view === "dashboard" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "dashboard" ? 700 : 400,
+          }}>Tableau de bord</button>
+          <button onClick={() => setView("journal")} style={{
+            padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+            background: view === "journal" ? COLOR.gold : "transparent", color: view === "journal" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "journal" ? 700 : 400,
+          }}>Journal FCP ({fundOperations.length})</button>
+        </div>
+        <button onClick={() => setConfirmImportOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.slateBlueSoft, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
+          <TrendingUp size={13} /> Importer le relevé NSIA
+        </button>
       </div>
+
+      {importResult && (importResult.funds + importResult.ops + importResult.vls > 0) && (
+        <div style={{ background: "rgba(95,194,152,0.1)", border: `1px solid ${COLOR.emerald}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.emeraldSoft, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Import terminé : {importResult.funds} fonds, {importResult.ops} opération{importResult.ops > 1 ? "s" : ""}, {importResult.vls} VL ajoutée{importResult.vls > 1 ? "s" : ""} (le reste existait déjà).</span>
+          <button onClick={() => setImportResult(null)} style={{ background: "transparent", border: "none", color: COLOR.emeraldSoft, cursor: "pointer" }}><X size={14} /></button>
+        </div>
+      )}
+      {importResult && importResult.funds + importResult.ops + importResult.vls === 0 && (
+        <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.inkMuted, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Rien à importer — tout était déjà présent.</span>
+          <button onClick={() => setImportResult(null)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer" }}><X size={14} /></button>
+        </div>
+      )}
 
       {view === "dashboard" && (<>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -9017,6 +9085,15 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         message="Cette action est définitive. La position du fonds (quantité, prix de revient, plus-value) sera recalculée automatiquement sans cette opération."
         onConfirm={() => { if (confirmDeleteOpId) deleteOperation(confirmDeleteOpId); setConfirmDeleteOpId(null); }}
         onCancel={() => setConfirmDeleteOpId(null)}
+      />
+
+      <ConfirmDialog
+        open={confirmImportOpen}
+        title="Importer le relevé NSIA ?"
+        message="Ajoute les 3 fonds et les 20 opérations du relevé du 01/05/2025 au 21/08/2026 (avec frais de souscription). Tout ce qui existe déjà (même fonds, même opération) est automatiquement ignoré — aucun doublon."
+        confirmLabel="Importer"
+        onConfirm={importStatementData}
+        onCancel={() => setConfirmImportOpen(false)}
       />
     </div>
   );
