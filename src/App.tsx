@@ -8476,6 +8476,13 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [vlFormFundId, setVlFormFundId] = useState<string | null>(null);
   const [vlDate, setVlDate] = useState(todayISO());
   const [vlValue, setVlValue] = useState<number>(0);
+  // Saisie groupée des VL — sur demande explicite de l'utilisateur (22/08/2026), qui a
+  // choisi de renseigner la VL quotidiennement : sans ça, il fallait rouvrir la modale
+  // une fois par fonds (3 allers-retours par jour). Un seul écran, une seule date
+  // partagée, un champ par fonds, un seul "Enregistrer".
+  const [bulkVlOpen, setBulkVlOpen] = useState(false);
+  const [bulkVlDate, setBulkVlDate] = useState(todayISO());
+  const [bulkVlValues, setBulkVlValues] = useState<Record<string, number>>({});
 
   const [opFormFundId, setOpFormFundId] = useState<string | null>(null);
   const [opType, setOpType] = useState<"Souscription" | "Rachat">("Souscription");
@@ -8610,6 +8617,32 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setVlFormFundId(null); setVlValue(0);
   };
 
+  const openBulkVl = () => {
+    const initial: Record<string, number> = {};
+    funds.forEach((f) => {
+      const pos = computeFundPosition(f.id, fundOperations, fundDailyValues);
+      initial[f.id] = pos.currentVL || 0;
+    });
+    setBulkVlValues(initial);
+    setBulkVlDate(todayISO());
+    setBulkVlOpen(true);
+  };
+  const saveBulkVl = () => {
+    let next = fundDailyValues;
+    funds.forEach((f) => {
+      const v = bulkVlValues[f.id];
+      if (!v || v <= 0) return; // fonds laissé vide = pas de saisie ce jour-là, pas une erreur
+      const existing = next.find((x) => x.fundId === f.id && x.date === bulkVlDate);
+      if (existing) {
+        next = next.map((x) => (x.id === existing.id ? { ...x, vl: v, updatedAt: new Date().toISOString() } : x));
+      } else {
+        next = [...next, { id: uid("vl"), fundId: f.id, date: bulkVlDate, vl: v, updatedAt: new Date().toISOString() }];
+      }
+    });
+    setFundDailyValues(next);
+    setBulkVlOpen(false);
+  };
+
   // Aucune transaction n'est créée dans le Journal principal ni ne touche le solde
   // des comptes — la Bourse vit dans son propre journal, complètement séparé, sur
   // demande explicite de l'utilisateur (21/08/2026).
@@ -8698,9 +8731,16 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             background: view === "journal" ? COLOR.gold : "transparent", color: view === "journal" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "journal" ? 700 : 400,
           }}>Journal FCP ({fundOperations.length})</button>
         </div>
-        <button onClick={() => setConfirmImportOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.slateBlueSoft, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
-          <TrendingUp size={13} /> Importer le relevé NSIA
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {!!funds.length && (
+            <button onClick={openBulkVl} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <TrendingUp size={13} /> Renseigner les VL du jour
+            </button>
+          )}
+          <button onClick={() => setConfirmImportOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.slateBlueSoft, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
+            <TrendingUp size={13} /> Importer le relevé NSIA
+          </button>
+        </div>
       </div>
 
       {importResult && (importResult.funds + importResult.ops + importResult.opsUpdated + importResult.vls > 0) && (
@@ -8953,6 +8993,67 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           </div>
         );
       })()}
+
+      {bulkVlOpen && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 300, background: COLOR.bg,
+          display: "flex", justifyContent: "center", alignItems: isMobile ? "stretch" : "center",
+          height: isMobile ? "100dvh" : "100%",
+        }}>
+          <div style={{
+            width: "100%", maxWidth: isMobile ? "100%" : 440, height: isMobile ? "100dvh" : "min(640px, 92vh)",
+            display: "flex", flexDirection: "column", background: `linear-gradient(180deg, ${COLOR.surfaceRaised} 0%, ${COLOR.bg} 55%)`,
+            borderRadius: isMobile ? 0 : 20, border: isMobile ? "none" : `1px solid ${COLOR.hairline}`,
+            overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingLeft: 20, paddingRight: 20, paddingBottom: 8, paddingTop: "max(20px, env(safe-area-inset-top))", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
+              <button onClick={() => setBulkVlOpen(false)} style={{
+                width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
+                color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+              }}>
+                <X size={18} />
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: COLOR.surface, borderRadius: 24, padding: "8px 16px", border: `1px solid ${COLOR.hairline}` }}>
+                <TrendingUp size={15} color={COLOR.goldSoft} />
+                <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14, color: COLOR.ink }}>VL du jour</span>
+              </div>
+              <div style={{ width: 40 }} />
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 12 }}>
+              <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
+                <input type="date" value={bulkVlDate} onChange={(e) => setBulkVlDate(e.target.value)}
+                  style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }} />
+              </div>
+            </div>
+
+            <div style={{ flex: 1, padding: "20px 20px 0", display: "flex", flexDirection: "column", gap: 14, overflowY: "auto" }}>
+              {funds.map((f) => (
+                <div key={f.id} style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 16 }}>
+                  <div style={{ fontSize: 13, color: COLOR.ink, fontWeight: 600, marginBottom: 8 }}>{f.name}</div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <input
+                      type="number" inputMode="numeric" value={bulkVlValues[f.id] || ""} placeholder="VL — laisser vide si pas de donnée aujourd'hui"
+                      onChange={(e) => setBulkVlValues({ ...bulkVlValues, [f.id]: Number(e.target.value) || 0 })}
+                      style={{ background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 22, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", width: "100%" }}
+                    />
+                    <span style={{ fontSize: 12, color: COLOR.inkMuted, whiteSpace: "nowrap" }}>FCFA</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ borderTop: `1px solid ${COLOR.hairline}`, padding: "18px 20px", background: COLOR.surface }} className="gl-safe-bottom">
+              <button onClick={saveBulkVl} style={{
+                width: "100%", background: COLOR.gold, border: "none", borderRadius: 12,
+                color: "#0e1611", padding: "14px 0", fontSize: 15, fontWeight: 700, cursor: "pointer",
+              }}>
+                Enregistrer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {opFormFundId && (() => {
         const fund = funds.find((f) => f.id === opFormFundId);
