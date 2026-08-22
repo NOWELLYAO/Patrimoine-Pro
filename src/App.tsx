@@ -297,7 +297,6 @@ interface FundOperation {
   vl: number;
   montant: number;
   account: string;
-  linkedTransactionId?: string; // transaction Journal créée automatiquement (Productif)
   updatedAt?: string;
 }
 interface FundDailyValue {
@@ -678,19 +677,26 @@ function CustomTooltip({ active, payload, label }: any) {
 // complètement l'écriture tant qu'un choix explicite n'a pas été fait (voir l'écran de
 // blocage plus bas dans le composant racine).
 function usePersistentState<T>(key: string, initial: T, gateResolved?: boolean): [T, (v: T) => void, boolean, boolean] {
-  const [state, setState] = useState<T>(initial);
-  const [readDone, setReadDone] = useState(false);
-  const [startedEmpty, setStartedEmpty] = useState(false);
-  const [foundReal, setFoundReal] = useState(false);
-  useEffect(() => {
+  // Lecture synchrone dès le tout premier rendu (via l'initialiseur paresseux de
+  // useState), et non plus dans un useEffect qui ne s'exécute qu'APRÈS le premier
+  // rendu. C'est ce décalage qui causait le flash visible à l'ouverture de l'app (ex :
+  // une "fausse" Valeur nette calculée un instant sur les données de secours, avant que
+  // les vraies données ne s'affichent). localStorage.getItem est une lecture
+  // synchrone du navigateur — il n'y avait aucune raison technique de la repousser
+  // après le premier rendu. Corrigé le 21/08/2026.
+  const readInitial = (): { value: T; foundReal: boolean; startedEmpty: boolean } => {
     try {
       const raw = localStorage.getItem(key);
-      if (raw) { setState(JSON.parse(raw)); setFoundReal(true); }
-      else setStartedEmpty(true);
-    } catch {}
-    setReadDone(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      if (raw) return { value: JSON.parse(raw) as T, foundReal: true, startedEmpty: false };
+      return { value: initial, foundReal: false, startedEmpty: true };
+    } catch {
+      return { value: initial, foundReal: false, startedEmpty: false };
+    }
+  };
+  const [state, setState] = useState<T>(() => readInitial().value);
+  const [foundReal] = useState<boolean>(() => readInitial().foundReal);
+  const [startedEmpty] = useState<boolean>(() => readInitial().startedEmpty);
+  const readDone = true;
   // On n'écrit dans le localStorage que si on a trouvé de vraies données au départ, OU
   // si le blocage a été explicitement levé (voir l'écran de choix au niveau racine) —
   // jamais automatiquement juste parce que la lecture est terminée.
@@ -8363,8 +8369,11 @@ function transactionsToCompactCSV(transactions: Transaction[]): string {
 // sur souscription, jamais sur un rachat (méthode standard en gestion de portefeuille).
 // Reconstruite après un premier essai qui avait révélé deux bugs de synchro
 // (déclencheurs incomplets, absence d'updatedAt) — corrigés dans cette version.
+// Les opérations vivent désormais dans un journal 100% séparé (aucune transaction
+// n'est plus créée dans le Journal principal ni dans le solde des comptes) — sur
+// demande explicite de l'utilisateur (21/08/2026) : la Bourse ne doit influencer
+// aucune donnée ailleurs dans l'app.
 // ============================================================
-const INVESTMENT_CATEGORY = "Investissement bourse";
 
 function computeFundPosition(fundId: string, operations: FundOperation[], dailyValues: FundDailyValue[]) {
   const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
@@ -8397,12 +8406,11 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
 }
 
-function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, transactions, setTransactions, categoryGroups, setCategoryGroups, deletedFundIds, setDeletedFundIds, isMobile }: {
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, isMobile }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
   fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
-  accounts: Account[]; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
-  categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
+  accounts: Account[];
   deletedFundIds: Record<string, string>; setDeletedFundIds: (d: Record<string, string>) => void;
   isMobile: boolean;
 }) {
@@ -8428,6 +8436,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // désormais le ConfirmDialog déjà utilisé partout ailleurs dans l'app, dans tous les
   // cas de figure.
   const [confirmDeleteFundId, setConfirmDeleteFundId] = useState<string | null>(null);
+  const [confirmDeleteOpId, setConfirmDeleteOpId] = useState<string | null>(null);
 
   // Même verrou de scroll iOS-safe que la Saisie du jour (QuickAddFAB) — figer le body
   // en position fixed à sa position de scroll exacte, plutôt que overflow:hidden qui
@@ -8457,12 +8466,6 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     }
   }, [anyModalOpen]);
 
-  const ensureInvestmentCategory = () => {
-    if (categoryGroups[INVESTMENT_CATEGORY] !== "Productif") {
-      setCategoryGroups({ ...categoryGroups, [INVESTMENT_CATEGORY]: "Productif" });
-    }
-  };
-
   const addFund = () => {
     if (!newFundName.trim()) return;
     setFunds([...funds, { id: uid("fund"), name: newFundName.trim(), category: newFundCategory, updatedAt: new Date().toISOString() }]);
@@ -8488,25 +8491,16 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setVlFormFundId(null); setVlValue(0);
   };
 
+  // Aucune transaction n'est créée dans le Journal principal ni ne touche le solde
+  // des comptes — la Bourse vit dans son propre journal, complètement séparé, sur
+  // demande explicite de l'utilisateur (21/08/2026).
   const saveOperation = () => {
     if (!opFormFundId || opQty <= 0 || opVl <= 0 || !opAccount) return;
     const fund = funds.find((f) => f.id === opFormFundId);
     if (!fund) return;
     const montant = opMontant > 0 ? opMontant : Math.round(opQty * opVl);
-    ensureInvestmentCategory();
-    const opId = uid("fundop");
-    const txId = uid("t");
-    const op: FundOperation = { id: opId, fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, account: opAccount, linkedTransactionId: txId, updatedAt: new Date().toISOString() };
+    const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, account: opAccount, updatedAt: new Date().toISOString() };
     setFundOperations([...fundOperations, op]);
-    // Transaction liée automatiquement dans le Journal — Productif, pour que le solde
-    // du compte reste cohérent avec l'argent réellement sorti/rentré, sur demande
-    // explicite de l'utilisateur (21/08/2026).
-    const linkedTx: Transaction = {
-      id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
-      category: INVESTMENT_CATEGORY, subcategory: fund.name, amount: montant, account: opAccount,
-      note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}`,
-    } as Transaction;
-    setTransactions([...transactions, linkedTx]);
     setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0);
   };
 
@@ -8845,7 +8839,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   </div>
                 </div>
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}`, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
-                  Crée automatiquement une transaction {opType === "Souscription" ? "Dépense" : "Revenu"} (Productif) dans le Journal, pour que le solde de {opAccount || "ce compte"} reste cohérent.
+                  Enregistrée uniquement dans le journal Bourse — n'affecte ni le Journal principal, ni le solde de {opAccount || "ce compte"}.
                 </div>
                 <button onClick={saveOperation} disabled={opQty <= 0 || opVl <= 0 || !opAccount} style={{
                   width: "100%", marginTop: 14, background: (opQty > 0 && opVl > 0 && opAccount) ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 12,
@@ -12742,6 +12736,9 @@ export default function GrandLivre() {
   // l'autre appareil. Corrigé le 21/08/2026. La suppression est cascadée : les
   // opérations et VL de ce fonds sont aussi retirées du merge via leur fundId.
   const [deletedFundIds, setDeletedFundIds] = usePersistentState<Record<string, string>>("gl-deleted-fund-ids", {}, canSaveGated);
+  // Même tombstone, mais pour la suppression d'une opération individuelle (souscription
+  // ou rachat) dans le journal Bourse séparé.
+  const [deletedFundOperationIds, setDeletedFundOperationIds] = usePersistentState<Record<string, string>>("gl-deleted-fund-op-ids", {}, canSaveGated);
   const setTransactionsTracked = (next: Transaction[]) => {
     const nextIds = new Set(next.map((t) => t.id));
     const removedIds = transactions.filter((t) => !nextIds.has(t.id)).map((t) => t.id);
@@ -12966,13 +12963,13 @@ export default function GrandLivre() {
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
     };
   });
   const syncCodeRef = useRef(syncCode);
@@ -13075,6 +13072,7 @@ export default function GrandLivre() {
 
       const mergedDeletedIds = d.deletedTransactionIds ? { ...d.deletedTransactionIds, ...s.deletedTransactionIds } : s.deletedTransactionIds;
       const mergedDeletedFundIds = d.deletedFundIds ? { ...d.deletedFundIds, ...s.deletedFundIds } : s.deletedFundIds;
+      const mergedDeletedFundOperationIds = d.deletedFundOperationIds ? { ...d.deletedFundOperationIds, ...s.deletedFundOperationIds } : s.deletedFundOperationIds;
       // Calculée en premier : décide qui gagne un vrai conflit (même id modifié des deux
       // côtés) dans les fusions ci-dessous — voir la note sur mergeById plus haut.
       const localIsNewer = !!(lastLocalChangeRef.current && (!remote.updatedAt || new Date(lastLocalChangeRef.current) > new Date(remote.updatedAt)));
@@ -13089,7 +13087,7 @@ export default function GrandLivre() {
       // Suppression cascadée : les opérations/VL d'un fonds tombstoné sortent aussi du
       // merge, sinon elles resteraient orphelines (rattachées à un fundId qui n'existe
       // plus) sans jamais être nettoyées.
-      const mergedFundOperations = (d.fundOperations ? mergeById(s.fundOperations, d.fundOperations) : s.fundOperations).filter((o: FundOperation) => !mergedDeletedFundIds[o.fundId]);
+      const mergedFundOperations = (d.fundOperations ? mergeById(s.fundOperations, d.fundOperations) : s.fundOperations).filter((o: FundOperation) => !mergedDeletedFundIds[o.fundId] && !mergedDeletedFundOperationIds[o.id]);
       const mergedFundDailyValues = (d.fundDailyValues ? mergeById(s.fundDailyValues, d.fundDailyValues) : s.fundDailyValues).filter((v: FundDailyValue) => !mergedDeletedFundIds[v.fundId]);
       const mergedActivities = d.activities ? Array.from(new Set([...s.activities, ...d.activities])) : s.activities;
       const mergedCategoryGroups = d.categoryGroups ? { ...d.categoryGroups, ...s.categoryGroups } : s.categoryGroups;
@@ -13109,14 +13107,14 @@ export default function GrandLivre() {
         || !eq(mergedActivities, s.activities) || !eq(mergedCategoryGroups, s.categoryGroups) || !eq(mergedCategoryScope, s.categoryScope)
         || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
-        || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds)
+        || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds) || !eq(mergedDeletedFundOperationIds, s.deletedFundOperationIds)
         || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture;
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
-        || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds)
+        || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds) || !eq(mergedDeletedFundOperationIds, d.deletedFundOperationIds)
         || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
 
       if (localChanged) {
@@ -13144,6 +13142,7 @@ export default function GrandLivre() {
         setFundOperations(mergedFundOperations);
         setFundDailyValues(mergedFundDailyValues);
         setDeletedFundIds(mergedDeletedFundIds);
+        setDeletedFundOperationIds(mergedDeletedFundOperationIds);
         // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
         // une synchronisation en attente se déclenche tout de suite après, elle reparte
         // bien de ce résultat fusionné plutôt que de l'ancien état.
@@ -13154,7 +13153,7 @@ export default function GrandLivre() {
           activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds,
         };
       }
 
@@ -13168,7 +13167,7 @@ export default function GrandLivre() {
           activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds,
         });
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -13206,7 +13205,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -13217,7 +13216,7 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
@@ -13288,7 +13287,7 @@ export default function GrandLivre() {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-      funds, fundOperations, fundDailyValues, deletedFundIds,
+      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
     if (data.transactions) setTransactions(data.transactions);
@@ -13498,7 +13497,7 @@ export default function GrandLivre() {
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                funds, fundOperations, fundDailyValues, deletedFundIds,
+                funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
               })}
               restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
