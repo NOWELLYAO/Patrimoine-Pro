@@ -301,6 +301,12 @@ interface FundOperation {
   // entre le PRU recalculé par l'app à partir du seul "Montant net" et celui affiché
   // sur le relevé NSIA (les frais de souscription n'apparaissaient pas dans le relevé).
   account: string;
+  linkedTransactionId?: string; // sur demande explicite de l'utilisateur (22/08/2026) :
+  // à partir de maintenant, chaque NOUVELLE opération saisie via le formulaire crée une
+  // transaction liée dans le Journal principal (compte, Valeur nette, tout le reste) —
+  // ce champ garde le lien pour pouvoir la retrouver/supprimer en cascade. Les 20
+  // opérations importées du relevé historique n'en ont volontairement PAS (import non
+  // rétroactif, comme demandé).
   updatedAt?: string;
 }
 interface FundDailyValue {
@@ -8425,6 +8431,10 @@ function transactionsToCompactCSV(transactions: Transaction[]): string {
 // aucune donnée ailleurs dans l'app.
 // ============================================================
 
+// Catégorie utilisée pour la transaction liée au Journal principal — uniquement pour
+// les opérations saisies à partir du 22/08/2026 (voir note sur linkedTransactionId).
+const INVESTMENT_CATEGORY = "Investissement bourse";
+
 function computeFundPosition(fundId: string, operations: FundOperation[], dailyValues: FundDailyValue[]) {
   const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   let qty = 0, costTotal = 0, realizedGain = 0;
@@ -8456,13 +8466,15 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
 }
 
-function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, deletedFundOperationIds, setDeletedFundOperationIds, isMobile }: {
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, deletedFundOperationIds, setDeletedFundOperationIds, transactions, setTransactions, categoryGroups, setCategoryGroups, isMobile }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
   fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
   accounts: Account[];
   deletedFundIds: Record<string, string>; setDeletedFundIds: (d: Record<string, string>) => void;
   deletedFundOperationIds: Record<string, string>; setDeletedFundOperationIds: (d: Record<string, string>) => void;
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
+  categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
   isMobile: boolean;
 }) {
   // Bascule Tableau de bord / Journal FCP — sur demande explicite de l'utilisateur
@@ -8536,6 +8548,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setNewFundName(""); setAddFundOpen(false);
   };
   const deleteFund = (id: string) => {
+    // Supprime aussi les transactions liées de toute opération de ce fonds qui en
+    // portait une (uniquement les opérations saisies après le 22/08/2026).
+    const linkedIds = fundOperations.filter((o) => o.fundId === id && o.linkedTransactionId).map((o) => o.linkedTransactionId!);
+    if (linkedIds.length) setTransactions(transactions.filter((t) => !linkedIds.includes(t.id)));
     setFundOperations(fundOperations.filter((o) => o.fundId !== id));
     setFundDailyValues(fundDailyValues.filter((v) => v.fundId !== id));
     setFunds(funds.filter((f) => f.id !== id));
@@ -8544,6 +8560,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setDeletedFundIds({ ...deletedFundIds, [id]: new Date().toISOString() });
   };
   const deleteOperation = (id: string) => {
+    const op = fundOperations.find((o) => o.id === id);
+    if (op?.linkedTransactionId) setTransactions(transactions.filter((t) => t.id !== op.linkedTransactionId));
     setFundOperations(fundOperations.filter((o) => o.id !== id));
     setDeletedFundOperationIds({ ...deletedFundOperationIds, [id]: new Date().toISOString() });
   };
@@ -8643,16 +8661,30 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setBulkVlOpen(false);
   };
 
-  // Aucune transaction n'est créée dans le Journal principal ni ne touche le solde
-  // des comptes — la Bourse vit dans son propre journal, complètement séparé, sur
-  // demande explicite de l'utilisateur (21/08/2026).
+  // À partir du 22/08/2026, sur demande explicite de l'utilisateur : chaque NOUVELLE
+  // opération saisie ici crée une transaction liée dans le Journal principal, qui
+  // touche le solde du compte et donc la Valeur nette — contrairement aux 20
+  // opérations importées du relevé historique (non rétroactif, comme demandé).
+  const ensureInvestmentCategory = () => {
+    if (categoryGroups[INVESTMENT_CATEGORY] !== "Productif") {
+      setCategoryGroups({ ...categoryGroups, [INVESTMENT_CATEGORY]: "Productif" });
+    }
+  };
   const saveOperation = () => {
     if (!opFormFundId || opQty <= 0 || opVl <= 0 || !opAccount) return;
     const fund = funds.find((f) => f.id === opFormFundId);
     if (!fund) return;
     const montant = opMontant > 0 ? opMontant : Math.round(opQty * opVl);
-    const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, updatedAt: new Date().toISOString() };
+    ensureInvestmentCategory();
+    const txId = uid("t");
+    const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, linkedTransactionId: txId, updatedAt: new Date().toISOString() };
     setFundOperations([...fundOperations, op]);
+    const linkedTx: Transaction = {
+      id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
+      category: INVESTMENT_CATEGORY, subcategory: fund.name, amount: montant, account: opAccount,
+      note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}`,
+    } as Transaction;
+    setTransactions([...transactions, linkedTx]);
     setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0);
   };
 
@@ -9163,7 +9195,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   </div>
                 )}
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}`, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
-                  Enregistrée uniquement dans le journal Bourse — n'affecte ni le Journal principal, ni le solde de {opAccount || "ce compte"}.
+                  Crée aussi une transaction {opType === "Souscription" ? "Dépense" : "Revenu"} (Productif) dans le Journal principal, et touche le solde de {opAccount || "ce compte"}.
                 </div>
                 <button onClick={saveOperation} disabled={opQty <= 0 || opVl <= 0 || !opAccount} style={{
                   width: "100%", marginTop: 14, background: (opQty > 0 && opVl > 0 && opAccount) ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 12,
@@ -9183,10 +9215,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         message={(() => {
           const f = funds.find((x) => x.id === confirmDeleteFundId);
           const opsCount = confirmDeleteFundId ? fundOperations.filter((o) => o.fundId === confirmDeleteFundId).length : 0;
+          const linkedCount = confirmDeleteFundId ? fundOperations.filter((o) => o.fundId === confirmDeleteFundId && o.linkedTransactionId).length : 0;
           const base = `Cette action est définitive.`;
-          return opsCount > 0
-            ? `${base} "${f?.name}" a ${opsCount} opération${opsCount > 1 ? "s" : ""} enregistrée${opsCount > 1 ? "s" : ""} dans le Journal FCP — elles seront aussi supprimées.`
-            : `${base} "${f?.name}" sera retiré de ton portefeuille Bourse.`;
+          if (opsCount === 0) return `${base} "${f?.name}" sera retiré de ton portefeuille Bourse.`;
+          const linkedNote = linkedCount > 0 ? ` (dont ${linkedCount} avec une transaction liée dans le Journal principal, aussi supprimée)` : "";
+          return `${base} "${f?.name}" a ${opsCount} opération${opsCount > 1 ? "s" : ""} enregistrée${opsCount > 1 ? "s" : ""} dans le Journal FCP — elles seront aussi supprimées${linkedNote}.`;
         })()}
         onConfirm={() => { if (confirmDeleteFundId) deleteFund(confirmDeleteFundId); setConfirmDeleteFundId(null); }}
         onCancel={() => setConfirmDeleteFundId(null)}
@@ -9195,7 +9228,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       <ConfirmDialog
         open={!!confirmDeleteOpId}
         title="Supprimer cette opération ?"
-        message="Cette action est définitive. La position du fonds (quantité, prix de revient, plus-value) sera recalculée automatiquement sans cette opération."
+        message="Cette action est définitive. La position du fonds sera recalculée automatiquement. Si cette opération avait créé une transaction liée dans le Journal principal, elle sera aussi supprimée."
         onConfirm={() => { if (confirmDeleteOpId) deleteOperation(confirmDeleteOpId); setConfirmDeleteOpId(null); }}
         onCancel={() => setConfirmDeleteOpId(null)}
       />
@@ -13823,7 +13856,7 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} isMobile={isMobile} />}
+          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} isMobile={isMobile} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
