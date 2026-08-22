@@ -497,31 +497,34 @@ const seedFunds: Fund[] = [
   { id: "fund-aurore-opportunites", name: "AURORE OPPORTUNITES", category: "Actions", updatedAt: "2025-05-01T00:00:00.000Z" },
 ];
 const seedFundOperations: FundOperation[] = [
-  { id: "fundop-1", fundId: "fund-aurore-opportunites", date: "2025-06-05", type: "Souscription", quantite: 0.6060, vl: 8249.7037, montant: 5000, frais: 50, account: "SGO", updatedAt: "2025-06-05T00:00:00.000Z" },
-  { id: "fundop-2", fundId: "fund-nsia-diversifie", date: "2025-06-10", type: "Souscription", quantite: 0.2574, vl: 6750.8487, montant: 1700, frais: 57.36, account: "SGO", updatedAt: "2025-06-10T00:00:00.000Z" },
-  { id: "fundop-3", fundId: "fund-aurore-opportunites", date: "2025-06-10", type: "Souscription", quantite: 0.3681, vl: 8332.4340, montant: 3000, frais: 101.23, account: "SGO", updatedAt: "2025-06-10T00:00:01.000Z" },
-  { id: "fundop-4", fundId: "fund-aurore-opportunites", date: "2025-06-10", type: "Souscription", quantite: 3.6251, vl: 8332.4340, montant: 30000, frais: 542.31, account: "SGO", updatedAt: "2025-06-10T00:00:02.000Z" },
+  { id: "fundop-1", fundId: "fund-aurore-opportunites", date: "2025-06-05", type: "Souscription", quantite: 0.6060, vl: 8249.7037, montant: 5000, frais: 21.85, account: "SGO", updatedAt: "2025-06-05T00:00:00.000Z" },
+  { id: "fundop-2", fundId: "fund-nsia-diversifie", date: "2025-06-10", type: "Souscription", quantite: 0.2574, vl: 6750.8487, montant: 1700, frais: 17.59, account: "SGO", updatedAt: "2025-06-10T00:00:00.000Z" },
+  { id: "fundop-3", fundId: "fund-aurore-opportunites", date: "2025-06-10", type: "Souscription", quantite: 0.3681, vl: 8332.4340, montant: 3000, frais: 44.24, account: "SGO", updatedAt: "2025-06-10T00:00:01.000Z" },
+  { id: "fundop-4", fundId: "fund-aurore-opportunites", date: "2025-06-10", type: "Souscription", quantite: 3.6251, vl: 8332.4340, montant: 30000, frais: 237.01, account: "SGO", updatedAt: "2025-06-10T00:00:02.000Z" },
   { id: "fundop-5", fundId: "fund-aurore-opportunites", date: "2025-06-25", type: "Rachat", quantite: 4.5944, vl: 8448.7590, montant: 38428.83, account: "SGO", updatedAt: "2025-06-25T00:00:00.000Z" },
-  { id: "fundop-6", fundId: "fund-nsia-diversifie", date: "2025-08-13", type: "Souscription", quantite: 4.4224, vl: 6830.2735, montant: 30000, frais: 542.31, account: "SGO", updatedAt: "2025-08-13T00:00:00.000Z" },
-  { id: "fundop-7", fundId: "fund-aurore-opportunites", date: "2025-08-13", type: "Souscription", quantite: 5.9618, vl: 8452.9367, montant: 50000, frais: 903.85, account: "SGO", updatedAt: "2025-08-13T00:00:01.000Z" },
-  { id: "fundop-8", fundId: "fund-aurore-opportunites", date: "2025-08-18", type: "Souscription", quantite: 3.5563, vl: 8502.2800, montant: 30000, frais: 542.31, account: "SGO", updatedAt: "2025-08-18T00:00:00.000Z" },
-  { id: "fundop-9", fundId: "fund-aurore-opportunites", date: "2025-08-25", type: "Souscription", quantite: 11.7370, vl: 8587.3752, montant: 100000, frais: 1807.7, account: "SGO", updatedAt: "2025-08-25T00:00:00.000Z" },
-  { id: "fundop-10", fundId: "fund-nsia-diversifie", date: "2025-09-11", type: "Souscription", quantite: 2.8973, vl: 6950.6004, montant: 20000, frais: 361.54, account: "SGO", updatedAt: "2025-09-11T00:00:00.000Z" },
-  { id: "fundop-11", fundId: "fund-aurore-opportunites", date: "2025-09-11", type: "Souscription", quantite: 9.1903, vl: 8773.6425, montant: 80000, frais: 1446.16, account: "SGO", updatedAt: "2025-09-11T00:00:01.000Z" },
+  { id: "fundop-6", fundId: "fund-nsia-diversifie", date: "2025-08-13", type: "Souscription", quantite: 4.4224, vl: 6830.2735, montant: 30000, frais: 166.32, account: "SGO", updatedAt: "2025-08-13T00:00:00.000Z" },
+  { id: "fundop-7", fundId: "fund-aurore-opportunites", date: "2025-08-13", type: "Souscription", quantite: 5.9618, vl: 8452.9367, montant: 50000, frais: 395.01, account: "SGO", updatedAt: "2025-08-13T00:00:01.000Z" },
+  { id: "fundop-8", fundId: "fund-aurore-opportunites", date: "2025-08-18", type: "Souscription", quantite: 3.5563, vl: 8502.2800, montant: 30000, frais: 237.01, account: "SGO", updatedAt: "2025-08-18T00:00:00.000Z" },
+  { id: "fundop-9", fundId: "fund-aurore-opportunites", date: "2025-08-25", type: "Souscription", quantite: 11.7370, vl: 8587.3752, montant: 100000, frais: 790.03, account: "SGO", updatedAt: "2025-08-25T00:00:00.000Z" },
+  { id: "fundop-10", fundId: "fund-nsia-diversifie", date: "2025-09-11", type: "Souscription", quantite: 2.8973, vl: 6950.6004, montant: 20000, frais: 110.88, account: "SGO", updatedAt: "2025-09-11T00:00:00.000Z" },
+  { id: "fundop-11", fundId: "fund-aurore-opportunites", date: "2025-09-11", type: "Souscription", quantite: 9.1903, vl: 8773.6425, montant: 80000, frais: 632.02, account: "SGO", updatedAt: "2025-09-11T00:00:01.000Z" },
   { id: "fundop-12", fundId: "fund-aurore-opportunites", date: "2025-09-15", type: "Rachat", quantite: 1.1402, vl: 8867.7915, montant: 9999.78, account: "SGO", updatedAt: "2025-09-15T00:00:00.000Z" },
-  { id: "fundop-13", fundId: "fund-nsia-diversifie", date: "2025-09-16", type: "Souscription", quantite: 1.4397, vl: 6993.7967, montant: 10000, frais: 180.77, account: "SGO", updatedAt: "2025-09-16T00:00:00.000Z" },
-  { id: "fundop-14", fundId: "fund-aurore-opportunites", date: "2025-09-16", type: "Souscription", quantite: 4.5463, vl: 8867.7915, montant: 40000, frais: 723.08, account: "SGO", updatedAt: "2025-09-16T00:00:01.000Z" },
-  { id: "fundop-15", fundId: "fund-nsia-diversifie", date: "2026-02-12", type: "Souscription", quantite: 2.0505, vl: 7365.4269, montant: 15000, frais: 271.15, account: "SGO", updatedAt: "2026-02-12T00:00:00.000Z" },
-  { id: "fundop-16", fundId: "fund-aurore-opportunites", date: "2026-02-12", type: "Souscription", quantite: 3.5997, vl: 9799.9604, montant: 35000, frais: 632.69, account: "SGO", updatedAt: "2026-02-12T00:00:01.000Z" },
-  { id: "fundop-17", fundId: "fund-aurore-monetaire", date: "2026-03-19", type: "Souscription", quantite: 0.5079, vl: 5947.7271, montant: 3000, frais: 29.31, account: "SGO", updatedAt: "2026-03-19T00:00:00.000Z" },
-  { id: "fundop-18", fundId: "fund-aurore-monetaire", date: "2026-06-08", type: "Souscription", quantite: 1.6681, vl: 6036.9327, montant: 10000, frais: 97.69, account: "SGO", updatedAt: "2026-06-08T00:00:00.000Z" },
-  { id: "fundop-19", fundId: "fund-nsia-diversifie", date: "2026-06-08", type: "Souscription", quantite: 3.8037, vl: 7898.9915, montant: 30000, frais: 542.31, account: "SGO", updatedAt: "2026-06-08T00:00:01.000Z" },
-  { id: "fundop-20", fundId: "fund-aurore-opportunites", date: "2026-06-08", type: "Souscription", quantite: 5.2895, vl: 11432.8455, montant: 60000, frais: 1084.62, account: "SGO", updatedAt: "2026-06-08T00:00:02.000Z" },
+  { id: "fundop-13", fundId: "fund-nsia-diversifie", date: "2025-09-16", type: "Souscription", quantite: 1.4397, vl: 6993.7967, montant: 10000, frais: 55.44, account: "SGO", updatedAt: "2025-09-16T00:00:00.000Z" },
+  { id: "fundop-14", fundId: "fund-aurore-opportunites", date: "2025-09-16", type: "Souscription", quantite: 4.5463, vl: 8867.7915, montant: 40000, frais: 316.01, account: "SGO", updatedAt: "2025-09-16T00:00:01.000Z" },
+  { id: "fundop-15", fundId: "fund-nsia-diversifie", date: "2026-02-12", type: "Souscription", quantite: 2.0505, vl: 7365.4269, montant: 15000, frais: 83.16, account: "SGO", updatedAt: "2026-02-12T00:00:00.000Z" },
+  { id: "fundop-16", fundId: "fund-aurore-opportunites", date: "2026-02-12", type: "Souscription", quantite: 3.5997, vl: 9799.9604, montant: 35000, frais: 276.51, account: "SGO", updatedAt: "2026-02-12T00:00:01.000Z" },
+  { id: "fundop-17", fundId: "fund-aurore-monetaire", date: "2026-03-19", type: "Souscription", quantite: 0.5079, vl: 5947.7271, montant: 3000, frais: 21.00, account: "SGO", updatedAt: "2026-03-19T00:00:00.000Z" },
+  { id: "fundop-18", fundId: "fund-aurore-monetaire", date: "2026-06-08", type: "Souscription", quantite: 1.6681, vl: 6036.9327, montant: 10000, frais: 70.00, account: "SGO", updatedAt: "2026-06-08T00:00:00.000Z" },
+  { id: "fundop-19", fundId: "fund-nsia-diversifie", date: "2026-06-08", type: "Souscription", quantite: 3.8037, vl: 7898.9915, montant: 30000, frais: 166.32, account: "SGO", updatedAt: "2026-06-08T00:00:01.000Z" },
+  { id: "fundop-20", fundId: "fund-aurore-opportunites", date: "2026-06-08", type: "Souscription", quantite: 5.2895, vl: 11432.8455, montant: 60000, frais: 474.02, account: "SGO", updatedAt: "2026-06-08T00:00:02.000Z" },
 ];
 const seedFundDailyValues: FundDailyValue[] = [
   { id: "vl-aurore-monetaire-1", fundId: "fund-aurore-monetaire", date: "2026-08-18", vl: 6094.4973, updatedAt: "2026-08-21T00:00:00.000Z" },
   { id: "vl-nsia-diversifie-1", fundId: "fund-nsia-diversifie", date: "2026-08-18", vl: 8515.8215, updatedAt: "2026-08-21T00:00:00.000Z" },
   { id: "vl-aurore-opportunites-1", fundId: "fund-aurore-opportunites", date: "2026-08-18", vl: 13067.7049, updatedAt: "2026-08-21T00:00:00.000Z" },
+  { id: "vl-aurore-monetaire-2", fundId: "fund-aurore-monetaire", date: "2026-08-22", vl: 6095.1572, updatedAt: "2026-08-22T00:00:00.000Z" },
+  { id: "vl-nsia-diversifie-2", fundId: "fund-nsia-diversifie", date: "2026-08-22", vl: 8562.5266, updatedAt: "2026-08-22T00:00:00.000Z" },
+  { id: "vl-aurore-opportunites-2", fundId: "fund-aurore-opportunites", date: "2026-08-22", vl: 13217.5868, updatedAt: "2026-08-22T00:00:00.000Z" },
 ];
 
 const seedGoals: Goal[] = [
@@ -8541,11 +8544,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // Import explicite du relevé NSIA — plus robuste que le "seed au premier chargement"
   // (qui ne s'applique que si la clé de stockage est totalement vide) : ici, on
   // n'ajoute QUE ce qui manque, en dédupliquant par nom de fonds et par
-  // (fonds, date, type, quantité, montant) pour les opérations — jamais de doublon,
-  // même si l'utilisateur a déjà saisi une partie du relevé à la main. Corrigé le
-  // 21/08/2026 après un import "silencieux" resté sans effet car la clé de stockage
-  // n'était déjà plus vide.
-  const [importResult, setImportResult] = useState<{ funds: number; ops: number; vls: number } | null>(null);
+  // (fonds, date, type, quantité, montant) pour les opérations. Une opération qui
+  // correspond déjà à une existante voit désormais aussi ses FRAIS mis à jour vers la
+  // valeur du relevé (au lieu d'être simplement ignorée) — sans ce comportement,
+  // recliquer sur "Importer" après une correction de frais dans le code n'aurait eu
+  // aucun effet sur des opérations déjà importées (corrigé le 22/08/2026).
+  const [importResult, setImportResult] = useState<{ funds: number; ops: number; opsUpdated: number; vls: number } | null>(null);
   const importStatementData = () => {
     const nameToExistingId = new Map(funds.map((f) => [f.name.trim().toLowerCase(), f.id]));
     const idMap = new Map<string, string>();
@@ -8557,14 +8561,17 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     });
 
     const opKey = (fundId: string, date: string, type: string, qty: number, montant: number) => `${fundId}|${date}|${type}|${qty.toFixed(4)}|${Math.round(montant)}`;
-    const existingOpKeys = new Set(fundOperations.map((o) => opKey(o.fundId, o.date, o.type, o.quantite, o.montant)));
+    const existingByKey = new Map(fundOperations.map((o) => [opKey(o.fundId, o.date, o.type, o.quantite, o.montant), o]));
     const newOps: FundOperation[] = [];
+    const opIdsToUpdate = new Map<string, number>(); // id -> nouveaux frais
     seedFundOperations.forEach((so) => {
       const fundId = idMap.get(so.fundId)!;
       const key = opKey(fundId, so.date, so.type, so.quantite, so.montant);
-      if (!existingOpKeys.has(key)) {
+      const existing = existingByKey.get(key);
+      if (!existing) {
         newOps.push({ ...so, id: uid("fundop"), fundId, updatedAt: new Date().toISOString() });
-        existingOpKeys.add(key);
+      } else if ((existing.frais || 0) !== (so.frais || 0)) {
+        opIdsToUpdate.set(existing.id, so.frais || 0);
       }
     });
 
@@ -8581,9 +8588,14 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     });
 
     if (newFunds.length) setFunds([...funds, ...newFunds]);
-    if (newOps.length) setFundOperations([...fundOperations, ...newOps]);
+    let finalOps = fundOperations;
+    if (opIdsToUpdate.size) {
+      finalOps = finalOps.map((o) => opIdsToUpdate.has(o.id) ? { ...o, frais: opIdsToUpdate.get(o.id), updatedAt: new Date().toISOString() } : o);
+    }
+    if (newOps.length) finalOps = [...finalOps, ...newOps];
+    if (newOps.length || opIdsToUpdate.size) setFundOperations(finalOps);
     if (newVls.length) setFundDailyValues([...fundDailyValues, ...newVls]);
-    setImportResult({ funds: newFunds.length, ops: newOps.length, vls: newVls.length });
+    setImportResult({ funds: newFunds.length, ops: newOps.length, opsUpdated: opIdsToUpdate.size, vls: newVls.length });
     setConfirmImportOpen(false);
   };
 
@@ -8691,15 +8703,15 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         </button>
       </div>
 
-      {importResult && (importResult.funds + importResult.ops + importResult.vls > 0) && (
+      {importResult && (importResult.funds + importResult.ops + importResult.opsUpdated + importResult.vls > 0) && (
         <div style={{ background: "rgba(95,194,152,0.1)", border: `1px solid ${COLOR.emerald}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.emeraldSoft, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>Import terminé : {importResult.funds} fonds, {importResult.ops} opération{importResult.ops > 1 ? "s" : ""}, {importResult.vls} VL ajoutée{importResult.vls > 1 ? "s" : ""} (le reste existait déjà).</span>
+          <span>Import terminé : {importResult.funds} fonds, {importResult.ops} opération{importResult.ops > 1 ? "s" : ""} ajoutée{importResult.ops > 1 ? "s" : ""}, {importResult.opsUpdated} frais mis à jour, {importResult.vls} VL ajoutée{importResult.vls > 1 ? "s" : ""}.</span>
           <button onClick={() => setImportResult(null)} style={{ background: "transparent", border: "none", color: COLOR.emeraldSoft, cursor: "pointer" }}><X size={14} /></button>
         </div>
       )}
-      {importResult && importResult.funds + importResult.ops + importResult.vls === 0 && (
+      {importResult && importResult.funds + importResult.ops + importResult.opsUpdated + importResult.vls === 0 && (
         <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.inkMuted, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>Rien à importer — tout était déjà présent.</span>
+          <span>Rien à importer — tout était déjà à jour.</span>
           <button onClick={() => setImportResult(null)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer" }}><X size={14} /></button>
         </div>
       )}
