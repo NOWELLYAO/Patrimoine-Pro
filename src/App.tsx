@@ -8466,6 +8466,54 @@ function computeFundPosition(fundId: string, operations: FundOperation[], dailyV
   return { qty, costTotal, avgCost, currentVL, valorisation, plusValueLatente, realizedGain, dayChange, dayChangePct, lastValueDate: lastValue?.date || lastOp?.date || null, opsCount: ops.length };
 }
 
+// Conseils du jour — sur demande explicite de l'utilisateur (22/08/2026), pour pousser
+// à investir/suivre régulièrement. Mélange de conseils CONTEXTUELS (calculés à partir
+// de l'état réel du portefeuille : VL pas à jour, pas de souscription récente,
+// concentration excessive) et d'un conseil général qui tourne un jour sur l'autre
+// (indexé sur la date du jour, donc stable toute la journée puis change le lendemain,
+// sans stockage supplémentaire nécessaire).
+function computeBourseAdvice(funds: Fund[], fundOperations: FundOperation[], fundDailyValues: FundDailyValue[], positions: { fund: Fund; pos: ReturnType<typeof computeFundPosition> }[], totalValorisation: number) {
+  const tips: { icon: any; tone: "warn" | "info" | "tip"; text: string }[] = [];
+  const today = todayISO();
+  const daysBetween = (a: string, b: string) => Math.floor((new Date(b).getTime() - new Date(a).getTime()) / 86400000);
+
+  const staleFunds = funds.filter((f) => {
+    const last = fundDailyValues.filter((v) => v.fundId === f.id).sort((a, b) => b.date.localeCompare(a.date))[0];
+    return !last || daysBetween(last.date, today) >= 3;
+  });
+  if (staleFunds.length && funds.length) {
+    tips.push({ icon: TrendingUp, tone: "warn", text: `La VL de ${staleFunds.length === funds.length ? "tous tes fonds" : `${staleFunds.length} fonds`} n'a pas été renseignée depuis 3 jours ou plus — un coup d'œil rapide dans "Renseigner les VL du jour" et ton suivi redevient à jour.` });
+  }
+
+  if (fundOperations.length) {
+    const lastOpDate = [...fundOperations].sort((a, b) => b.date.localeCompare(a.date))[0].date;
+    const gap = daysBetween(lastOpDate, today);
+    if (gap >= 30) {
+      tips.push({ icon: Rocket, tone: "info", text: `${gap} jours depuis ta dernière souscription. Investir régulièrement, même de petits montants, lisse ton prix de revient dans le temps (principe du DCA — Dollar-Cost Averaging) au lieu de chercher le "bon moment".` });
+    }
+  }
+
+  if (totalValorisation > 0 && positions.length > 1) {
+    const maxAlloc = Math.max(...positions.map((p) => p.pos.valorisation / totalValorisation));
+    if (maxAlloc > 0.75) {
+      tips.push({ icon: AlertTriangle, tone: "warn", text: `Plus de ${(maxAlloc * 100).toFixed(0)}% de ton portefeuille repose sur un seul fonds. Diversifier entre plusieurs profils (monétaire, diversifié, actions) réduit l'impact d'une mauvaise passe sur l'un d'eux.` });
+    }
+  }
+
+  const quotes = [
+    "Le meilleur moment pour investir était il y a 20 ans. Le deuxième meilleur moment, c'est maintenant.",
+    "Investir petit mais régulièrement bat souvent investir gros une seule fois — la régularité compte plus que le timing.",
+    "Les plus-values latentes d'aujourd'hui ne se réalisent qu'avec de la patience — c'est l'actif le plus sous-estimé en investissement.",
+    "Un fonds monétaire protège le capital ; un fonds actions le fait grandir sur le long terme. Le bon dosage dépend de ton horizon de placement.",
+    "Vérifier son portefeuille chaque jour n'accélère pas sa croissance — mais y contribuer régulièrement, si.",
+    "Le prix de revient moyen baisse chaque fois que tu investis quand la VL est basse : la discipline compense l'absence de martingale.",
+  ];
+  const idx = parseInt(today.replace(/-/g, ""), 10) % quotes.length;
+  tips.push({ icon: Sparkles, tone: "tip", text: quotes[idx] });
+
+  return tips;
+}
+
 function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, deletedFundOperationIds, setDeletedFundOperationIds, transactions, setTransactions, categoryGroups, setCategoryGroups, isMobile }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
@@ -8495,6 +8543,13 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [bulkVlOpen, setBulkVlOpen] = useState(false);
   const [bulkVlDate, setBulkVlDate] = useState(todayISO());
   const [bulkVlValues, setBulkVlValues] = useState<Record<string, number>>({});
+  // Export PDF/Excel sur période — sur demande explicite de l'utilisateur (22/08/2026).
+  const [exportFrom, setExportFrom] = useState(() => {
+    const dates = fundOperations.map((o) => o.date).sort();
+    return dates[0] || todayISO();
+  });
+  const [exportTo, setExportTo] = useState(todayISO());
+  const [pdfExportState, setPdfExportState] = useState<"idle" | "loading" | "error">("idle");
 
   const [opFormFundId, setOpFormFundId] = useState<string | null>(null);
   const [opType, setOpType] = useState<"Souscription" | "Rachat">("Souscription");
@@ -8505,6 +8560,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [opFrais, setOpFrais] = useState<number>(0);
   const [opAccount, setOpAccount] = useState(accounts[0]?.name || "");
   const [expandedFundId, setExpandedFundId] = useState<string | null>(null);
+  // Édition d'une opération existante — sur demande explicite de l'utilisateur
+  // (22/08/2026), qui avait constaté qu'il était impossible de modifier ou supprimer
+  // une souscription depuis le tableau d'historique replié par fonds. null = mode
+  // création (comportement inchangé), un id = mode édition (réutilise la même modale).
+  const [editingOpId, setEditingOpId] = useState<string | null>(null);
   // Confirmation systématique avant suppression — corrigé le 21/08/2026 : un fonds
   // sans opération se supprimait auparavant d'un clic sec, sans rien demander (seul le
   // cas "avec opérations" passait par une confirmation native du navigateur). Utilise
@@ -8670,22 +8730,50 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       setCategoryGroups({ ...categoryGroups, [INVESTMENT_CATEGORY]: "Productif" });
     }
   };
+  const openEditOperation = (o: FundOperation) => {
+    setEditingOpId(o.id);
+    setOpFormFundId(o.fundId);
+    setOpType(o.type);
+    setOpDate(o.date);
+    setOpQty(o.quantite);
+    setOpVl(o.vl);
+    setOpMontant(o.montant);
+    setOpFrais(o.frais || 0);
+    setOpAccount(o.account);
+  };
   const saveOperation = () => {
     if (!opFormFundId || opQty <= 0 || opVl <= 0 || !opAccount) return;
     const fund = funds.find((f) => f.id === opFormFundId);
     if (!fund) return;
     const montant = opMontant > 0 ? opMontant : Math.round(opQty * opVl);
-    ensureInvestmentCategory();
-    const txId = uid("t");
-    const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, linkedTransactionId: txId, updatedAt: new Date().toISOString() };
-    setFundOperations([...fundOperations, op]);
-    const linkedTx: Transaction = {
-      id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
-      category: INVESTMENT_CATEGORY, subcategory: fund.name, amount: montant, account: opAccount,
-      note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}`,
-    } as Transaction;
-    setTransactions([...transactions, linkedTx]);
-    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0);
+
+    if (editingOpId) {
+      // Mode édition — met à jour l'opération en place, et sa transaction liée si elle
+      // en avait une (les 20 opérations importées n'en ont pas, elles restent sans lien).
+      const existing = fundOperations.find((o) => o.id === editingOpId);
+      setFundOperations(fundOperations.map((o) => o.id === editingOpId
+        ? { ...o, fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, updatedAt: new Date().toISOString() }
+        : o));
+      if (existing?.linkedTransactionId) {
+        setTransactions(transactions.map((t) => t.id === existing.linkedTransactionId
+          ? { ...t, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu", subcategory: fund.name, amount: montant, account: opAccount, note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}` }
+          : t));
+      }
+    } else {
+      // Mode création — comportement inchangé depuis le 22/08/2026 : crée une
+      // transaction liée dans le Journal principal.
+      ensureInvestmentCategory();
+      const txId = uid("t");
+      const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, linkedTransactionId: txId, updatedAt: new Date().toISOString() };
+      setFundOperations([...fundOperations, op]);
+      const linkedTx: Transaction = {
+        id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
+        category: INVESTMENT_CATEGORY, subcategory: fund.name, amount: montant, account: opAccount,
+        note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}`,
+      } as Transaction;
+      setTransactions([...transactions, linkedTx]);
+    }
+    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0); setEditingOpId(null);
   };
 
   const positions = useMemo(() => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })), [funds, fundOperations, fundDailyValues]);
@@ -8695,6 +8783,117 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const totalDayChange = positions.reduce((a, p) => a + (p.pos.dayChange || 0), 0);
   const totalPrevValorisation = totalValorisation - totalDayChange;
   const totalDayChangePct = totalPrevValorisation !== 0 ? (totalDayChange / totalPrevValorisation) * 100 : 0;
+  const bourseAdvice = useMemo(() => computeBourseAdvice(funds, fundOperations, fundDailyValues, positions, totalValorisation), [funds, fundOperations, fundDailyValues, positions, totalValorisation]);
+  const [adviceDismissed, setAdviceDismissed] = useState(false);
+
+  // Export Excel — relevé de portefeuille sur la période choisie, même esprit que les
+  // autres exports de l'app (feuilles multiples), sur demande explicite de
+  // l'utilisateur (22/08/2026).
+  const periodOps = useMemo(() => fundOperations.filter((o) => o.date >= exportFrom && o.date <= exportTo).sort((a, b) => a.date.localeCompare(b.date)), [fundOperations, exportFrom, exportTo]);
+  const exportExcelBourse = () => {
+    const wb = XLSX.utils.book_new();
+    const summaryRows: any[][] = [
+      ["Relevé de portefeuille — Bourse (FCP)"],
+      ["Période", `${dateLabelFull(exportFrom)} — ${dateLabelFull(exportTo)}`],
+      ["Généré le", dateLabelFull(todayISO())],
+      [],
+      ["Valorisation totale (FCFA)", Math.round(totalValorisation)],
+      ["Investi (FCFA)", Math.round(totalCost)],
+      ["Plus-value latente (FCFA)", Math.round(totalPlusValue)],
+    ];
+    const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+    wsSummary["!cols"] = [{ wch: 32 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, wsSummary, "Résumé");
+
+    const posHeader = ["Quantité", "OPCVM", "VL actuelle", "Valorisation", "Allocation", "Prix de revient (PRU)", "Plus-value latente"];
+    const posRows = positions.map(({ fund, pos }) => [
+      Number(pos.qty.toFixed(4)), fund.name, Math.round(pos.currentVL), Math.round(pos.valorisation),
+      `${totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(2) : "0.00"}%`,
+      Math.round(pos.avgCost), Math.round(pos.plusValueLatente),
+    ]);
+    const wsPos = XLSX.utils.aoa_to_sheet([posHeader, ...posRows]);
+    wsPos["!cols"] = [{ wch: 12 }, { wch: 24 }, { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 16 }];
+    XLSX.utils.book_append_sheet(wb, wsPos, "Portefeuille");
+
+    const opHeader = ["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Frais", "Compte"];
+    const opRows = periodOps.map((o) => [o.date, o.type, funds.find((f) => f.id === o.fundId)?.name || "", o.quantite, o.vl, o.montant, o.frais || 0, o.account]);
+    const wsOps = XLSX.utils.aoa_to_sheet([opHeader, ...opRows]);
+    wsOps["!cols"] = [{ wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 11 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 12 }];
+    XLSX.utils.book_append_sheet(wb, wsOps, "Journal FCP");
+
+    XLSX.writeFile(wb, `bourse-fcp_releve_${exportFrom}_${exportTo}.xlsx`);
+  };
+
+  const exportPDFBourse = async () => {
+    setPdfExportState("loading");
+    try {
+      const [jsPDFModule, autoTableModule] = await Promise.all([
+        import(/* @vite-ignore */ "jspdf"),
+        import(/* @vite-ignore */ "jspdf-autotable"),
+      ]);
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFillColor(13, 31, 61);
+      doc.rect(0, 0, pageWidth, 34, "F");
+      doc.setFontSize(17); doc.setTextColor(255, 255, 255);
+      doc.text("Relevé de portefeuille — Bourse (FCP)", 14, 16);
+      doc.setFontSize(9.5); doc.setTextColor(200, 210, 225);
+      doc.text(`Période : ${dateLabelFull(exportFrom)} — ${dateLabelFull(exportTo)} · Généré le ${dateLabelFull(todayISO())}`, 14, 24);
+      doc.text(`${positions.length} fonds · ${periodOps.length} opération(s) sur la période`, 14, 29);
+
+      const kpiY = 40, kpiH = 20, kpiW = (pageWidth - 28 - 16) / 3;
+      const drawKpiBox = (x: number, label: string, value: string, r: number, g: number, b: number) => {
+        doc.setFillColor(r, g, b);
+        doc.roundedRect(x, kpiY, kpiW, kpiH, 2, 2, "F");
+        doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+        doc.text(label, x + 5, kpiY + 7);
+        doc.setFontSize(11); doc.setFont("helvetica", "bold");
+        doc.text(value, x + 5, kpiY + 15);
+        doc.setFont("helvetica", "normal");
+      };
+      drawKpiBox(14, "VALORISATION", `${fmtPdf(totalValorisation)} FCFA`, 13, 31, 61);
+      drawKpiBox(14 + kpiW + 8, "INVESTI", `${fmtPdf(totalCost)} FCFA`, 90, 90, 90);
+      drawKpiBox(14 + (kpiW + 8) * 2, "PLUS-VALUE LATENTE", `${totalPlusValue >= 0 ? "+" : ""}${fmtPdf(totalPlusValue)}`, totalPlusValue >= 0 ? 63 : 193, totalPlusValue >= 0 ? 156 : 84, totalPlusValue >= 0 ? 122 : 63);
+
+      doc.setFontSize(11); doc.setTextColor(13, 31, 61); doc.setFont("helvetica", "bold");
+      doc.text("Synthèse du portefeuille", 14, 70);
+      doc.setFont("helvetica", "normal");
+      doc.autoTable({
+        startY: 74,
+        head: [["OPCVM", "Quantité", "VL actuelle", "Valorisation", "Allocation", "PRU", "Plus-value latente"]],
+        body: positions.map(({ fund, pos }) => [
+          fund.name, pos.qty.toFixed(4), fmtPdf(pos.currentVL), fmtPdf(pos.valorisation),
+          `${totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(1) : "0.0"}%`,
+          fmtPdf(pos.avgCost), `${pos.plusValueLatente >= 0 ? "+" : ""}${fmtPdf(pos.plusValueLatente)}`,
+        ]),
+        headStyles: { fillColor: [13, 31, 61] },
+        styles: { fontSize: 8 },
+        columnStyles: { 1: { halign: "right" }, 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" } },
+      });
+
+      let y = (doc as any).lastAutoTable.finalY + 12;
+      if (y > 250) { doc.addPage(); y = 20; }
+      doc.setFontSize(11); doc.setTextColor(13, 31, 61); doc.setFont("helvetica", "bold");
+      doc.text(`Historique des opérations (${dateLabelFull(exportFrom)} au ${dateLabelFull(exportTo)})`, 14, y);
+      doc.setFont("helvetica", "normal");
+      doc.autoTable({
+        startY: y + 4,
+        head: [["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Compte"]],
+        body: periodOps.map((o) => [dateLabelFull(o.date), o.type, funds.find((f) => f.id === o.fundId)?.name || "", o.quantite.toFixed(4), fmtPdf(o.vl), fmtPdf(o.montant), o.account]),
+        headStyles: { fillColor: [201, 162, 39], textColor: [26, 26, 26] },
+        styles: { fontSize: 7.5 },
+        columnStyles: { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
+        margin: { left: 14, right: 14 },
+      });
+
+      doc.save(`bourse-fcp_releve_${exportFrom}_${exportTo}.pdf`);
+      setPdfExportState("idle");
+    } catch {
+      setPdfExportState("error");
+    }
+  };
 
   // Courbe d'évolution du portefeuille — reconstruit la quantité détenue à chaque date
   // de VL connue (toutes fonds confondus) pour tracer la valorisation totale dans le
@@ -8750,6 +8949,27 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           </div>
         )}
       </div>
+
+      {view === "dashboard" && !adviceDismissed && bourseAdvice.length > 0 && (
+        <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontFamily: "'Fraunces', serif", fontSize: 14.5, color: COLOR.ink, display: "flex", alignItems: "center", gap: 6 }}>
+              <Sparkles size={14} color={COLOR.goldSoft} /> Conseils du jour
+            </span>
+            <button onClick={() => setAdviceDismissed(true)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer" }}><X size={14} /></button>
+          </div>
+          {bourseAdvice.map((tip, i) => {
+            const Icon = tip.icon;
+            const color = tip.tone === "warn" ? COLOR.claySoft : tip.tone === "info" ? COLOR.slateBlueSoft : COLOR.goldSoft;
+            return (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <Icon size={14} color={color} style={{ marginTop: 2, flexShrink: 0 }} />
+                <span style={{ fontSize: 12.5, color: COLOR.inkMuted, lineHeight: 1.5 }}>{tip.text}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Bascule Tableau de bord / Journal FCP + import du relevé */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
@@ -8859,10 +9079,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => { setVlFormFundId(fund.id); setVlDate(todayISO()); setVlValue(pos.currentVL || 0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <TrendingUp size={12} /> Renseigner la VL du jour
             </button>
-            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Plus size={12} /> Souscription
             </button>
-            <button onClick={() => { setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Minus size={12} /> Rachat
             </button>
             <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
@@ -8876,7 +9096,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           {expandedFundId === fund.id && (
             <div style={{ marginTop: 14, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead><tr>{["Date", "Sens", "Quantité", "VL", "Montant"].map((h) => <th key={h} style={{ textAlign: "left", padding: "6px 8px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}` }}>{h}</th>)}</tr></thead>
+                <thead><tr>{["Date", "Sens", "Quantité", "VL", "Montant", ""].map((h) => <th key={h} style={{ textAlign: "left", padding: "6px 8px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}` }}>{h}</th>)}</tr></thead>
                 <tbody>
                   {fundOperations.filter((o) => o.fundId === fund.id).sort((a, b) => b.date.localeCompare(a.date)).map((o) => (
                     <tr key={o.id}>
@@ -8885,9 +9105,17 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{o.quantite.toFixed(4)}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.montant)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}>
+                        <button onClick={() => openEditOperation(o)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", padding: 4 }}>
+                          <Pencil size={13} />
+                        </button>
+                        <button onClick={() => setConfirmDeleteOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", padding: 4 }}>
+                          <Trash2 size={13} />
+                        </button>
+                      </td>
                     </tr>
                   ))}
-                  {!fundOperations.filter((o) => o.fundId === fund.id).length && <tr><td colSpan={5} style={{ padding: 10, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune opération</td></tr>}
+                  {!fundOperations.filter((o) => o.fundId === fund.id).length && <tr><td colSpan={6} style={{ padding: 10, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune opération</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -8898,6 +9126,25 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
 
       {view === "journal" && (
         <Panel title="Journal FCP" subtitle={`Toutes les opérations, tous fonds confondus, triées par date — ${fundOperations.length} opération${fundOperations.length > 1 ? "s" : ""}`}>
+          {!!fundOperations.length && (
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 14, marginBottom: 18, paddingBottom: 16, borderBottom: `1px solid ${COLOR.hairline}` }}>
+              <div>
+                <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>Relevé du</div>
+                <input type="date" value={exportFrom} onChange={(e) => setExportFrom(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>au</div>
+                <input type="date" value={exportTo} onChange={(e) => setExportTo(e.target.value)} style={inputStyle} />
+              </div>
+              <button onClick={exportExcelBourse} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(95,194,152,0.12)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
+                <Save size={13} /> Export Excel
+              </button>
+              <button onClick={exportPDFBourse} disabled={pdfExportState === "loading"} style={{ display: "flex", alignItems: "center", gap: 6, background: pdfExportState === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${pdfExportState === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8, color: pdfExportState === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "9px 14px", fontSize: 12.5, cursor: pdfExportState === "loading" ? "default" : "pointer" }}>
+                <Save size={13} /> {pdfExportState === "loading" ? "Génération…" : pdfExportState === "error" ? "Réessayer" : "Export PDF"}
+              </button>
+              <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{periodOps.length} opération{periodOps.length > 1 ? "s" : ""} sur cette période</span>
+            </div>
+          )}
           {!fundOperations.length ? <EmptyState /> : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
@@ -8939,7 +9186,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                         </td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{o.account}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
-                          <button onClick={() => setConfirmDeleteOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", padding: 4, display: "flex" }}>
+                          <button onClick={() => openEditOperation(o)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", padding: 4, display: "inline-flex" }}>
+                            <Pencil size={13} />
+                          </button>
+                          <button onClick={() => setConfirmDeleteOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", padding: 4, display: "inline-flex" }}>
                             <Trash2 size={13} />
                           </button>
                         </td>
@@ -9106,7 +9356,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               {/* Header — bouton fermer + bascule Souscription/Rachat, même chrome que
                   le sélecteur Dépense/Revenu de la Saisie du jour */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingLeft: 20, paddingRight: 20, paddingBottom: 8, paddingTop: "max(20px, env(safe-area-inset-top))", position: "sticky", top: 0, zIndex: 2, background: COLOR.surfaceRaised }}>
-                <button onClick={() => setOpFormFundId(null)} style={{
+                <button onClick={() => { setOpFormFundId(null); setEditingOpId(null); }} style={{
                   width: 40, height: 40, borderRadius: "50%", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`,
                   color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
                 }}>
@@ -9132,7 +9382,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               </div>
 
               <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
-                <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{fund.name}</span>
+                <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{fund.name}{editingOpId ? " · modification" : ""}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 10 }}>
                 <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 20, padding: "8px 18px" }}>
@@ -9201,7 +9451,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   width: "100%", marginTop: 14, background: (opQty > 0 && opVl > 0 && opAccount) ? COLOR.gold : COLOR.hairline, border: "none", borderRadius: 12,
                   color: (opQty > 0 && opVl > 0 && opAccount) ? "#0e1611" : COLOR.inkMuted, padding: "14px 0", fontSize: 15, fontWeight: 700, cursor: (opQty > 0 && opVl > 0 && opAccount) ? "pointer" : "default",
                 }}>
-                  Enregistrer
+                  {editingOpId ? "Mettre à jour" : "Enregistrer"}
                 </button>
               </div>
             </div>
