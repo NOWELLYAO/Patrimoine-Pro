@@ -8648,7 +8648,16 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     seedFunds.forEach((sf) => {
       const existingId = nameToExistingId.get(sf.name.trim().toLowerCase());
       if (existingId) { idMap.set(sf.id, existingId); }
-      else { idMap.set(sf.id, sf.id); newFunds.push({ ...sf, updatedAt: new Date().toISOString() }); }
+      else {
+        // Identifiant FRAIS et aléatoire, jamais l'id fixe du seed — sur demande
+        // explicite de l'utilisateur (23/08/2026), après un cas réel où l'id fixe
+        // "fund-aurore-monetaire" restait empoisonné par un tombstone qu'un appareil
+        // quelque part continuait à repousser vers Supabase, rendant tout réimport
+        // inopérant. Un id frais rend ce genre de collision structurellement impossible.
+        const freshId = uid("fund");
+        idMap.set(sf.id, freshId);
+        newFunds.push({ ...sf, id: freshId, updatedAt: new Date().toISOString() });
+      }
     });
 
     const opKey = (fundId: string, date: string, type: string, qty: number, montant: number) => `${fundId}|${date}|${type}|${qty.toFixed(4)}|${Math.round(montant)}`;
@@ -9000,20 +9009,6 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           </button>
         </div>
       </div>
-
-      {(deletedFundIds["fund-aurore-monetaire"] || deletedFundIds["fund-aurore-opportunites"]) && (
-        <div style={{ background: "rgba(201,162,39,0.1)", border: `1px solid ${COLOR.gold}`, borderRadius: 10, padding: "12px 16px", fontSize: 12.5, color: COLOR.goldSoft, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <span>Deux fonds importés ont été supprimés par erreur le 22/08 et bloquent leur réimport. Un clic répare ça sur cet appareil — répète sur tes autres appareils si besoin, puis reclique sur "Importer le relevé NSIA".</span>
-          <button onClick={() => {
-            const next = { ...deletedFundIds };
-            delete next["fund-aurore-monetaire"];
-            delete next["fund-aurore-opportunites"];
-            setDeletedFundIds(next);
-          }} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
-            Réparer maintenant
-          </button>
-        </div>
-      )}
 
       {importResult && (importResult.funds + importResult.ops + importResult.opsUpdated + importResult.vls > 0) && (
         <div style={{ background: "rgba(95,194,152,0.1)", border: `1px solid ${COLOR.emerald}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.emeraldSoft, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
