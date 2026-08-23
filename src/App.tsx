@@ -8995,6 +8995,20 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         </div>
       </div>
 
+      {(deletedFundIds["fund-aurore-monetaire"] || deletedFundIds["fund-aurore-opportunites"]) && (
+        <div style={{ background: "rgba(201,162,39,0.1)", border: `1px solid ${COLOR.gold}`, borderRadius: 10, padding: "12px 16px", fontSize: 12.5, color: COLOR.goldSoft, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span>Deux fonds importés ont été supprimés par erreur le 22/08 et bloquent leur réimport. Un clic répare ça sur cet appareil — répète sur tes autres appareils si besoin, puis reclique sur "Importer le relevé NSIA".</span>
+          <button onClick={() => {
+            const next = { ...deletedFundIds };
+            delete next["fund-aurore-monetaire"];
+            delete next["fund-aurore-opportunites"];
+            setDeletedFundIds(next);
+          }} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+            Réparer maintenant
+          </button>
+        </div>
+      )}
+
       {importResult && (importResult.funds + importResult.ops + importResult.opsUpdated + importResult.vls > 0) && (
         <div style={{ background: "rgba(95,194,152,0.1)", border: `1px solid ${COLOR.emerald}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.emeraldSoft, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span>Import terminé : {importResult.funds} fonds, {importResult.ops} opération{importResult.ops > 1 ? "s" : ""} ajoutée{importResult.ops > 1 ? "s" : ""}, {importResult.opsUpdated} frais mis à jour, {importResult.vls} VL ajoutée{importResult.vls > 1 ? "s" : ""}.</span>
