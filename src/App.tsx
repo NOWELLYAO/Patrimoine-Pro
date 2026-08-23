@@ -8649,12 +8649,16 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       const existingId = nameToExistingId.get(sf.name.trim().toLowerCase());
       if (existingId) { idMap.set(sf.id, existingId); }
       else {
-        // Identifiant FRAIS et aléatoire, jamais l'id fixe du seed — sur demande
-        // explicite de l'utilisateur (23/08/2026), après un cas réel où l'id fixe
-        // "fund-aurore-monetaire" restait empoisonné par un tombstone qu'un appareil
-        // quelque part continuait à repousser vers Supabase, rendant tout réimport
-        // inopérant. Un id frais rend ce genre de collision structurellement impossible.
-        const freshId = uid("fund");
+        // Identifiant NOUVEAU mais toujours LE MÊME (déterministe, pas aléatoire) — sur
+        // demande explicite de l'utilisateur (23/08/2026), après un cas réel où l'id
+        // fixe d'origine ("fund-aurore-monetaire") restait empoisonné par un tombstone
+        // repoussé vers Supabase par un appareil non identifié. Un id purement aléatoire
+        // aurait résolu ça mais cassé une propriété utile : deux appareils qui
+        // importent chacun pour la première fois, même sans s'être jamais synchronisés,
+        // tombaient jusque-là sur le même id et fusionnaient sans doublon. Un id
+        // déterministe "-v2" garde cet avantage tout en évitant la chaîne empoisonnée —
+        // le meilleur des deux options, sans le compromis de l'aléatoire.
+        const freshId = `${sf.id}-v2`;
         idMap.set(sf.id, freshId);
         newFunds.push({ ...sf, id: freshId, updatedAt: new Date().toISOString() });
       }
