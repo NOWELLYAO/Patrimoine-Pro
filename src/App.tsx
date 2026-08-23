@@ -11832,7 +11832,15 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
   // Garde-fou en deux temps : on réinitialise à la page 0 dès que la liste filtrée change,
   // et on protège quand même l'affichage avec un clamp au cas où le rendu arrive avant
   // que l'effet ait eu le temps de s'appliquer.
-  useEffect(() => { setPage(0); }, [filtered]);
+  // Re-corrigé le 23/08/2026 : le correctif précédent réinitialisait à la page 0 à
+  // CHAQUE changement de `filtered` — y compris une simple modification de transaction
+  // (qui change juste la référence du tableau, pas le nombre de pages), forçant à
+  // toujours revenir sur la bonne page après chaque édition. On ne réinitialise
+  // maintenant que si la page actuelle devient réellement invalide (hors limites).
+  useEffect(() => {
+    const newPageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    setPage((p) => (p >= newPageCount ? 0 : p));
+  }, [filtered.length]);
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = sorted.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
