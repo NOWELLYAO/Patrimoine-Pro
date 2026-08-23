@@ -8441,6 +8441,33 @@ function transactionsToCompactCSV(transactions: Transaction[]): string {
 // les opérations saisies à partir du 22/08/2026 (voir note sur linkedTransactionId).
 const INVESTMENT_CATEGORY = "Investissement bourse";
 
+// TRI (taux de rendement interne) — sur demande explicite de l'utilisateur
+// (23/08/2026). Contrairement à "Plus-value latente" (qui dit COMBIEN on a gagné en
+// valeur absolue), le TRI dit À QUEL RYTHME ANNUEL, en tenant compte du moment où
+// chaque FCFA est réellement entré ou sorti — comparable directement à un taux
+// d'épargne ou un autre placement. Résolu par bissection (pas de formule directe
+// possible avec des flux irréguliers dans le temps, contrairement à un taux simple).
+function computeXIRR(cashflows: { date: string; amount: number }[]): number | null {
+  if (cashflows.length < 2) return null;
+  const sorted = [...cashflows].sort((a, b) => a.date.localeCompare(b.date));
+  const hasNeg = sorted.some((c) => c.amount < 0), hasPos = sorted.some((c) => c.amount > 0);
+  if (!hasNeg || !hasPos) return null; // pas de vrai flux investi/reçu, TRI sans objet
+  const d0 = new Date(sorted[0].date).getTime();
+  const years = (d: string) => (new Date(d).getTime() - d0) / (365.25 * 86400000);
+  const npv = (rate: number) => sorted.reduce((sum, cf) => sum + cf.amount / Math.pow(1 + rate, years(cf.date)), 0);
+  let lo = -0.99, hi = 10;
+  let flo = npv(lo), fhi = npv(hi);
+  if (!isFinite(flo) || !isFinite(fhi) || flo * fhi > 0) return null;
+  let mid = 0;
+  for (let i = 0; i < 100; i++) {
+    mid = (lo + hi) / 2;
+    const fmid = npv(mid);
+    if (Math.abs(fmid) < 1e-6) break;
+    if (flo * fmid < 0) { hi = mid; fhi = fmid; } else { lo = mid; flo = fmid; }
+  }
+  return mid;
+}
+
 function computeFundPosition(fundId: string, operations: FundOperation[], dailyValues: FundDailyValue[]) {
   const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   let qty = 0, costTotal = 0, realizedGain = 0;
@@ -8534,7 +8561,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // Bascule Tableau de bord / Journal FCP — sur demande explicite de l'utilisateur
   // (21/08/2026) : un vrai journal dédié aux opérations Bourse, séparé du reste, avec
   // sa propre vue plutôt qu'un historique replié par fonds.
-  const [view, setView] = useState<"dashboard" | "journal">("dashboard");
+  const [view, setView] = useState<"dashboard" | "journal" | "analyse" | "simulateur">("dashboard");
   const [addFundOpen, setAddFundOpen] = useState(false);
   const [newFundName, setNewFundName] = useState("");
   const [newFundCategory, setNewFundCategory] = useState<Fund["category"]>("Diversifié");
@@ -8556,6 +8583,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   });
   const [exportTo, setExportTo] = useState(todayISO());
   const [pdfExportState, setPdfExportState] = useState<"idle" | "loading" | "error">("idle");
+  // Recherche/filtres dans le Journal FCP — sur demande explicite de l'utilisateur
+  // (23/08/2026), qui n'existaient pas contrairement au Journal principal.
+  const [journalSearch, setJournalSearch] = useState("");
+  const [journalFundFilter, setJournalFundFilter] = useState<string>("");
+  const [journalTypeFilter, setJournalTypeFilter] = useState<"" | "Souscription" | "Rachat">("");
 
   const [opFormFundId, setOpFormFundId] = useState<string | null>(null);
   const [opType, setOpType] = useState<"Souscription" | "Rachat">("Souscription");
@@ -8566,6 +8598,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [opFrais, setOpFrais] = useState<number>(0);
   const [opAccount, setOpAccount] = useState(accounts[0]?.name || "");
   const [expandedFundId, setExpandedFundId] = useState<string | null>(null);
+  const [chartFundId, setChartFundId] = useState<string | null>(null);
+  // Simulateur d'investissement — sur demande explicite de l'utilisateur (23/08/2026).
+  const [simFundId, setSimFundId] = useState<string>("");
+  const [simMonthly, setSimMonthly] = useState<number>(30000);
+  const [simYears, setSimYears] = useState<number>(5);
   // Édition d'une opération existante — sur demande explicite de l'utilisateur
   // (22/08/2026), qui avait constaté qu'il était impossible de modifier ou supprimer
   // une souscription depuis le tableau d'historique replié par fonds. null = mode
@@ -8802,6 +8839,47 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const totalDayChange = positions.reduce((a, p) => a + (p.pos.dayChange || 0), 0);
   const totalPrevValorisation = totalValorisation - totalDayChange;
   const totalDayChangePct = totalPrevValorisation !== 0 ? (totalDayChange / totalPrevValorisation) * 100 : 0;
+  const fundXIRR = useMemo(() => {
+    const map = new Map<string, number | null>();
+    positions.forEach(({ fund, pos }) => {
+      const ops = fundOperations.filter((o) => o.fundId === fund.id);
+      const flows = ops.map((o) => ({ date: o.date, amount: o.type === "Souscription" ? -(o.montant + (o.frais || 0)) : o.montant }));
+      if (pos.valorisation > 0) flows.push({ date: todayISO(), amount: pos.valorisation });
+      map.set(fund.id, computeXIRR(flows));
+    });
+    return map;
+  }, [positions, fundOperations]);
+  const portfolioXIRR = useMemo(() => {
+    const flows = fundOperations.map((o) => ({ date: o.date, amount: o.type === "Souscription" ? -(o.montant + (o.frais || 0)) : o.montant }));
+    if (totalValorisation > 0) flows.push({ date: todayISO(), amount: totalValorisation });
+    return computeXIRR(flows);
+  }, [fundOperations, totalValorisation]);
+
+  // Bilan fiscal — plus-values RÉALISÉES (uniquement les rachats, pas la latente) par
+  // année civile, tous fonds confondus. Recalcule le coût moyen pondéré au fil de l'eau
+  // pour chaque rachat, comme dans le Journal FCP. Sur demande explicite de
+  // l'utilisateur (23/08/2026).
+  const fiscalByYear = useMemo(() => {
+    const byYear = new Map<string, { gain: number; count: number }>();
+    funds.forEach((f) => {
+      const ops = fundOperations.filter((o) => o.fundId === f.id).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+      let qty = 0, cost = 0;
+      ops.forEach((o) => {
+        if (o.type === "Souscription") { qty += o.quantite; cost += o.montant + (o.frais || 0); }
+        else {
+          const avg = qty > 0 ? cost / qty : 0;
+          const gain = o.montant - avg * o.quantite;
+          const year = o.date.slice(0, 4);
+          const entry = byYear.get(year) || { gain: 0, count: 0 };
+          entry.gain += gain; entry.count += 1;
+          byYear.set(year, entry);
+          cost -= avg * o.quantite; qty -= o.quantite;
+        }
+      });
+    });
+    return Array.from(byYear.entries()).map(([year, v]) => ({ year, ...v })).sort((a, b) => b.year.localeCompare(a.year));
+  }, [funds, fundOperations]);
+
   const bourseAdvice = useMemo(() => computeBourseAdvice(funds, fundOperations, fundDailyValues, positions, totalValorisation), [funds, fundOperations, fundDailyValues, positions, totalValorisation]);
   const [adviceDismissed, setAdviceDismissed] = useState(false);
 
@@ -8940,6 +9018,24 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     });
   }, [funds, fundOperations, fundDailyValues]);
 
+  // Courbe par fonds individuel — même logique que la courbe globale, mais restreinte
+  // à un seul fonds. Sur demande explicite de l'utilisateur (23/08/2026).
+  const fundChartData = useMemo(() => {
+    if (!chartFundId) return [];
+    const allDates = Array.from(new Set([
+      ...fundDailyValues.filter((v) => v.fundId === chartFundId).map((v) => v.date),
+      ...fundOperations.filter((o) => o.fundId === chartFundId).map((o) => o.date),
+    ])).sort();
+    return allDates.map((date) => {
+      const opsUntil = fundOperations.filter((o) => o.fundId === chartFundId && o.date <= date).sort((a, b) => a.date.localeCompare(b.date));
+      let qty = 0;
+      opsUntil.forEach((o) => { qty += o.type === "Souscription" ? o.quantite : -o.quantite; });
+      const valuesUntil = fundDailyValues.filter((v) => v.fundId === chartFundId && v.date <= date).sort((a, b) => a.date.localeCompare(b.date));
+      const vl = valuesUntil[valuesUntil.length - 1]?.vl ?? opsUntil[opsUntil.length - 1]?.vl ?? 0;
+      return { date, valeur: Math.round(qty * vl) };
+    });
+  }, [chartFundId, fundOperations, fundDailyValues]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ background: `linear-gradient(135deg, #0d1f3d, #142b52)`, borderRadius: 16, padding: 24, border: `1px solid ${COLOR.hairline}` }}>
@@ -8952,7 +9048,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               {fmt(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
             </span>
           )}
-          <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b></span>
+          <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b>{portfolioXIRR !== null && <> · Rendement annualisé (TRI) : <b style={{ color: portfolioXIRR >= 0 ? "#5fc298" : "#dd7b64" }}>{portfolioXIRR >= 0 ? "+" : ""}{(portfolioXIRR * 100).toFixed(1)}%/an</b></>}</span>
         </div>
         {chartData.length > 1 ? (
           <div style={{ height: 100, marginTop: 16 }}>
@@ -9001,6 +9097,14 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
             background: view === "journal" ? COLOR.gold : "transparent", color: view === "journal" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "journal" ? 700 : 400,
           }}>Journal FCP ({fundOperations.length})</button>
+          <button onClick={() => setView("analyse")} style={{
+            padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+            background: view === "analyse" ? COLOR.gold : "transparent", color: view === "analyse" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "analyse" ? 700 : 400,
+          }}>Analyse</button>
+          <button onClick={() => setView("simulateur")} style={{
+            padding: "8px 16px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+            background: view === "simulateur" ? COLOR.gold : "transparent", color: view === "simulateur" ? "#0e1611" : COLOR.inkMuted, fontWeight: view === "simulateur" ? 700 : 400,
+          }}>Simulateur</button>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {!!funds.length && (
@@ -9092,6 +9196,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.dayChangePct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.dayChangePct >= 0 ? "+" : ""}{pos.dayChangePct.toFixed(2)}%</div>
               </div>
             )}
+            {fundXIRR.get(fund.id) !== null && fundXIRR.get(fund.id) !== undefined && (
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Rendement annualisé (TRI)</div>
+                <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: fundXIRR.get(fund.id)! >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{fundXIRR.get(fund.id)! >= 0 ? "+" : ""}{(fundXIRR.get(fund.id)! * 100).toFixed(1)}%/an</div>
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -9107,10 +9217,29 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               {expandedFundId === fund.id ? "Masquer" : "Voir"} l'historique ({pos.opsCount})
             </button>
+            <button onClick={() => setChartFundId(chartFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+              <TrendingUp size={12} /> {chartFundId === fund.id ? "Masquer" : "Voir"} la courbe
+            </button>
             <button onClick={() => setConfirmDeleteFundId(fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: COLOR.claySoft, padding: "7px 4px", fontSize: 12, cursor: "pointer", marginLeft: "auto" }}>
               <Trash2 size={12} />
             </button>
           </div>
+
+          {chartFundId === fund.id && (
+            fundChartData.length > 1 ? (
+              <div style={{ height: 120, marginTop: 14 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={fundChartData}>
+                    <Line type="monotone" dataKey="valeur" stroke={COLOR.slateBlue} strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div style={{ marginTop: 14, fontSize: 11.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
+                Pas encore assez de points pour tracer une courbe sur ce fonds — renseigne sa VL un autre jour, ou ajoute une opération.
+              </div>
+            )
+          )}
 
           {expandedFundId === fund.id && (
             <div style={{ marginTop: 14, overflowX: "auto" }}>
@@ -9143,6 +9272,131 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       ))}
       </>)}
 
+      {view === "analyse" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <Panel title="Comparateur de fonds" subtitle="Les trois fonds côte à côte — pour décider où renforcer plutôt que de deviner à l'œil.">
+            {!positions.length ? <EmptyState /> : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                  <thead>
+                    <tr>
+                      {["Fonds", "Catégorie", "Allocation", "Plus-value latente", "Rendement annualisé (TRI)", "Opérations"].map((h) => (
+                        <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {positions.map(({ fund, pos }) => {
+                      const xirr = fundXIRR.get(fund.id);
+                      const pvPct = pos.costTotal > 0 ? (pos.plusValueLatente / pos.costTotal) * 100 : 0;
+                      return (
+                        <tr key={fund.id}>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 600 }}>{fund.name}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{fund.category}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(1) : "0.0"}%</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: pvPct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pvPct >= 0 ? "+" : ""}{pvPct.toFixed(1)}%</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: xirr !== null && xirr !== undefined ? (xirr >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted, fontWeight: 600 }}>
+                            {xirr !== null && xirr !== undefined ? `${xirr >= 0 ? "+" : ""}${(xirr * 100).toFixed(1)}%/an` : "—"}
+                          </td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{pos.opsCount}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="Bilan fiscal annuel" subtitle="Plus-values RÉALISÉES (rachats uniquement, pas la latente), regroupées par année civile, tous fonds confondus.">
+            {!fiscalByYear.length ? (
+              <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucun rachat effectué pour l'instant — rien à déclarer.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                  <thead>
+                    <tr>
+                      {["Année", "Plus-value réalisée", "Nombre de rachats"].map((h) => (
+                        <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fiscalByYear.map((y) => (
+                      <tr key={y.year}>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 600 }}>{y.year}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: y.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{y.gain >= 0 ? "+" : ""}{fmt(Math.round(y.gain))} FCFA</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{y.count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        </div>
+      )}
+
+      {view === "simulateur" && (() => {
+        const simFund = simFundId ? positions.find((p) => p.fund.id === simFundId) : null;
+        const annualRate = simFund ? fundXIRR.get(simFund.fund.id) : portfolioXIRR;
+        const monthlyRate = annualRate !== null && annualRate !== undefined ? Math.pow(1 + annualRate, 1 / 12) - 1 : null;
+        const months = simYears * 12;
+        const totalInvested = simMonthly * months;
+        const futureValue = monthlyRate !== null && Math.abs(monthlyRate) > 1e-9
+          ? simMonthly * ((Math.pow(1 + monthlyRate, months) - 1) / monthlyRate)
+          : totalInvested;
+        const gain = futureValue - totalInvested;
+        return (
+          <Panel title="Simulateur d'investissement" subtitle="Basé sur le rendement annualisé RÉEL de tes propres fonds — pas une hypothèse générique.">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginBottom: 20 }}>
+              <div>
+                <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>Fonds de référence</div>
+                <select value={simFundId} onChange={(e) => setSimFundId(e.target.value)} style={inputStyle}>
+                  <option value="">Portefeuille entier ({portfolioXIRR !== null ? `${(portfolioXIRR * 100).toFixed(1)}%/an` : "TRI indisponible"})</option>
+                  {positions.map(({ fund }) => {
+                    const x = fundXIRR.get(fund.id);
+                    return <option key={fund.id} value={fund.id}>{fund.name} ({x !== null && x !== undefined ? `${(x * 100).toFixed(1)}%/an` : "TRI indisponible"})</option>;
+                  })}
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>Montant investi chaque mois</div>
+                <input type="number" inputMode="numeric" value={simMonthly || ""} onChange={(e) => setSimMonthly(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 160 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginBottom: 4 }}>Pendant combien d'années</div>
+                <input type="number" inputMode="numeric" value={simYears || ""} onChange={(e) => setSimYears(Math.max(1, Number(e.target.value) || 1))} style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 100 }} />
+              </div>
+            </div>
+
+            {monthlyRate === null ? (
+              <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
+                Pas assez de données pour calculer un TRI sur ce choix (il faut au moins une souscription et une valorisation actuelle) — impossible de simuler pour l'instant.
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Total investi sur {simYears} an{simYears > 1 ? "s" : ""}</div>
+                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(Math.round(totalInvested))} FCFA</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Valeur estimée à terme</div>
+                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 700 }}>{fmt(Math.round(futureValue))} FCFA</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Gain estimé</div>
+                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 700 }}>{gain >= 0 ? "+" : ""}{fmt(Math.round(gain))} FCFA</div>
+                </div>
+              </div>
+            )}
+            <div style={{ marginTop: 16, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
+              Projection basée sur le rendement annualisé (TRI) observé jusqu'ici — le passé ne garantit jamais l'avenir, c'est un ordre de grandeur, pas une promesse.
+            </div>
+          </Panel>
+        );
+      })()}
+
       {view === "journal" && (
         <Panel title="Journal FCP" subtitle={`Toutes les opérations, tous fonds confondus, triées par date — ${fundOperations.length} opération${fundOperations.length > 1 ? "s" : ""}`}>
           {!!fundOperations.length && (
@@ -9164,6 +9418,25 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               <span style={{ fontSize: 11, color: COLOR.inkMuted }}>{periodOps.length} opération{periodOps.length > 1 ? "s" : ""} sur cette période</span>
             </div>
           )}
+          {!!fundOperations.length && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+              <input value={journalSearch} onChange={(e) => setJournalSearch(e.target.value)} placeholder="Rechercher (fonds, compte)…" style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
+              <select value={journalFundFilter} onChange={(e) => setJournalFundFilter(e.target.value)} style={inputStyle}>
+                <option value="">Tous les fonds</option>
+                {funds.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+              </select>
+              <select value={journalTypeFilter} onChange={(e) => setJournalTypeFilter(e.target.value as any)} style={inputStyle}>
+                <option value="">Tous les sens</option>
+                <option value="Souscription">Souscription</option>
+                <option value="Rachat">Rachat</option>
+              </select>
+              {(journalSearch || journalFundFilter || journalTypeFilter) && (
+                <button onClick={() => { setJournalSearch(""); setJournalFundFilter(""); setJournalTypeFilter(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
+                  <X size={13} /> Réinitialiser
+                </button>
+              )}
+            </div>
+          )}
           {!fundOperations.length ? <EmptyState /> : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
@@ -9175,7 +9448,16 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   </tr>
                 </thead>
                 <tbody>
-                  {[...fundOperations].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)).map((o) => {
+                  {[...fundOperations].filter((o) => {
+                    if (journalFundFilter && o.fundId !== journalFundFilter) return false;
+                    if (journalTypeFilter && o.type !== journalTypeFilter) return false;
+                    if (journalSearch.trim()) {
+                      const q = journalSearch.trim().toLowerCase();
+                      const fundName = funds.find((f) => f.id === o.fundId)?.name.toLowerCase() || "";
+                      if (!fundName.includes(q) && !o.account.toLowerCase().includes(q)) return false;
+                    }
+                    return true;
+                  }).sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)).map((o) => {
                     const fund = funds.find((f) => f.id === o.fundId);
                     // Plus-value réalisée recalculée au fil de l'eau (coût moyen pondéré
                     // jusqu'à CETTE opération incluse), pour l'afficher ligne par ligne
@@ -9215,6 +9497,18 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       </tr>
                     );
                   })}
+                  {!!fundOperations.length && !fundOperations.filter((o) => {
+                    if (journalFundFilter && o.fundId !== journalFundFilter) return false;
+                    if (journalTypeFilter && o.type !== journalTypeFilter) return false;
+                    if (journalSearch.trim()) {
+                      const q = journalSearch.trim().toLowerCase();
+                      const fundName = funds.find((f) => f.id === o.fundId)?.name.toLowerCase() || "";
+                      if (!fundName.includes(q) && !o.account.toLowerCase().includes(q)) return false;
+                    }
+                    return true;
+                  }).length && (
+                    <tr><td colSpan={9} style={{ padding: 16, color: COLOR.inkMuted, fontStyle: "italic", textAlign: "center" }}>Aucune opération ne correspond à ces filtres.</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
