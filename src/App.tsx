@@ -147,8 +147,14 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 2
 async function fetchRemoteState(syncCode: string): Promise<{ data: any; updatedAt: string } | null> {
   if (!SYNC_ENABLED || !syncCode) return null;
   try {
-    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at`, {
-      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    // cache:"no-store" + paramètre anti-cache — sans ça, le navigateur (ou un
+    // intermédiaire réseau) peut continuer à servir une réponse GET mise en cache
+    // avant une correction manuelle des données côté Supabase, indéfiniment, même
+    // après que le serveur ait la bonne donnée. Corrigé le 22/08/2026 après un cas
+    // réel où une correction de tombstone semblait "revenir toute seule".
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=data,updated_at&_=${Date.now()}`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Cache-Control": "no-cache" },
+      cache: "no-store",
     });
     if (!res.ok) return null;
     const rows = await res.json();
