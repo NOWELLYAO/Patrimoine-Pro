@@ -68,6 +68,14 @@ ${context || "aucune transaction"}`;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 55000);
+    // Chronométrage + taille du contexte — sur demande explicite de l'utilisateur
+    // (23/08/2026), après un timeout systématique sur une question pourtant modeste.
+    // Visible dans Vercel → Deployments → Functions → /api/chat → Logs, pour
+    // diagnostiquer précisément si un futur ralentissement vient du volume de données
+    // envoyées (contextChars élevé) ou d'autre chose (réponse lente malgré peu de
+    // données — pointerait vers un souci réseau ou côté API Anthropic, pas notre code).
+    const startedAt = Date.now();
+    console.log(`[chat] Requête reçue — contexte : ${context?.length || 0} caractères, ${messages.length} message(s), fenêtre : ${contextWindow || "?"}`);
 
     const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -78,18 +86,25 @@ ${context || "aucune transaction"}`;
       },
       body: JSON.stringify({
         model: "claude-sonnet-5",
-        max_tokens: 1800, // corrigé le 23/08/2026 : 8192 laissait l'IA produire des
-        // réponses en forme de long document structuré (ce que l'utilisateur a décrit
-        // comme "revient en pièce jointe") au lieu d'une réponse de conversation courte
-        // — et générer autant de tokens ralentit directement chaque réponse. 1800
-        // tokens ≈ 350-450 mots avec un peu de marge, cohérent avec la consigne "300 à
-        // 500 mots" déjà donnée dans le prompt système, sans jamais pouvoir déraper.
+        // Corrigé le 23/08/2026, deuxième passe : Claude Sonnet 5 a la réflexion
+        // adaptative ACTIVÉE PAR DÉFAUT, et ses tokens de réflexion sont prélevés sur
+        // le MÊME budget que max_tokens — avec 1800 (mon premier correctif), tout
+        // partait en réflexion interne et il ne restait plus rien pour la vraie
+        // réponse texte (stop_reason: max_tokens, aucun bloc "text"). Deux ajustements
+        // pour corriger ça sans revenir au problème initial (réponses trop longues) :
+        // - effort: "low" réduit la profondeur de réflexion adaptative — inutile
+        //   d'avoir un raisonnement poussé pour une question de conversation courante.
+        // - max_tokens remonté à 4096 pour laisser de la marge à la réflexion (même
+        //   réduite) SANS jamais pouvoir manger tout le budget avant la réponse texte.
+        max_tokens: 4096,
+        output_config: { effort: "low" },
         system: systemPrompt,
         messages: messages.map((m: any) => ({ role: m.role, content: m.content })),
       }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
+    console.log(`[chat] Réponse Anthropic reçue en ${Date.now() - startedAt} ms (statut ${anthropicRes.status})`);
 
     if (!anthropicRes.ok) {
       const errText = await anthropicRes.text();
