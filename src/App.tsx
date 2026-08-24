@@ -9028,6 +9028,67 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     return Array.from(byYear.entries()).map(([year, v]) => ({ year, ...v })).sort((a, b) => b.year.localeCompare(a.year));
   }, [funds, fundOperations]);
 
+  // Performance théorique par souscription — sur demande explicite de l'utilisateur
+  // (23/08/2026). Traite CHAQUE souscription comme si ses parts d'origine étaient
+  // toujours détenues intégralement, peu importe les rachats survenus depuis — c'est
+  // volontairement simplifié ainsi (pas de suivi par lot façon FIFO) pour rester
+  // cohérent avec le prix de revient moyen pondéré utilisé partout ailleurs dans
+  // l'app, calibré pour coller au relevé NSIA officiel. Marquée "rachetée depuis"
+  // quand le fonds a eu un rachat après cette souscription, pour ne pas laisser croire
+  // que cette valeur est de l'argent réellement disponible.
+  const subscriptionPerformance = useMemo(() => {
+    const rows: { fundName: string; date: string; investi: number; vlAchat: number; quantite: number; valeurTheorique: number; gain: number; gainPct: number; xirr: number | null; hasLaterRachat: boolean }[] = [];
+    funds.forEach((f) => {
+      const pos = computeFundPosition(f.id, fundOperations, fundDailyValues);
+      const ops = fundOperations.filter((o) => o.fundId === f.id).sort((a, b) => a.date.localeCompare(b.date));
+      ops.forEach((o) => {
+        if (o.type !== "Souscription") return;
+        const investi = o.montant + (o.frais || 0);
+        const valeurTheorique = o.quantite * pos.currentVL;
+        const gain = valeurTheorique - investi;
+        const hasLaterRachat = ops.some((x) => x.type === "Rachat" && x.date >= o.date);
+        const xirr = computeXIRR([{ date: o.date, amount: -investi }, { date: todayISO(), amount: valeurTheorique }]);
+        rows.push({ fundName: f.name, date: o.date, investi, vlAchat: o.vl, quantite: o.quantite, valeurTheorique, gain, gainPct: investi > 0 ? (gain / investi) * 100 : 0, xirr, hasLaterRachat });
+      });
+    });
+    return rows.sort((a, b) => a.date.localeCompare(b.date));
+  }, [funds, fundOperations, fundDailyValues]);
+
+  // Parts réellement restantes par souscription, à la moyenne pondérée — sur demande
+  // explicite de l'utilisateur (23/08/2026), qui a choisi cette convention plutôt
+  // qu'un suivi par lot façon FIFO, pour coller au PRU officiel NSIA déjà utilisé
+  // partout ailleurs. Chaque rachat réduit TOUTES les souscriptions encore actives
+  // proportionnellement à leur poids (pas les plus anciennes en premier) — cohérent
+  // avec le principe même du prix de revient moyen pondéré : les parts sont fongibles,
+  // aucune souscription précise n'est "plus vendue" qu'une autre.
+  const subscriptionLots = useMemo(() => {
+    const allRows: { fundName: string; date: string; investiOriginal: number; quantiteOriginale: number; partsRestantes: number; valeurAujourdhui: number; gain: number; gainPct: number }[] = [];
+    let totalInvesti = 0, totalParts = 0, totalValeur = 0, totalGain = 0;
+    funds.forEach((f) => {
+      const pos = computeFundPosition(f.id, fundOperations, fundDailyValues);
+      const ops = fundOperations.filter((o) => o.fundId === f.id).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+      const lots: { date: string; investiOriginal: number; quantiteOriginale: number; remaining: number }[] = [];
+      ops.forEach((o) => {
+        if (o.type === "Souscription") {
+          lots.push({ date: o.date, investiOriginal: o.montant + (o.frais || 0), quantiteOriginale: o.quantite, remaining: o.quantite });
+        } else {
+          const totalRemaining = lots.reduce((a, l) => a + l.remaining, 0);
+          if (totalRemaining <= 0) return;
+          const ratio = Math.min(1, o.quantite / totalRemaining);
+          lots.forEach((l) => { l.remaining -= l.remaining * ratio; });
+        }
+      });
+      lots.forEach((l) => {
+        const costRestant = l.quantiteOriginale > 0 ? (l.remaining / l.quantiteOriginale) * l.investiOriginal : 0;
+        const valeur = l.remaining * pos.currentVL;
+        const gain = valeur - costRestant;
+        allRows.push({ fundName: f.name, date: l.date, investiOriginal: l.investiOriginal, quantiteOriginale: l.quantiteOriginale, partsRestantes: l.remaining, valeurAujourdhui: valeur, gain: l.remaining > 0.0001 ? gain : 0, gainPct: costRestant > 0 ? (gain / costRestant) * 100 : 0 });
+        totalInvesti += l.investiOriginal; totalParts += l.remaining; totalValeur += valeur; totalGain += (l.remaining > 0.0001 ? gain : 0);
+      });
+    });
+    return { rows: allRows.sort((a, b) => a.date.localeCompare(b.date)), totalInvesti, totalParts, totalValeur, totalGain };
+  }, [funds, fundOperations, fundDailyValues]);
+
   const bourseAdvice = useMemo(() => computeBourseAdvice(funds, fundOperations, fundDailyValues, positions, totalValorisation), [funds, fundOperations, fundDailyValues, positions, totalValorisation]);
   const [adviceDismissed, setAdviceDismissed] = useState(false);
 
@@ -9617,6 +9678,96 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="Performance de chaque souscription" subtitle="Pour chaque achat, ce qu'il vaudrait aujourd'hui si ses parts étaient toujours détenues intégralement — valeur théorique, pas de l'argent disponible pour celles déjà (en partie) rachetées.">
+            {!subscriptionPerformance.length ? (
+              <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune souscription pour l'instant.</div>
+            ) : (
+              <>
+                <div style={{ overflowX: "auto", marginBottom: 20 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead>
+                      <tr>
+                        {["Date", "Fonds", "Investi", "VL achat", "Valeur théorique aujourd'hui", "Gain potentiel", "Rendement", "≈ Rendement/an"].map((h) => (
+                          <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {subscriptionPerformance.map((r, i) => (
+                        <tr key={i}>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                            {dateLabelFull(r.date)}
+                            {r.hasLaterRachat && <div style={{ fontSize: 10, color: COLOR.claySoft, fontStyle: "italic" }}>⚠ rachat(s) depuis</div>}
+                          </td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{r.fundName}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.investi)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.vlAchat)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.round(r.valeurTheorique))}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: r.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{r.gain >= 0 ? "+" : ""}{fmt(Math.round(r.gain))}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: r.gainPct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{r.gainPct >= 0 ? "+" : ""}{r.gainPct.toFixed(1)}%</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{r.xirr !== null ? `~${(r.xirr * 100).toFixed(1)}%` : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ fontSize: 12.5, color: COLOR.ink, marginBottom: 10 }}>Gain potentiel par souscription</div>
+                <div style={{ height: Math.max(160, subscriptionPerformance.length * 32) }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={subscriptionPerformance.map((r) => ({ name: `${dateLabelFull(r.date)}${r.fundName ? ` (${r.fundName.split(" ")[0]})` : ""}`, gain: Math.round(r.gain) }))} layout="vertical" margin={{ left: 10 }}>
+                      <XAxis type="number" tick={{ fontSize: 10, fill: COLOR.inkMuted }} />
+                      <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 10, fill: COLOR.inkMuted }} />
+                      <Tooltip formatter={(v: any) => `${fmt(v)} FCFA`} contentStyle={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, fontSize: 11 }} />
+                      <Bar dataKey="gain" fill={COLOR.gold} radius={[0, 3, 3, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </>
+            )}
+          </Panel>
+
+          <Panel title="Ce que chaque souscription représente aujourd'hui" subtitle="Parts réellement restantes, au prix de revient moyen pondéré — chaque rachat réduit toutes les souscriptions actives proportionnellement, pas les plus anciennes en premier.">
+            {!subscriptionLots.rows.length ? (
+              <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucune souscription pour l'instant.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                  <thead>
+                    <tr>
+                      {["Date", "Fonds", "Souscription", "Parts restantes", "Valeur aujourd'hui", "Gain", "Rendement"].map((h) => (
+                        <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {subscriptionLots.rows.map((r, i) => {
+                      const soldOut = r.partsRestantes <= 0.0001;
+                      return (
+                        <tr key={i} style={{ opacity: soldOut ? 0.55 : 1 }}>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(r.date)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{r.fundName}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.investiOriginal)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{r.partsRestantes.toFixed(4)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{soldOut ? "—" : fmt(Math.round(r.valeurAujourdhui))}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: soldOut ? COLOR.inkMuted : (r.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft), fontWeight: 600 }}>{soldOut ? "—" : `${r.gain >= 0 ? "+" : ""}${fmt(Math.round(r.gain))}`}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: soldOut ? COLOR.inkMuted : (r.gainPct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) }}>{soldOut ? "—" : `${r.gainPct >= 0 ? "+" : ""}${r.gainPct.toFixed(1)}%`}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr style={{ fontWeight: 700 }}>
+                      <td colSpan={2} style={{ padding: "10px" }}>TOTAL</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(subscriptionLots.totalInvesti)}</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>{subscriptionLots.totalParts.toFixed(4)}</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>≈{fmt(Math.round(subscriptionLots.totalValeur))}</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace", color: subscriptionLots.totalGain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>≈{subscriptionLots.totalGain >= 0 ? "+" : ""}{fmt(Math.round(subscriptionLots.totalGain))}</td>
+                      <td style={{ padding: "10px" }}>—</td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -10225,7 +10376,11 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
   // suffisant pour la grande majorité des questions — avec une option pour inclure
   // tout l'historique quand une question le justifie vraiment (plus lent).
   const [fullHistory, setFullHistory] = useState(false);
-  const MAX_TX = 2000;
+  const MAX_TX = 800; // ramené de 2000 à 800 le 23/08/2026 — un contexte trop gros
+  // ralentit directement le temps de traitement de l'IA côté serveur, avant même la
+  // génération de la réponse ; 800 lignes de CSV couvrent largement 2-3 mois pour la
+  // plupart des volumes de transactions, et une question qui a vraiment besoin de plus
+  // peut cocher "Inclure tout l'historique" explicitement.
   const sortedForContext = useMemo(() => [...transactions].sort((a, b) => b.date.localeCompare(a.date)), [transactions]);
   const allCategoriesInData = useMemo(() => Array.from(new Set(transactions.map((t) => t.category))), [transactions]);
   const allPayeesInData = useMemo(() => Array.from(new Set(transactions.map((t) => t.payee).filter(Boolean))) as string[], [transactions]);
@@ -10263,9 +10418,18 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
       const labelParts: string[] = [];
       if (scope.monthKeys) {
         const monthSet = new Set(scope.monthKeys);
-        scope.monthKeys.forEach((mk) => monthSet.add(prevMonthKey(mk)));
+        // N'ajoute un mois-tampon supplémentaire que si UN SEUL mois a été détecté —
+        // corrigé le 23/08/2026 après un timeout systématique sur une question
+        // comparant explicitement 2 mois ("août vs mois précédent") : la détection
+        // trouvait déjà les deux mois (juin ajouté en plus via le tampon), gonflant à 3
+        // mois de données envoyées au lieu des 2 réellement nécessaires. Avec un seul
+        // mois détecté, le tampon reste utile (comparaison implicite avec le mois
+        // d'avant, même non demandée explicitement).
+        if (scope.monthKeys.length === 1) {
+          monthSet.add(prevMonthKey(scope.monthKeys[0]));
+        }
         filtered = filtered.filter((t) => monthSet.has(dateToMonthKey(t.date)));
-        labelParts.push(`mois : ${scope.monthKeys.map((mk) => monthLabel(mk)).join(", ")} (+ mois précédent pour comparaison)`);
+        labelParts.push(`mois : ${scope.monthKeys.map((mk) => monthLabel(mk)).join(", ")}${scope.monthKeys.length === 1 ? " (+ mois précédent pour comparaison)" : ""}`);
       }
       if (scope.categories.length) {
         filtered = filtered.filter((t) => scope.categories.includes(t.category));
