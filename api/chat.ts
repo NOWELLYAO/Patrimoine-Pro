@@ -8,6 +8,14 @@
 // Pour tester en local : `vercel dev` (pas `npm run dev`, qui ne fait tourner que
 // Vite et n'exécute pas les fonctions du dossier /api).
 
+// Déclaration minimale de `process` — corrigé le 23/08/2026 après une erreur de build
+// Vercel ("Cannot find name 'process'", TS2580). `process` existe bel et bien à
+// l'exécution (fonction Node.js côté serveur), le souci est purement une déclaration
+// de type manquante, faute du paquet @types/node. Plutôt que de dépendre de son
+// installation (hors de portée d'une simple édition de ce fichier), on déclare le strict
+// nécessaire ici : `process.env`, la seule chose utilisée dans ce fichier.
+declare const process: { env: Record<string, string | undefined> };
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Méthode non autorisée." });
@@ -20,7 +28,7 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const { messages, context, accounts, budgets, recurring, today, contextWindow } = req.body || {};
+  const { messages, context, accounts, budgets, recurring, bourse, today, contextWindow } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     res.status(400).json({ error: "Aucun message fourni." });
     return;
@@ -37,6 +45,7 @@ RÈGLES DE FOND :
 - Quand on te demande si une dépense envisagée est raisonnable (montant à venir, achat prévu), calcule toi-même à partir du solde des comptes ci-dessous, des charges fixes récurrentes à venir, et du budget de la catégorie concernée si elle existe — donne une réponse tranchée (oui / non / attends telle date) avec le raisonnement chiffré, pas une réponse évasive.
 - Reste rigoureux sur les faits même quand le ton est ferme : jamais de chiffre inventé pour dramatiser.
 - Sois concis mais complet : vise 300 à 500 mots dans la plupart des cas, quitte à choisir les 3-4 points les plus importants plutôt que de tout couvrir. Si la question porte sur une longue période ou beaucoup de catégories, hiérarchise et développe seulement ce qui compte vraiment, plutôt que de vouloir tout détailler exhaustivement — une réponse longue et coupée en plein milieu est pire qu'une réponse plus courte mais complète.
+- Réponds comme dans une VRAIE conversation, jamais comme un rapport ou un document. Pas de titres, pas de sections numérotées, pas de longue introduction qui reformule la question avant de répondre, pas de conclusion générale qui résume ce qui vient d'être dit. Va droit au fait dès la première phrase. Des puces courtes sont acceptables pour lister plusieurs points, mais la réponse dans son ensemble doit se lire comme quelqu'un qui parle, pas comme un livrable.
 
 # Aujourd'hui
 ${today || "date inconnue"}
@@ -49,6 +58,9 @@ ${(budgets || []).join("\n") || "aucun"}
 
 # Récurrences connues (revenus/charges fixes, avec prochaine échéance)
 ${(recurring || []).join("\n") || "aucune"}
+
+# Portefeuille Bourse (FCP) — SÉPARÉ des comptes et de la Valeur nette ci-dessus, sauf mention contraire
+${(bourse || []).join("\n") || "aucun fonds"}
 
 # Transactions (CSV, séparateur ";", colonnes : date;type;categorie;sous_categorie;montant;compte;beneficiaire;note)
 ${context || "aucune transaction"}`;
@@ -66,7 +78,12 @@ ${context || "aucune transaction"}`;
       },
       body: JSON.stringify({
         model: "claude-sonnet-5",
-        max_tokens: 8192,
+        max_tokens: 1800, // corrigé le 23/08/2026 : 8192 laissait l'IA produire des
+        // réponses en forme de long document structuré (ce que l'utilisateur a décrit
+        // comme "revient en pièce jointe") au lieu d'une réponse de conversation courte
+        // — et générer autant de tokens ralentit directement chaque réponse. 1800
+        // tokens ≈ 350-450 mots avec un peu de marge, cohérent avec la consigne "300 à
+        // 500 mots" déjà donnée dans le prompt système, sans jamais pouvoir déraper.
         system: systemPrompt,
         messages: messages.map((m: any) => ({ role: m.role, content: m.content })),
       }),
