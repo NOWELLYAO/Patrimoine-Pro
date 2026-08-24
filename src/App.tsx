@@ -11093,7 +11093,7 @@ function CreancesTab({ loans, setLoans }: { loans: Loan[]; setLoans: (l: Loan[])
 // ============================================================
 // COMPTES (ACCOUNTS)
 // ============================================================
-function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { accounts: Account[]; setAccounts: (a: Account[]) => void; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void }) {
+function ComptesTab({ accounts, setAccounts, transactions, setTransactions, recurring, setRecurring, funds, setFunds, fundOperations, setFundOperations, deletedAccountIds, setDeletedAccountIds }: { accounts: Account[]; setAccounts: (a: Account[]) => void; transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; recurring: RecurringTemplate[]; setRecurring: (r: RecurringTemplate[]) => void; funds: Fund[]; setFunds: (f: Fund[]) => void; fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void; deletedAccountIds: Record<string, string>; setDeletedAccountIds: (d: Record<string, string>) => void }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Account, "id">>({ name: "", kind: "Banque", openingBalance: 0 });
   const [editingOpening, setEditingOpening] = useState<string | null>(null);
@@ -11105,7 +11105,12 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
 
   const add = () => { if (!form.name) return; setAccounts([...accounts, { ...form, id: uid("a"), updatedAt: new Date().toISOString() }]); setForm({ name: "", kind: "Banque", openingBalance: 0 }); setAdding(false); };
   const update = (id: string, patch: Partial<Account>) => setAccounts(accounts.map((a) => (a.id === id ? { ...a, ...patch, updatedAt: new Date().toISOString() } : a)));
-  const remove = (id: string) => setAccounts(accounts.filter((a) => a.id !== id));
+  const remove = (id: string) => {
+    setAccounts(accounts.filter((a) => a.id !== id));
+    // Tombstone — sans lui, le compte revient dès qu'une copie distante encore intacte
+    // est fusionnée au prochain cycle de synchro (corrigé le 23/08/2026).
+    setDeletedAccountIds({ ...deletedAccountIds, [id]: new Date().toISOString() });
+  };
   const total = totalAccountsBalance(accounts, transactions);
 
   // Fusion de deux comptes en un seul, en conservant le nom du compte "cible" — sur
@@ -11125,7 +11130,24 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions }: { 
       if (next.account === next.onBehalfOf) next = { ...next, onBehalfOf: undefined };
       return next;
     }));
+    // Corrigé le 23/08/2026, sur signalement explicite de l'utilisateur : la fusion ne
+    // touchait QUE les transactions, laissant les modèles récurrents (et les
+    // souscriptions Bourse) pointer vers le nom du compte disparu — il continuait
+    // d'apparaître dans leurs menus déroulants comme si de rien n'était.
+    const recurringNeedsUpdate = recurring.some((r) => r.account === source.name);
+    if (recurringNeedsUpdate) {
+      setRecurring(recurring.map((r) => r.account === source.name ? { ...r, account: target.name, updatedAt: new Date().toISOString() } : r));
+    }
+    const fundsNeedUpdate = funds.some((f) => f.recurringPlan?.account === source.name);
+    if (fundsNeedUpdate) {
+      setFunds(funds.map((f) => f.recurringPlan?.account === source.name ? { ...f, recurringPlan: { ...f.recurringPlan, account: target.name }, updatedAt: new Date().toISOString() } : f));
+    }
+    const fundOpsNeedUpdate = fundOperations.some((o) => o.account === source.name);
+    if (fundOpsNeedUpdate) {
+      setFundOperations(fundOperations.map((o) => o.account === source.name ? { ...o, account: target.name, updatedAt: new Date().toISOString() } : o));
+    }
     setAccounts(accounts.filter((a) => a.id !== source.id).map((a) => a.id === target.id ? { ...a, openingBalance: a.openingBalance + source.openingBalance, updatedAt: new Date().toISOString() } : a));
+    setDeletedAccountIds({ ...deletedAccountIds, [source.id]: new Date().toISOString() });
     setMerging(false); setMergeSourceId(""); setMergeTargetId(""); setConfirmMerge(false);
   };
 
@@ -14226,6 +14248,12 @@ export default function GrandLivre() {
   // l'autre appareil. Corrigé le 21/08/2026. La suppression est cascadée : les
   // opérations et VL de ce fonds sont aussi retirées du merge via leur fundId.
   const [deletedFundIds, setDeletedFundIds] = usePersistentState<Record<string, string>>("gl-deleted-fund-ids", {}, canSaveGated);
+  // Tombstone des comptes supprimés — sur signalement explicite de l'utilisateur
+  // (23/08/2026) : supprimer un compte revenait systématiquement, exactement le même
+  // bug que celui déjà corrigé sur les fonds Bourse (deletedFundIds) — une suppression
+  // locale sans verrou se fait toujours réintroduire par mergeById dès qu'une copie
+  // distante encore intacte est fusionnée.
+  const [deletedAccountIds, setDeletedAccountIds] = usePersistentState<Record<string, string>>("gl-deleted-account-ids", {}, canSaveGated);
   // Même tombstone, mais pour la suppression d'une opération individuelle (souscription
   // ou rachat) dans le journal Bourse séparé.
   const [deletedFundOperationIds, setDeletedFundOperationIds] = usePersistentState<Record<string, string>>("gl-deleted-fund-op-ids", {}, canSaveGated);
@@ -14457,13 +14485,13 @@ export default function GrandLivre() {
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
     };
   });
   const syncCodeRef = useRef(syncCode);
@@ -14500,7 +14528,7 @@ export default function GrandLivre() {
         categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
-        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds, bourseObjectif: snap.bourseObjectif,
+        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds, bourseObjectif: snap.bourseObjectif, deletedAccountIds: snap.deletedAccountIds,
       };
       list = list.filter((b) => b.date !== todayKey);
       list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
@@ -14576,7 +14604,8 @@ export default function GrandLivre() {
       const mergedGoals = d.goals ? mergeById(s.goals, d.goals) : s.goals;
       const mergedRecurring = d.recurring ? mergeById(s.recurring, d.recurring) : s.recurring;
       const mergedRules = d.rules ? mergeById(s.rules, d.rules) : s.rules;
-      const mergedAccounts = d.accounts ? mergeById(s.accounts, d.accounts) : s.accounts;
+      const mergedDeletedAccountIds = d.deletedAccountIds ? { ...d.deletedAccountIds, ...s.deletedAccountIds } : s.deletedAccountIds;
+      const mergedAccounts = (d.accounts ? mergeById(s.accounts, d.accounts) : s.accounts).filter((a: Account) => !mergedDeletedAccountIds[a.id]);
       const mergedFunds = (d.funds ? mergeById(s.funds, d.funds) : s.funds).filter((f: Fund) => !mergedDeletedFundIds[f.id]);
       // Suppression cascadée : les opérations/VL d'un fonds tombstoné sortent aussi du
       // merge, sinon elles resteraient orphelines (rattachées à un fundId qui n'existe
@@ -14603,14 +14632,14 @@ export default function GrandLivre() {
         || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
         || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds) || !eq(mergedDeletedFundOperationIds, s.deletedFundOperationIds)
-        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture || !eq(finalBourseObjectif, s.bourseObjectif);
+        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture || !eq(finalBourseObjectif, s.bourseObjectif) || !eq(mergedDeletedAccountIds, s.deletedAccountIds);
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
         || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds) || !eq(mergedDeletedFundOperationIds, d.deletedFundOperationIds)
-        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture || !eq(finalBourseObjectif, d.bourseObjectif);
+        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture || !eq(finalBourseObjectif, d.bourseObjectif) || !eq(mergedDeletedAccountIds, d.deletedAccountIds);
 
       if (localChanged) {
         skipNextPush.current = true;
@@ -14621,6 +14650,7 @@ export default function GrandLivre() {
         setRecurring(mergedRecurring);
         setRules(mergedRules);
         setAccounts(mergedAccounts);
+        setDeletedAccountIds(mergedDeletedAccountIds);
         setActivities(mergedActivities);
         setCategoryGroups(mergedCategoryGroups);
         setCategoryScope(mergedCategoryScope);
@@ -14649,7 +14679,7 @@ export default function GrandLivre() {
           activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds,
         };
       }
 
@@ -14663,7 +14693,7 @@ export default function GrandLivre() {
           activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds,
         });
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -14701,7 +14731,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -14712,7 +14742,7 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
@@ -14783,7 +14813,7 @@ export default function GrandLivre() {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
+      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
     if (data.transactions) setTransactions(data.transactions);
@@ -14808,6 +14838,7 @@ export default function GrandLivre() {
     if (data.fundOperations) setFundOperations(data.fundOperations);
     if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
     if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
+    if (data.deletedAccountIds) setDeletedAccountIds(data.deletedAccountIds);
     if (typeof data.bourseObjectif !== "undefined") setBourseObjectif(data.bourseObjectif);
   };
 
@@ -14984,7 +15015,7 @@ export default function GrandLivre() {
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
-          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} />}
+          {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} recurring={recurring} setRecurring={setRecurring} funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} deletedAccountIds={deletedAccountIds} setDeletedAccountIds={setDeletedAccountIds} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
           {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
           {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactionsTracked} rules={rules} setRules={setRules} accounts={accounts} />}
@@ -14996,7 +15027,7 @@ export default function GrandLivre() {
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
+                funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
               })}
               restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
@@ -15026,6 +15057,7 @@ export default function GrandLivre() {
                 if (data.fundOperations) setFundOperations(data.fundOperations);
                 if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
                 if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
+    if (data.deletedAccountIds) setDeletedAccountIds(data.deletedAccountIds);
                 if (typeof data.bourseObjectif !== "undefined") setBourseObjectif(data.bourseObjectif);
                 setPreRestoreSnapshot(null);
                 setPreRestoreSnapshotAt(null);
