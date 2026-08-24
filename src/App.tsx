@@ -1004,7 +1004,7 @@ const inputStyle: React.CSSProperties = {
 // ============================================================
 // FILTER BAR
 // ============================================================
-interface Filters { from: string; to: string; type: string; group: string; category: string; subcategory: string; search: string; scope: string; accounts: string[]; }
+interface Filters { from: string; to: string; type: string; group: string; category: string; subcategory: string; search: string; scope: string; accounts: string[]; dayFrom?: string; dayTo?: string; }
 
 // Sélecteur multi-choix simple (liste à cocher) — utilisé pour le filtre "Compte", qui
 // doit permettre de choisir PLUSIEURS comptes à la fois (ex: "Petty Cash" + "Revenus
@@ -1110,6 +1110,14 @@ function FilterBar({ filters, setFilters, allMonths, allCategories, categoryOpti
       </div>
       <Select label="Du mois" value={filters.from} onChange={setFrom} options={allMonths.map((m) => ({ value: m, label: monthLabel(m) }))} />
       <Select label="Au mois" value={filters.to} onChange={setTo} options={allMonths.filter((m) => monthSortKey(m) >= monthSortKey(filters.from)).map((m) => ({ value: m, label: monthLabel(m) }))} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Du jour</label>
+        <input type="date" value={filters.dayFrom || ""} onChange={(e) => patch({ dayFrom: e.target.value || undefined })} style={{ background: COLOR.surfaceInput, border: `1px solid ${filters.dayFrom ? COLOR.gold : COLOR.hairline}`, borderRadius: 6, color: COLOR.ink, padding: "8px 10px", fontSize: 12.5, fontFamily: "'Inter', sans-serif" }} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        <label style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Au jour</label>
+        <input type="date" value={filters.dayTo || ""} onChange={(e) => patch({ dayTo: e.target.value || undefined })} style={{ background: COLOR.surfaceInput, border: `1px solid ${filters.dayTo ? COLOR.gold : COLOR.hairline}`, borderRadius: 6, color: COLOR.ink, padding: "8px 10px", fontSize: 12.5, fontFamily: "'Inter', sans-serif" }} />
+      </div>
       <Select label="Type" value={filters.type} onChange={(v) => patch({ type: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Dépense", label: "Dépenses" }, { value: "Revenu", label: "Revenus" }]} />
       <Select label="Groupe" value={filters.group} onChange={(v) => patch({ group: v })} options={[{ value: "Tous", label: "Tous" }, ...GROUPS.map((g) => ({ value: g, label: g })), { value: "Revenu", label: "Revenu" }]} />
       <Select label="Portée" value={filters.scope} onChange={(v) => patch({ scope: v })} options={[{ value: "Tous", label: "Tous" }, { value: "Personnel", label: "Personnel" }, { value: "Business", label: "Business" }]} />
@@ -12661,15 +12669,122 @@ function emptyForm(transactions: Transaction[], accounts: Account[]): Omit<Trans
   return { date: todayISO(), time: nowTime(), category: categoriesForType(transactions, "Dépense")[0] || "Cadeaux", type: "Dépense", amount: 0, account: accounts[0]?.name };
 }
 
-function JournalTab({ filtered, allCategories, categoryGroups, transactions, setTransactions, rules, setRules, accounts }: {
+function JournalTab({ filtered, allCategories, categoryGroups, transactions, setTransactions, rules, setRules, accounts, filters }: {
   filtered: any[]; allCategories: string[]; categoryGroups: Record<string, Group>;
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
-  rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void; accounts: Account[];
+  rules: CategorizationRule[]; setRules: (r: CategorizationRule[]) => void; accounts: Account[]; filters: Filters;
 }) {
   const isMobile = useIsMobile();
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<Omit<Transaction, "id">>(emptyForm(transactions, accounts));
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // Export PDF/Excel directement depuis le Journal — sur demande explicite de
+  // l'utilisateur (23/08/2026), pour ne pas avoir à changer d'onglet vers "Rapports &
+  // Export". Respecte TOUS les filtres actifs (période, jour, type, catégorie, compte,
+  // recherche…) puisqu'il travaille sur `filtered`, déjà réduit en conséquence. Reprend
+  // la même mise en forme que l'export existant de Rapports & Export (bandeau, cartes
+  // KPI, tableau groupé par mois) pour rester cohérent visuellement.
+  const [journalPdfState, setJournalPdfState] = useState<"idle" | "loading" | "error">("idle");
+  const periodLabel = () => {
+    if (filters.dayFrom || filters.dayTo) {
+      return `${filters.dayFrom ? dateLabelFull(filters.dayFrom) : "…"} — ${filters.dayTo ? dateLabelFull(filters.dayTo) : "…"}`;
+    }
+    return `${monthLabel(filters.from)} — ${monthLabel(filters.to)}`;
+  };
+  const journalTotals = useMemo(() => {
+    const rev = filtered.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+    const dep = filtered.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+    return { rev, dep, solde: rev - dep };
+  }, [filtered]);
+  const exportExcelJournal = () => {
+    const wb = XLSX.utils.book_new();
+    const summaryRows: any[][] = [
+      ["Grand Livre — Journal filtré"], ["Période", periodLabel()],
+      ["Généré le", dateLabelFull(todayISO())], [],
+      ["Revenus", journalTotals.rev], ["Dépenses", journalTotals.dep], ["Solde", journalTotals.solde],
+      ["Nombre de transactions", filtered.length],
+    ];
+    const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+    wsSummary["!cols"] = [{ wch: 26 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, wsSummary, "Résumé");
+    const txHeader = ["Date", "Heure", "Catégorie", "Sous-catégorie", "Type", "Groupe", "Compte", "Bénéficiaire", "Note", "Montant (FCFA)"];
+    const txRows = filtered.slice().sort((a, b) => b.date.localeCompare(a.date))
+      .map((t) => [t.date, t.time || "", t.category, t.subcategory || "", t.type, t.group, t.account || "", t.payee || "", t.note || "", t.amount]);
+    const wsTx = XLSX.utils.aoa_to_sheet([txHeader, ...txRows]);
+    wsTx["!cols"] = [{ wch: 12 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 22 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsTx, "Transactions");
+    XLSX.writeFile(wb, `grand-livre_journal_${todayISO()}.xlsx`);
+  };
+  const exportPDFJournal = async () => {
+    setJournalPdfState("loading");
+    try {
+      const [jsPDFModule] = await Promise.all([import(/* @vite-ignore */ "jspdf"), import(/* @vite-ignore */ "jspdf-autotable")]);
+      const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFillColor(26, 43, 76);
+      doc.rect(0, 0, pageWidth, 34, "F");
+      doc.setFontSize(17); doc.setTextColor(255, 255, 255);
+      doc.text("Grand Livre — Journal filtré", 14, 16);
+      doc.setFontSize(9.5); doc.setTextColor(200, 210, 225);
+      doc.text(`Période : ${periodLabel()}  ·  Généré le ${dateLabelFull(todayISO())}`, 14, 24);
+      doc.text(`${filtered.length} transaction(s)`, 14, 29);
+
+      const kpiY = 40, kpiH = 20, kpiW = (pageWidth - 28 - 16) / 3;
+      const drawKpiBox = (x: number, label: string, value: string, r: number, g: number, b: number) => {
+        doc.setFillColor(r, g, b);
+        doc.roundedRect(x, kpiY, kpiW, kpiH, 2, 2, "F");
+        doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+        doc.text(label, x + 5, kpiY + 7);
+        doc.setFontSize(11); doc.setFont("helvetica", "bold");
+        doc.text(value, x + 5, kpiY + 15);
+        doc.setFont("helvetica", "normal");
+      };
+      drawKpiBox(14, "REVENUS", `${fmtPdf(journalTotals.rev)} FCFA`, 63, 156, 122);
+      drawKpiBox(14 + kpiW + 8, "DÉPENSES", `${fmtPdf(journalTotals.dep)} FCFA`, 193, 84, 63);
+      drawKpiBox(14 + (kpiW + 8) * 2, "SOLDE", `${fmtPdf(journalTotals.solde)} FCFA`, journalTotals.solde >= 0 ? 63 : 193, journalTotals.solde >= 0 ? 156 : 84, journalTotals.solde >= 0 ? 122 : 63);
+
+      const sortedTx = filtered.slice().sort((a, b) => a.date.localeCompare(b.date));
+      const rows: any[] = [];
+      let curMonth: string | null = null, monthRev = 0, monthDep = 0;
+      const pushSubtotal = () => {
+        if (curMonth === null) return;
+        rows.push([{ content: `▸ Sous-total ${monthLabel(curMonth)}`, colSpan: 4 }, { content: `Rev: ${fmtPdf(monthRev)} / Dép: ${fmtPdf(monthDep)}`, styles: { halign: "right" } }]);
+      };
+      sortedTx.forEach((t) => {
+        if (curMonth !== null && t.month !== curMonth) { pushSubtotal(); monthRev = 0; monthDep = 0; }
+        curMonth = t.month;
+        if (t.type === "Revenu") monthRev += t.amount; else monthDep += t.amount;
+        rows.push([dateLabelFull(t.date), t.time || "—", t.category + (t.subcategory ? ` · ${t.subcategory}` : ""), t.type, fmtPdf(t.amount)]);
+      });
+      pushSubtotal();
+
+      doc.autoTable({
+        startY: 68,
+        head: [["Date", "Heure", "Catégorie", "Type", "Montant (FCFA)"]],
+        body: rows,
+        styles: { fontSize: 8, cellPadding: 2.5 },
+        headStyles: { fillColor: [26, 43, 76], textColor: 255, fontStyle: "bold" },
+        alternateRowStyles: { fillColor: [245, 245, 245] },
+        columnStyles: { 4: { halign: "right" } },
+        margin: { left: 14, right: 14 },
+        didParseCell: (data: any) => {
+          const first = data.row.raw?.[0];
+          if (first && typeof first === "object" && first.content && String(first.content).startsWith("▸")) {
+            data.cell.styles.fillColor = [27, 38, 32];
+            data.cell.styles.textColor = [201, 162, 39];
+            data.cell.styles.fontStyle = "bold";
+          }
+        },
+      });
+
+      doc.save(`grand-livre_journal_${todayISO()}.pdf`);
+      setJournalPdfState("idle");
+    } catch {
+      setJournalPdfState("error");
+    }
+  };
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [page, setPage] = useState(0);
   const [showImport, setShowImport] = useState(false);
@@ -12785,7 +12900,13 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Journal des transactions" subtitle={`${sorted.length} transaction(s) filtrée(s) sur ${transactions.length} au total`}
         right={
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={exportPDFJournal} disabled={journalPdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 6, background: journalPdfState === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${journalPdfState === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 6, color: journalPdfState === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: journalPdfState === "loading" ? "default" : "pointer" }}>
+              <Download size={13} /> {journalPdfState === "loading" ? "Génération…" : journalPdfState === "error" ? "Réessayer" : "PDF"}
+            </button>
+            <button onClick={exportExcelJournal} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(95,194,152,0.12)", border: `1px solid ${COLOR.emerald}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <Download size={13} /> Excel
+            </button>
             <button onClick={() => setShowRules((r) => !r)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
               <SlidersHorizontal size={13} /> Règles
             </button>
@@ -14453,6 +14574,10 @@ export default function GrandLivre() {
     return txWithGroup.filter((t) => {
       const mk = monthSortKey(t.month);
       if (mk < fromKey || mk > toKey) return false;
+      // Filtre par jour précis — optionnel, affine à l'intérieur (ou au-delà) de la
+      // plage de mois choisie. Sur demande explicite de l'utilisateur (23/08/2026).
+      if (filters.dayFrom && t.date < filters.dayFrom) return false;
+      if (filters.dayTo && t.date > filters.dayTo) return false;
       if (filters.type !== "Tous" && t.type !== filters.type) return false;
       if (filters.group !== "Tous" && t.group !== filters.group) return false;
       if (filters.scope !== "Tous" && t.scope !== filters.scope) return false;
@@ -15018,7 +15143,7 @@ export default function GrandLivre() {
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} recurring={recurring} setRecurring={setRecurring} funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} deletedAccountIds={deletedAccountIds} setDeletedAccountIds={setDeletedAccountIds} />}
           {tab === "payees" && <PayeesTab transactions={transactions} />}
           {tab === "recurrences" && <RecurrencesTab recurring={recurring} setRecurring={setRecurring} transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
-          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactionsTracked} rules={rules} setRules={setRules} accounts={accounts} />}
+          {tab === "journal" && <JournalTab filtered={filtered} allCategories={allCategories} categoryGroups={resolvedGroups} transactions={transactions} setTransactions={setTransactionsTracked} rules={rules} setRules={setRules} accounts={accounts} filters={filters} />}
           {tab === "export" && <ExportTab filtered={filtered} filters={filters} setFilters={setFilters} allMonths={allMonths} />}
           {tab === "sauvegarde" && (
             <SauvegardeTab
