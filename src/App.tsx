@@ -8479,6 +8479,43 @@ function computeXIRR(cashflows: { date: string; amount: number }[]): number | nu
   return mid;
 }
 
+// Détail par opération — sur demande explicite de l'utilisateur (23/08/2026) : "combien
+// CETTE souscription précise a généré comme profit, son rendement". Reconstitue le coût
+// moyen pondéré au moment exact de chaque opération (même logique que le Journal FCP et
+// computeFundPosition, mais conservée ligne par ligne au lieu d'être résumée), pour
+// pouvoir répondre "à cette date, sur cette opération précise, la position valait X".
+function computeOperationDetail(fundOp: FundOperation, allFundOperations: FundOperation[], currentVL: number) {
+  const ops = allFundOperations.filter((o) => o.fundId === fundOp.fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  let qty = 0, cost = 0;
+  let costBasisOfThisOp = 0, realizedGainOfThisOp: number | null = null;
+  for (const o of ops) {
+    if (o.type === "Souscription") {
+      qty += o.quantite;
+      cost += o.montant + (o.frais || 0);
+      if (o.id === fundOp.id) costBasisOfThisOp = o.montant + (o.frais || 0);
+    } else {
+      const avgCost = qty > 0 ? cost / qty : 0;
+      const costRemoved = avgCost * o.quantite;
+      if (o.id === fundOp.id) { costBasisOfThisOp = costRemoved; realizedGainOfThisOp = o.montant - costRemoved; }
+      cost -= costRemoved;
+      qty = Math.max(0, qty - o.quantite);
+    }
+    if (o.id === fundOp.id) break;
+  }
+
+  if (fundOp.type === "Souscription") {
+    const valorisationActuelle = fundOp.quantite * currentVL;
+    const plusValueLatente = valorisationActuelle - costBasisOfThisOp;
+    const plusValuePct = costBasisOfThisOp > 0 ? (plusValueLatente / costBasisOfThisOp) * 100 : 0;
+    const xirr = computeXIRR([{ date: fundOp.date, amount: -costBasisOfThisOp }, { date: todayISO(), amount: valorisationActuelle }]);
+    return { costBasis: costBasisOfThisOp, valorisationActuelle, gain: plusValueLatente, gainPct: plusValuePct, xirr, realized: false };
+  } else {
+    const gain = realizedGainOfThisOp || 0;
+    const gainPct = costBasisOfThisOp > 0 ? (gain / costBasisOfThisOp) * 100 : 0;
+    return { costBasis: costBasisOfThisOp, valorisationActuelle: fundOp.montant, gain, gainPct, xirr: null, realized: true };
+  }
+}
+
 function computeFundPosition(fundId: string, operations: FundOperation[], dailyValues: FundDailyValue[]) {
   const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   let qty = 0, costTotal = 0, realizedGain = 0;
@@ -8696,6 +8733,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [objectifDateDraft, setObjectifDateDraft] = useState<string>(bourseObjectif?.date || "");
   const [allocFormFundId, setAllocFormFundId] = useState<string | null>(null);
   const [allocTargetDraft, setAllocTargetDraft] = useState<number>(0);
+  // Détail par opération — sur demande explicite de l'utilisateur (23/08/2026).
+  const [detailOpId, setDetailOpId] = useState<string | null>(null);
   // Édition d'une opération existante — sur demande explicite de l'utilisateur
   // (22/08/2026), qui avait constaté qu'il était impossible de modifier ou supprimer
   // une souscription depuis le tableau d'historique replié par fonds. null = mode
@@ -9006,10 +9045,19 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     wsPos["!cols"] = [{ wch: 12 }, { wch: 24 }, { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 16 }];
     XLSX.utils.book_append_sheet(wb, wsPos, "Portefeuille");
 
-    const opHeader = ["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Frais", "Compte"];
-    const opRows = periodOps.map((o) => [o.date, o.type, funds.find((f) => f.id === o.fundId)?.name || "", o.quantite, o.vl, o.montant, o.frais || 0, o.account]);
+    const opHeader = ["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Frais", "Compte", "Note", "Plus/moins-value", "Rendement", "TRI annualisé"];
+    const opRows = periodOps.map((o) => {
+      const fund = funds.find((f) => f.id === o.fundId);
+      const pos = fund ? computeFundPosition(fund.id, fundOperations, fundDailyValues) : null;
+      const detail = fund ? computeOperationDetail(o, fundOperations, pos?.currentVL || 0) : null;
+      return [
+        o.date, o.type, fund?.name || "", o.quantite, o.vl, o.montant, o.frais || 0, o.account, o.note || "",
+        detail ? Math.round(detail.gain) : "", detail ? `${detail.gainPct.toFixed(1)}%` : "",
+        detail && !detail.realized && detail.xirr !== null ? `${(detail.xirr * 100).toFixed(1)}%/an` : (detail?.realized ? "réalisé" : ""),
+      ];
+    });
     const wsOps = XLSX.utils.aoa_to_sheet([opHeader, ...opRows]);
-    wsOps["!cols"] = [{ wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 11 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 12 }];
+    wsOps["!cols"] = [{ wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 11 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 20 }, { wch: 16 }, { wch: 12 }, { wch: 14 }];
     XLSX.utils.book_append_sheet(wb, wsOps, "Journal FCP");
 
     XLSX.writeFile(wb, `bourse-fcp_releve_${exportFrom}_${exportTo}.xlsx`);
@@ -9071,11 +9119,20 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       doc.setFont("helvetica", "normal");
       doc.autoTable({
         startY: y + 4,
-        head: [["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Compte"]],
-        body: periodOps.map((o) => [dateLabelFull(o.date), o.type, funds.find((f) => f.id === o.fundId)?.name || "", o.quantite.toFixed(4), fmtPdf(o.vl), fmtPdf(o.montant), o.account]),
+        head: [["Date", "Sens", "Produits", "Quantité", "VL", "Montant net", "Compte", "Plus/moins-value", "Rendement"]],
+        body: periodOps.map((o) => {
+          const fund = funds.find((f) => f.id === o.fundId);
+          const pos = fund ? computeFundPosition(fund.id, fundOperations, fundDailyValues) : null;
+          const detail = fund ? computeOperationDetail(o, fundOperations, pos?.currentVL || 0) : null;
+          return [
+            dateLabelFull(o.date), o.type, fund?.name || "", o.quantite.toFixed(4), fmtPdf(o.vl), fmtPdf(o.montant), o.account,
+            detail ? `${detail.gain >= 0 ? "+" : ""}${fmtPdf(detail.gain)}` : "—",
+            detail ? `${detail.gainPct >= 0 ? "+" : ""}${detail.gainPct.toFixed(1)}%${detail.realized ? " (réalisé)" : ""}` : "—",
+          ];
+        }),
         headStyles: { fillColor: [201, 162, 39], textColor: [26, 26, 26] },
-        styles: { fontSize: 7.5 },
-        columnStyles: { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
+        styles: { fontSize: 7 },
+        columnStyles: { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 7: { halign: "right" }, 8: { halign: "right" } },
         margin: { left: 14, right: 14 },
       });
 
@@ -9492,6 +9549,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.montant)}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}>
+                        <button onClick={() => setDetailOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", padding: 4 }} title="Voir le détail">
+                          <Info size={13} />
+                        </button>
                         <button onClick={() => openEditOperation(o)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", padding: 4 }}>
                           <Pencil size={13} />
                         </button>
@@ -9728,6 +9788,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                         </td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{o.account}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                          <button onClick={() => setDetailOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", padding: 4, display: "inline-flex" }} title="Voir le détail">
+                            <Info size={13} />
+                          </button>
                           <button onClick={() => openEditOperation(o)} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", padding: 4, display: "inline-flex" }}>
                             <Pencil size={13} />
                           </button>
@@ -9890,6 +9953,75 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           </div>
         </div>
       )}
+
+      {detailOpId && (() => {
+        const op = fundOperations.find((o) => o.id === detailOpId);
+        if (!op) return null;
+        const fund = funds.find((f) => f.id === op.fundId);
+        const pos = fund ? computeFundPosition(fund.id, fundOperations, fundDailyValues) : null;
+        const detail = fund ? computeOperationDetail(op, fundOperations, pos?.currentVL || 0) : null;
+        const linkedTx = op.linkedTransactionId ? transactions.find((t) => t.id === op.linkedTransactionId) : null;
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.6)", display: "flex", justifyContent: "center", alignItems: "center", padding: 16 }} onClick={() => setDetailOpId(null)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "85vh", overflowY: "auto", background: COLOR.surfaceRaised, borderRadius: 16, border: `1px solid ${COLOR.hairline}`, padding: 22 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: op.type === "Souscription" ? COLOR.emeraldSoft : COLOR.claySoft, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>{op.type}</div>
+                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18, color: COLOR.ink }}>{fund?.name || "(fonds supprimé)"}</div>
+                </div>
+                <button onClick={() => setDetailOpId(null)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer" }}><X size={18} /></button>
+              </div>
+              <div style={{ fontSize: 12, color: COLOR.inkMuted, marginBottom: 18 }}>{dateLabelFull(op.date)} · Compte {op.account}</div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 18 }}>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Quantité</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{op.quantite.toFixed(4)}</div></div>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>VL à l'opération</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(op.vl)}</div></div>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Montant net</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(op.montant)}</div></div>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Frais</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{op.frais ? fmt(op.frais) : "—"}</div></div>
+              </div>
+
+              {detail && (
+                <div style={{ background: COLOR.surface, borderRadius: 12, padding: 16, marginBottom: 18 }}>
+                  <div style={{ fontSize: 11, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+                    {detail.realized ? "Résultat de cette opération" : "Performance de cette souscription, à ce jour"}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Prix de revient de cette part</span>
+                    <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(detail.costBasis)} FCFA</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{detail.realized ? "Montant reçu" : "Valorisation actuelle"}</span>
+                    <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(detail.valorisationActuelle)} FCFA</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{detail.realized ? "Plus-value réalisée" : "Plus-value latente"}</span>
+                    <span style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: detail.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{detail.gain >= 0 ? "+" : ""}{fmt(Math.round(detail.gain))} FCFA ({detail.gainPct >= 0 ? "+" : ""}{detail.gainPct.toFixed(1)}%)</span>
+                  </div>
+                  {!detail.realized && detail.xirr !== null && (
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Rendement annualisé (TRI)</span>
+                      <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: detail.xirr >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{detail.xirr >= 0 ? "+" : ""}{(detail.xirr * 100).toFixed(1)}%/an</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {op.note && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Note</div>
+                  <div style={{ fontSize: 13, color: COLOR.ink, fontStyle: "italic" }}>{op.note}</div>
+                </div>
+              )}
+
+              <div style={{ fontSize: 11, color: COLOR.inkMuted, paddingTop: 14, borderTop: `1px dashed ${COLOR.hairline}` }}>
+                {linkedTx
+                  ? `Transaction liée dans le Journal principal : ${linkedTx.category}${linkedTx.subcategory ? ` / ${linkedTx.subcategory}` : ""}, ${fmt(linkedTx.amount)} FCFA.`
+                  : "Aucune transaction liée dans le Journal principal (opération historique importée, ou saisie avant le 22/08/2026)."}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {opFormFundId && (() => {
         const fund = funds.find((f) => f.id === opFormFundId);
