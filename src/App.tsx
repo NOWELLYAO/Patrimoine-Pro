@@ -277,7 +277,7 @@ interface RecurringTemplate {
   category: string;
   type: TxType;
   amount: number;
-  frequency: "Hebdomadaire" | "Mensuelle" | "Annuelle";
+  frequency: "Hebdomadaire" | "Mensuelle" | "Trimestrielle" | "Semestrielle" | "Annuelle";
   nextDate: string;
   account?: string;
   payee?: string;
@@ -296,7 +296,7 @@ interface Fund {
   // au fonds plutôt qu'à une nouvelle collection séparée, pour profiter gratuitement
   // de toute la synchro déjà en place sur `funds` (merge, tombstone, sauvegarde…) sans
   // rien recâbler.
-  recurringPlan?: { montant: number; frequency: "Hebdomadaire" | "Mensuelle" | "Annuelle"; nextDate: string; account: string };
+  recurringPlan?: { montant: number; frequency: "Hebdomadaire" | "Mensuelle" | "Trimestrielle" | "Semestrielle" | "Annuelle"; nextDate: string; account: string };
   alertThreshold?: { vl: number; direction: "en dessous" | "au dessus" };
   targetAllocationPct?: number; // ajouté le 23/08/2026, sur demande explicite de
   // l'utilisateur — alerte si l'allocation réelle dérive de plus de 10 points par
@@ -646,10 +646,12 @@ function weekdayLabel(date: string) {
     return s.charAt(0).toUpperCase() + s.slice(1);
   } catch { return ""; }
 }
-function addInterval(date: string, freq: "Hebdomadaire" | "Mensuelle" | "Annuelle") {
+function addInterval(date: string, freq: "Hebdomadaire" | "Mensuelle" | "Trimestrielle" | "Semestrielle" | "Annuelle") {
   const d = new Date(date + "T00:00:00");
   if (freq === "Hebdomadaire") d.setDate(d.getDate() + 7);
   else if (freq === "Mensuelle") d.setMonth(d.getMonth() + 1);
+  else if (freq === "Trimestrielle") d.setMonth(d.getMonth() + 3);
+  else if (freq === "Semestrielle") d.setMonth(d.getMonth() + 6);
   else d.setFullYear(d.getFullYear() + 1);
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
@@ -8699,7 +8701,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // profite de la synchro déjà en place sur `funds`, sans rien recâbler.
   const [recurringFormFundId, setRecurringFormFundId] = useState<string | null>(null);
   const [recurringMontant, setRecurringMontant] = useState<number>(0);
-  const [recurringFrequency, setRecurringFrequency] = useState<"Hebdomadaire" | "Mensuelle" | "Annuelle">("Mensuelle");
+  const [recurringFrequency, setRecurringFrequency] = useState<"Hebdomadaire" | "Mensuelle" | "Trimestrielle" | "Semestrielle" | "Annuelle">("Mensuelle");
   const [recurringNextDate, setRecurringNextDate] = useState(todayISO());
   const [recurringAccount, setRecurringAccount] = useState(accounts[0]?.name || "");
   const saveRecurringPlan = (fundId: string) => {
@@ -9499,6 +9501,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <select value={recurringFrequency} onChange={(e) => setRecurringFrequency(e.target.value as any)} style={inputStyle}>
                   <option value="Hebdomadaire">Hebdomadaire</option>
                   <option value="Mensuelle">Mensuelle</option>
+                  <option value="Trimestrielle">Trimestrielle</option>
+                  <option value="Semestrielle">Semestrielle</option>
                   <option value="Annuelle">Annuelle</option>
                 </select>
               </div>
@@ -11763,7 +11767,11 @@ function BudgetsTab({ transactions, categoryGroups, budgets, setBudgets, allCate
   useEffect(() => { if (suggestOpen) setSuggestEdits({}); }, [suggestOpen]);
   const buildBudgetSuggestion = () => {
     const monthlyEquivalent = (r: RecurringTemplate) =>
-      r.frequency === "Mensuelle" ? r.amount : r.frequency === "Hebdomadaire" ? r.amount * (52 / 12) : r.amount / 12;
+      r.frequency === "Mensuelle" ? r.amount
+      : r.frequency === "Hebdomadaire" ? r.amount * (52 / 12)
+      : r.frequency === "Trimestrielle" ? r.amount / 3
+      : r.frequency === "Semestrielle" ? r.amount / 6
+      : r.amount / 12; // Annuelle
 
     const recurringIncome = recurring.filter((r) => r.type === "Revenu").reduce((a, r) => a + monthlyEquivalent(r), 0);
     const recurringByCategory: Record<string, number> = {};
@@ -12016,6 +12024,12 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
   chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
 }) {
   const [adding, setAdding] = useState(false);
+  // Édition d'un modèle récurrent existant — sur demande explicite de l'utilisateur
+  // (23/08/2026), qui avait constaté qu'il n'existait aucun moyen de modifier un
+  // modèle déjà créé (seule la suppression était possible, obligeant à tout recréer
+  // pour changer ne serait-ce que le montant). Réutilise le même formulaire que la
+  // création — null = mode création (inchangé), un id = mode édition.
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<Omit<RecurringTemplate, "id">>({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name });
 
   // Suggestions tirées de Charges Fixes & Variables : tout poste classé "Fixe" (auto ou
@@ -12036,7 +12050,23 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
   const today = todayISO();
   const upcoming = recurring.filter((r) => daysBetween(today, r.nextDate) <= 14).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
 
-  const add = () => { if (!form.category || form.amount <= 0) return; setRecurring([...recurring, { ...form, id: uid("r") }]); setForm({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name }); setAdding(false); };
+  const resetForm = () => setForm({ category: categoriesForType(transactions, "Dépense")[0] || "", type: "Dépense", amount: 0, frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name });
+  const add = () => {
+    if (!form.category || form.amount <= 0) return;
+    if (editingId) {
+      setRecurring(recurring.map((r) => (r.id === editingId ? { ...form, id: editingId } : r)));
+      setEditingId(null);
+    } else {
+      setRecurring([...recurring, { ...form, id: uid("r") }]);
+    }
+    resetForm();
+    setAdding(false);
+  };
+  const openEdit = (r: RecurringTemplate) => {
+    setEditingId(r.id);
+    setForm({ category: r.category, type: r.type, amount: r.amount, frequency: r.frequency, nextDate: r.nextDate, account: r.account, payee: r.payee });
+    setAdding(true);
+  };
   const remove = (id: string) => setRecurring(recurring.filter((r) => r.id !== id));
 
   const enregistrer = (r: RecurringTemplate) => {
@@ -12088,7 +12118,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 
       <Panel title="Modèles de transactions récurrentes" subtitle="Loyer, salaire, abonnements… tout ce qui revient à intervalle régulier"
         right={
-          <button onClick={() => setAdding((a) => !a)} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
+          <button onClick={() => { if (adding) { setEditingId(null); resetForm(); } setAdding((a) => !a); }} style={{ display: "flex", alignItems: "center", gap: 6, background: adding ? COLOR.hairline : "rgba(201,162,39,0.14)", border: `1px solid ${adding ? COLOR.hairline : COLOR.gold}`, borderRadius: 6, color: adding ? COLOR.inkMuted : COLOR.goldSoft, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" }}>
             {adding ? <X size={13} /> : <Plus size={13} />} {adding ? "Annuler" : "Nouveau modèle"}
           </button>
         }>
@@ -12101,7 +12131,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Type</label><select style={inputStyle} value={form.type} onChange={(e) => { const ty = e.target.value as TxType; setForm({ ...form, type: ty, category: categoriesForType(transactions, ty)[0] || "" }); }}><option value="Dépense">Dépense</option><option value="Revenu">Revenu</option></select></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Montant</label><input type="number" inputMode="numeric" style={{ ...inputStyle, width: 130 }} value={form.amount || ""} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} /></div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Fréquence</label><select style={inputStyle} value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as RecurringTemplate["frequency"] })}><option>Hebdomadaire</option><option>Mensuelle</option><option>Annuelle</option></select></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Fréquence</label><select style={inputStyle} value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as RecurringTemplate["frequency"] })}><option>Hebdomadaire</option><option>Mensuelle</option><option>Trimestrielle</option><option>Semestrielle</option><option>Annuelle</option></select></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Prochaine échéance</label><input type="date" style={inputStyle} value={form.nextDate} onChange={(e) => setForm({ ...form, nextDate: e.target.value })} /></div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><label style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Compte</label>
               <select style={{ ...inputStyle, width: 140 }} value={form.account || ""} onChange={(e) => setForm({ ...form, account: e.target.value })}>
@@ -12109,7 +12139,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
                 {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
               </select>
             </div>
-            <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>Créer</button>
+            <button onClick={add} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", height: 32 }}>{editingId ? "Mettre à jour" : "Créer"}</button>
           </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -12118,6 +12148,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
               <span style={{ fontSize: 12.5 }}>{r.category} · {r.frequency} · prochaine le {dateLabelFull(r.nextDate)}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: r.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{fmt(r.amount)}</span>
+                <button onClick={() => openEdit(r)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button>
                 <button onClick={() => remove(r.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button>
               </div>
             </div>
