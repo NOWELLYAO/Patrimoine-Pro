@@ -292,6 +292,15 @@ interface Fund {
   id: string;
   name: string;
   category: "Monétaire" | "Diversifié" | "Actions" | "Autre";
+  // Champs ajoutés le 23/08/2026, sur demande explicite de l'utilisateur — rattachés
+  // au fonds plutôt qu'à une nouvelle collection séparée, pour profiter gratuitement
+  // de toute la synchro déjà en place sur `funds` (merge, tombstone, sauvegarde…) sans
+  // rien recâbler.
+  recurringPlan?: { montant: number; frequency: "Hebdomadaire" | "Mensuelle" | "Annuelle"; nextDate: string; account: string };
+  alertThreshold?: { vl: number; direction: "en dessous" | "au dessus" };
+  targetAllocationPct?: number; // ajouté le 23/08/2026, sur demande explicite de
+  // l'utilisateur — alerte si l'allocation réelle dérive de plus de 10 points par
+  // rapport à cette cible (rebalancement).
   updatedAt?: string;
 }
 interface FundOperation {
@@ -306,6 +315,8 @@ interface FundOperation {
   // demande explicite de l'utilisateur (21/08/2026), pour combler l'écart observé
   // entre le PRU recalculé par l'app à partir du seul "Montant net" et celui affiché
   // sur le relevé NSIA (les frais de souscription n'apparaissaient pas dans le relevé).
+  note?: string; // ajouté le 23/08/2026, sur demande explicite de l'utilisateur — un
+  // rappel libre du "pourquoi" de cette opération, distinct du compte/montant.
   account: string;
   linkedTransactionId?: string; // sur demande explicite de l'utilisateur (22/08/2026) :
   // à partir de maintenant, chaque NOUVELLE opération saisie via le formulaire crée une
@@ -8526,6 +8537,39 @@ function computeBourseAdvice(funds: Fund[], fundOperations: FundOperation[], fun
     }
   }
 
+  // Alertes de seuil de VL — sur demande explicite de l'utilisateur (23/08/2026).
+  positions.forEach(({ fund, pos }) => {
+    if (!fund.alertThreshold || pos.currentVL <= 0) return;
+    const crossed = fund.alertThreshold.direction === "en dessous" ? pos.currentVL <= fund.alertThreshold.vl : pos.currentVL >= fund.alertThreshold.vl;
+    if (crossed) {
+      tips.push({ icon: AlertTriangle, tone: "warn", text: `${fund.name} : VL actuelle ${fmt(pos.currentVL)} — seuil d'alerte (${fund.alertThreshold.direction} ${fmt(fund.alertThreshold.vl)}) franchi.` });
+    }
+  });
+
+  // Dérive d'allocation par rapport à une cible définie — sur demande explicite de
+  // l'utilisateur (23/08/2026). Seuil de 10 points fixé arbitrairement (au-delà, l'écart
+  // devient significatif pour la plupart des stratégies de répartition).
+  if (totalValorisation > 0) {
+    positions.forEach(({ fund, pos }) => {
+      if (typeof fund.targetAllocationPct !== "number") return;
+      const actualPct = (pos.valorisation / totalValorisation) * 100;
+      const drift = actualPct - fund.targetAllocationPct;
+      if (Math.abs(drift) >= 10) {
+        tips.push({ icon: AlertTriangle, tone: "info", text: `${fund.name} : allocation réelle ${actualPct.toFixed(1)}% contre une cible de ${fund.targetAllocationPct}% — écart de ${drift > 0 ? "+" : ""}${drift.toFixed(1)} points. ${drift > 0 ? "Envisage de renforcer les autres fonds plutôt que celui-ci." : "Envisage de renforcer ce fonds pour revenir vers ta cible."}` });
+      }
+    });
+  }
+
+  // Rappels de souscription récurrente planifiée — sur demande explicite de
+  // l'utilisateur (23/08/2026).
+  positions.forEach(({ fund }) => {
+    if (!fund.recurringPlan) return;
+    if (fund.recurringPlan.nextDate <= today) {
+      const overdue = daysBetween(fund.recurringPlan.nextDate, today);
+      tips.push({ icon: Rocket, tone: overdue > 3 ? "warn" : "info", text: `Souscription récurrente planifiée sur ${fund.name} : ${fmt(fund.recurringPlan.montant)} FCFA ${overdue > 0 ? `en retard de ${overdue} jour${overdue > 1 ? "s" : ""}` : "prévue aujourd'hui"} — pense à la valider dans le formulaire Souscription.` });
+    }
+  });
+
   if (totalValorisation > 0 && positions.length > 1) {
     const maxAlloc = Math.max(...positions.map((p) => p.pos.valorisation / totalValorisation));
     if (maxAlloc > 0.75) {
@@ -8547,7 +8591,7 @@ function computeBourseAdvice(funds: Fund[], fundOperations: FundOperation[], fun
   return tips;
 }
 
-function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, deletedFundOperationIds, setDeletedFundOperationIds, transactions, setTransactions, categoryGroups, setCategoryGroups, isMobile }: {
+function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDailyValues, setFundDailyValues, accounts, deletedFundIds, setDeletedFundIds, deletedFundOperationIds, setDeletedFundOperationIds, transactions, setTransactions, categoryGroups, setCategoryGroups, bourseObjectif, setBourseObjectif, isMobile }: {
   funds: Fund[]; setFunds: (f: Fund[]) => void;
   fundOperations: FundOperation[]; setFundOperations: (o: FundOperation[]) => void;
   fundDailyValues: FundDailyValue[]; setFundDailyValues: (v: FundDailyValue[]) => void;
@@ -8556,6 +8600,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   deletedFundOperationIds: Record<string, string>; setDeletedFundOperationIds: (d: Record<string, string>) => void;
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
   categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
+  bourseObjectif: { montant: number; date: string } | null; setBourseObjectif: (o: { montant: number; date: string } | null) => void;
   isMobile: boolean;
 }) {
   // Bascule Tableau de bord / Journal FCP — sur demande explicite de l'utilisateur
@@ -8596,13 +8641,61 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [opVl, setOpVl] = useState<number>(0);
   const [opMontant, setOpMontant] = useState<number>(0);
   const [opFrais, setOpFrais] = useState<number>(0);
+  const [opNote, setOpNote] = useState("");
   const [opAccount, setOpAccount] = useState(accounts[0]?.name || "");
   const [expandedFundId, setExpandedFundId] = useState<string | null>(null);
   const [chartFundId, setChartFundId] = useState<string | null>(null);
+  // Alerte de seuil de VL — sur demande explicite de l'utilisateur (23/08/2026).
+  const [alertFormFundId, setAlertFormFundId] = useState<string | null>(null);
+  const [alertVl, setAlertVl] = useState<number>(0);
+  const [alertDirection, setAlertDirection] = useState<"en dessous" | "au dessus">("en dessous");
+  const saveAlertThreshold = (fundId: string) => {
+    if (alertVl <= 0) return;
+    setFunds(funds.map((f) => f.id === fundId ? { ...f, alertThreshold: { vl: alertVl, direction: alertDirection }, updatedAt: new Date().toISOString() } : f));
+    setAlertFormFundId(null);
+  };
+  const removeAlertThreshold = (fundId: string) => {
+    setFunds(funds.map((f) => f.id === fundId ? { ...f, alertThreshold: undefined, updatedAt: new Date().toISOString() } : f));
+  };
+  // Souscription récurrente planifiée — sur demande explicite de l'utilisateur
+  // (23/08/2026). Rattachée au fonds (comme alertThreshold) — même raisonnement :
+  // profite de la synchro déjà en place sur `funds`, sans rien recâbler.
+  const [recurringFormFundId, setRecurringFormFundId] = useState<string | null>(null);
+  const [recurringMontant, setRecurringMontant] = useState<number>(0);
+  const [recurringFrequency, setRecurringFrequency] = useState<"Hebdomadaire" | "Mensuelle" | "Annuelle">("Mensuelle");
+  const [recurringNextDate, setRecurringNextDate] = useState(todayISO());
+  const [recurringAccount, setRecurringAccount] = useState(accounts[0]?.name || "");
+  const saveRecurringPlan = (fundId: string) => {
+    if (recurringMontant <= 0 || !recurringAccount) return;
+    setFunds(funds.map((f) => f.id === fundId ? { ...f, recurringPlan: { montant: recurringMontant, frequency: recurringFrequency, nextDate: recurringNextDate, account: recurringAccount }, updatedAt: new Date().toISOString() } : f));
+    setRecurringFormFundId(null);
+  };
+  const removeRecurringPlan = (fundId: string) => {
+    setFunds(funds.map((f) => f.id === fundId ? { ...f, recurringPlan: undefined, updatedAt: new Date().toISOString() } : f));
+  };
+  // "Marquer comme fait" — ouvre directement le formulaire de souscription prérempli
+  // avec le montant planifié, ET avance la prochaine échéance. L'utilisateur valide
+  // quand même lui-même la VL du jour dans le formulaire — jamais d'ajout automatique
+  // silencieux d'une opération.
+  const markRecurringDone = (fund: Fund) => {
+    if (!fund.recurringPlan) return;
+    const plan = fund.recurringPlan;
+    setFunds(funds.map((f) => f.id === fund.id ? { ...f, recurringPlan: { ...plan, nextDate: addInterval(plan.nextDate, plan.frequency) }, updatedAt: new Date().toISOString() } : f));
+    const pos = computeFundPosition(fund.id, fundOperations, fundDailyValues);
+    setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO());
+    setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(plan.montant); setOpFrais(0); setOpNote("Souscription récurrente planifiée"); setOpAccount(plan.account);
+  };
   // Simulateur d'investissement — sur demande explicite de l'utilisateur (23/08/2026).
   const [simFundId, setSimFundId] = useState<string>("");
   const [simMonthly, setSimMonthly] = useState<number>(30000);
   const [simYears, setSimYears] = useState<number>(5);
+  // Objectif de portefeuille — formulaire local, la donnée elle-même vient du parent
+  // (déjà synchronisée). Sur demande explicite de l'utilisateur (23/08/2026).
+  const [objectifFormOpen, setObjectifFormOpen] = useState(false);
+  const [objectifMontantDraft, setObjectifMontantDraft] = useState<number>(bourseObjectif?.montant || 0);
+  const [objectifDateDraft, setObjectifDateDraft] = useState<string>(bourseObjectif?.date || "");
+  const [allocFormFundId, setAllocFormFundId] = useState<string | null>(null);
+  const [allocTargetDraft, setAllocTargetDraft] = useState<number>(0);
   // Édition d'une opération existante — sur demande explicite de l'utilisateur
   // (22/08/2026), qui avait constaté qu'il était impossible de modifier ou supprimer
   // une souscription depuis le tableau d'historique replié par fonds. null = mode
@@ -8796,6 +8889,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setOpMontant(o.montant);
     setOpFrais(o.frais || 0);
     setOpAccount(o.account);
+    setOpNote(o.note || "");
   };
   const saveOperation = () => {
     if (!opFormFundId || opQty <= 0 || opVl <= 0 || !opAccount) return;
@@ -8808,7 +8902,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       // en avait une (les 20 opérations importées n'en ont pas, elles restent sans lien).
       const existing = fundOperations.find((o) => o.id === editingOpId);
       setFundOperations(fundOperations.map((o) => o.id === editingOpId
-        ? { ...o, fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, updatedAt: new Date().toISOString() }
+        ? { ...o, fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, note: opNote.trim() || undefined, account: opAccount, updatedAt: new Date().toISOString() }
         : o));
       if (existing?.linkedTransactionId) {
         setTransactions(transactions.map((t) => t.id === existing.linkedTransactionId
@@ -8820,7 +8914,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       // transaction liée dans le Journal principal.
       ensureInvestmentCategory();
       const txId = uid("t");
-      const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, account: opAccount, linkedTransactionId: txId, updatedAt: new Date().toISOString() };
+      const op: FundOperation = { id: uid("fundop"), fundId: opFormFundId, date: opDate, type: opType, quantite: opQty, vl: opVl, montant, frais: opFrais || undefined, note: opNote.trim() || undefined, account: opAccount, linkedTransactionId: txId, updatedAt: new Date().toISOString() };
       setFundOperations([...fundOperations, op]);
       const linkedTx: Transaction = {
         id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
@@ -8829,7 +8923,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       } as Transaction;
       setTransactions([...transactions, linkedTx]);
     }
-    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0); setEditingOpId(null);
+    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0); setOpNote(""); setEditingOpId(null);
   };
 
   const positions = useMemo(() => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })), [funds, fundOperations, fundDailyValues]);
@@ -9065,6 +9159,58 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         )}
       </div>
 
+      {view === "dashboard" && (
+        <Panel title="Objectif de portefeuille" subtitle={bourseObjectif ? "" : "Fixe une cible pour suivre ta progression."}>
+          {!bourseObjectif && !objectifFormOpen && (
+            <button onClick={() => { setObjectifMontantDraft(Math.max(totalValorisation, 100000)); setObjectifDateDraft(""); setObjectifFormOpen(true); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, padding: "9px 14px", fontSize: 12.5, cursor: "pointer" }}>
+              <Plus size={13} /> Définir un objectif
+            </button>
+          )}
+          {bourseObjectif && !objectifFormOpen && (() => {
+            const pct = bourseObjectif.montant > 0 ? Math.min(100, (totalValorisation / bourseObjectif.montant) * 100) : 0;
+            let projectionText = "";
+            if (portfolioXIRR !== null && portfolioXIRR > 0 && totalValorisation > 0 && totalValorisation < bourseObjectif.montant) {
+              const yearsNeeded = Math.log(bourseObjectif.montant / totalValorisation) / Math.log(1 + portfolioXIRR);
+              if (isFinite(yearsNeeded) && yearsNeeded > 0) {
+                projectionText = `Au rythme actuel (TRI de ${(portfolioXIRR * 100).toFixed(1)}%/an, sans nouvel apport), objectif atteignable dans environ ${yearsNeeded < 1 ? `${Math.round(yearsNeeded * 12)} mois` : `${yearsNeeded.toFixed(1)} ans`}.`;
+              }
+            }
+            return (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: COLOR.ink }}>{fmt(totalValorisation)} / {fmt(bourseObjectif.montant)} FCFA{bourseObjectif.date && ` · cible ${dateLabelFull(bourseObjectif.date)}`}</span>
+                  <span style={{ fontSize: 13, color: COLOR.goldSoft, fontWeight: 700 }}>{pct.toFixed(1)}%</span>
+                </div>
+                <div style={{ height: 8, background: COLOR.surfaceRaised, borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: COLOR.gold, borderRadius: 4, transition: "width 0.3s" }} />
+                </div>
+                {projectionText && <div style={{ marginTop: 10, fontSize: 11.5, color: COLOR.inkMuted, fontStyle: "italic" }}>{projectionText}</div>}
+                <button onClick={() => { setObjectifMontantDraft(bourseObjectif.montant); setObjectifDateDraft(bourseObjectif.date); setObjectifFormOpen(true); }} style={{ marginTop: 10, background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+                  <Pencil size={11} /> Modifier
+                </button>
+              </div>
+            );
+          })()}
+          {objectifFormOpen && (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Montant cible</div>
+                <input type="number" inputMode="numeric" value={objectifMontantDraft || ""} onChange={(e) => setObjectifMontantDraft(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 160 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Date cible (optionnel)</div>
+                <input type="date" value={objectifDateDraft} onChange={(e) => setObjectifDateDraft(e.target.value)} style={inputStyle} />
+              </div>
+              <button onClick={() => { if (objectifMontantDraft > 0) { setBourseObjectif({ montant: objectifMontantDraft, date: objectifDateDraft }); setObjectifFormOpen(false); } }} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+              {bourseObjectif && (
+                <button onClick={() => { setBourseObjectif(null); setObjectifFormOpen(false); }} style={{ background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 8, color: COLOR.claySoft, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Retirer l'objectif</button>
+              )}
+              <button onClick={() => setObjectifFormOpen(false)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+            </div>
+          )}
+        </Panel>
+      )}
+
       {view === "dashboard" && !adviceDismissed && bourseAdvice.length > 0 && (
         <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -9171,8 +9317,20 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               <div style={{ fontSize: 17, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(pos.valorisation)} FCFA</div>
             </div>
             <div>
-              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Allocation</div>
-              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(2) : "0.00"}%</div>
+              <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Allocation {typeof fund.targetAllocationPct === "number" && `(cible ${fund.targetAllocationPct}%)`}</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, display: "flex", alignItems: "center", gap: 6 }}>
+                {totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(2) : "0.00"}%
+                <button onClick={() => { setAllocFormFundId(allocFormFundId === fund.id ? null : fund.id); setAllocTargetDraft(fund.targetAllocationPct || 0); }} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", padding: 0, display: "flex" }} title="Définir une cible d'allocation">
+                  <Pencil size={10} />
+                </button>
+              </div>
+              {allocFormFundId === fund.id && (
+                <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center" }}>
+                  <input type="number" inputMode="numeric" value={allocTargetDraft || ""} onChange={(e) => setAllocTargetDraft(Number(e.target.value) || 0)} placeholder="ex: 30" style={{ ...inputStyle, width: 70, padding: "6px 8px", fontSize: 12 }} />
+                  <span style={{ fontSize: 11, color: COLOR.inkMuted }}>%</span>
+                  <button onClick={() => { setFunds(funds.map((f) => f.id === fund.id ? { ...f, targetAllocationPct: allocTargetDraft || undefined, updatedAt: new Date().toISOString() } : f)); setAllocFormFundId(null); }} style={{ background: COLOR.gold, border: "none", borderRadius: 6, color: "#0e1611", padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>OK</button>
+                </div>
+              )}
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Prix de revient (PRU)</div>
@@ -9188,7 +9346,14 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>VL actuelle {pos.lastValueDate && `(${dateLabelFull(pos.lastValueDate)})`}</div>
-              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(pos.currentVL)} FCFA</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, display: "flex", alignItems: "center", gap: 6 }}>
+                {fmt(pos.currentVL)} FCFA
+                {pos.lastValueDate && Math.floor((new Date(todayISO()).getTime() - new Date(pos.lastValueDate).getTime()) / 86400000) >= 3 && (
+                  <span title="VL non mise à jour depuis 3 jours ou plus" style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 20, padding: "2px 7px", fontSize: 9.5, fontFamily: "'Inter', sans-serif", color: COLOR.goldSoft, fontWeight: 600 }}>
+                    <AlertTriangle size={9} /> périmée
+                  </span>
+                )}
+              </div>
             </div>
             {pos.dayChangePct !== null && (
               <div>
@@ -9208,10 +9373,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => { setVlFormFundId(fund.id); setVlDate(todayISO()); setVlValue(pos.currentVL || 0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <TrendingUp size={12} /> Renseigner la VL du jour
             </button>
-            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); setOpNote(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Plus size={12} /> Souscription
             </button>
-            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); setOpNote(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Minus size={12} /> Rachat
             </button>
             <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
@@ -9220,10 +9385,83 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => setChartFundId(chartFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <TrendingUp size={12} /> {chartFundId === fund.id ? "Masquer" : "Voir"} la courbe
             </button>
+            <button onClick={() => { setAlertFormFundId(alertFormFundId === fund.id ? null : fund.id); setAlertVl(fund.alertThreshold?.vl || pos.currentVL || 0); setAlertDirection(fund.alertThreshold?.direction || "en dessous"); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.goldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+              <AlertTriangle size={12} /> {fund.alertThreshold ? `Alerte : VL ${fund.alertThreshold.direction} ${fmt(fund.alertThreshold.vl)}` : "Définir une alerte"}
+            </button>
+            {fund.recurringPlan ? (
+              <>
+                <button onClick={() => markRecurringDone(fund)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(95,194,152,0.12)", border: `1px solid ${COLOR.emerald}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+                  <Rocket size={12} /> Récurrent : {fmt(fund.recurringPlan.montant)} le {dateLabelFull(fund.recurringPlan.nextDate)} — Marquer fait
+                </button>
+                <button onClick={() => { setRecurringFormFundId(fund.id); setRecurringMontant(fund.recurringPlan!.montant); setRecurringFrequency(fund.recurringPlan!.frequency); setRecurringNextDate(fund.recurringPlan!.nextDate); setRecurringAccount(fund.recurringPlan!.account); }} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", padding: 4, display: "flex" }} title="Modifier la récurrence">
+                  <Pencil size={13} />
+                </button>
+                <button onClick={() => removeRecurringPlan(fund.id)} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer", padding: 4, display: "flex" }} title="Retirer la récurrence">
+                  <Trash2 size={13} />
+                </button>
+              </>
+            ) : (
+              <button onClick={() => { setRecurringFormFundId(fund.id); setRecurringMontant(0); setRecurringFrequency("Mensuelle"); setRecurringNextDate(todayISO()); setRecurringAccount(accounts[0]?.name || ""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+                <Rocket size={12} /> Planifier une récurrence
+              </button>
+            )}
             <button onClick={() => setConfirmDeleteFundId(fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: COLOR.claySoft, padding: "7px 4px", fontSize: 12, cursor: "pointer", marginLeft: "auto" }}>
               <Trash2 size={12} />
             </button>
           </div>
+
+          {alertFormFundId === fund.id && (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Prévenir si la VL passe</div>
+                <select value={alertDirection} onChange={(e) => setAlertDirection(e.target.value as any)} style={inputStyle}>
+                  <option value="en dessous">en dessous de</option>
+                  <option value="au dessus">au dessus de</option>
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Seuil (VL)</div>
+                <input type="number" inputMode="numeric" value={alertVl || ""} onChange={(e) => setAlertVl(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 130 }} />
+              </div>
+              <button onClick={() => saveAlertThreshold(fund.id)} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+              {fund.alertThreshold && (
+                <button onClick={() => { removeAlertThreshold(fund.id); setAlertFormFundId(null); }} style={{ background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 8, color: COLOR.claySoft, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Retirer l'alerte</button>
+              )}
+              <button onClick={() => setAlertFormFundId(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+            </div>
+          )}
+
+          {recurringFormFundId === fund.id && (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, padding: 12, background: COLOR.surfaceRaised, borderRadius: 8, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Montant</div>
+                <input type="number" inputMode="numeric" value={recurringMontant || ""} onChange={(e) => setRecurringMontant(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 130 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Fréquence</div>
+                <select value={recurringFrequency} onChange={(e) => setRecurringFrequency(e.target.value as any)} style={inputStyle}>
+                  <option value="Hebdomadaire">Hebdomadaire</option>
+                  <option value="Mensuelle">Mensuelle</option>
+                  <option value="Annuelle">Annuelle</option>
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Prochaine échéance</div>
+                <input type="date" value={recurringNextDate} onChange={(e) => setRecurringNextDate(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Compte</div>
+                <select value={recurringAccount} onChange={(e) => setRecurringAccount(e.target.value)} style={inputStyle}>
+                  {accounts.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                </select>
+              </div>
+              <button onClick={() => saveRecurringPlan(fund.id)} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+              <button onClick={() => setRecurringFormFundId(null)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: COLOR.inkMuted, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+              <div style={{ width: "100%", fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
+                Rappel uniquement — rien n'est prélevé automatiquement. "Marquer fait" ouvre le formulaire de souscription déjà rempli, à valider toi-même.
+              </div>
+            </div>
+          )}
 
           {chartFundId === fund.id && (
             fundChartData.length > 1 ? (
@@ -9478,7 +9716,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       <tr key={o.id}>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(o.date)}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: o.type === "Souscription" ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{o.type}</td>
-                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>{fund?.name || "(fonds supprimé)"}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
+                          {fund?.name || "(fonds supprimé)"}
+                          {o.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", marginTop: 2 }}>{o.note}</div>}
+                        </td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{o.quantite.toFixed(4)}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{fmt(o.montant)}</td>
@@ -9757,6 +9998,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 16, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", padding: 0, width: "100%", outline: "none" }} />
                   </div>
                 )}
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Note (optionnel — le pourquoi de cette opération)</div>
+                  <input value={opNote} onChange={(e) => setOpNote(e.target.value)} placeholder="ex: renforcement après baisse, prime investie…"
+                    style={{ background: "transparent", border: "none", color: COLOR.ink, fontSize: 14, fontFamily: "'Fraunces', serif", padding: 0, width: "100%", outline: "none" }} />
+                </div>
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}`, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>
                   Crée aussi une transaction {opType === "Souscription" ? "Dépense" : "Revenu"} (Productif) dans le Journal principal, et touche le solde de {opAccount || "ce compte"}.
                 </div>
@@ -9808,8 +10054,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   );
 }
 
-function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurring }: {
+function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurring, funds, fundOperations, fundDailyValues }: {
   transactions: Transaction[]; accounts: Account[]; categoryGroups: Record<string, Group>; budgets: CategoryBudget[]; recurring: RecurringTemplate[];
+  funds: Fund[]; fundOperations: FundOperation[]; fundDailyValues: FundDailyValue[];
 }) {
   const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [input, setInput] = useState("");
@@ -9911,6 +10158,10 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
           accounts: accounts.map((a) => `${a.name} : solde actuel ${fmt(accountBalance(a, transactions))} FCFA`),
           budgets: budgets.map((b) => `${b.category}: limite ${fmt(b.amount)} FCFA/mois`),
           recurring: recurring.map((r) => `${r.type} — ${r.category} — ${fmt(r.amount)} FCFA (${r.frequency}, prochaine échéance ${r.nextDate})`),
+          bourse: funds.map((f) => {
+            const pos = computeFundPosition(f.id, fundOperations, fundDailyValues);
+            return `${f.name} (${f.category}) : ${pos.qty.toFixed(4)} parts, VL actuelle ${fmt(pos.currentVL)} FCFA, valorisation ${fmt(pos.valorisation)} FCFA, investi ${fmt(Math.round(pos.costTotal))} FCFA, plus-value latente ${pos.plusValueLatente >= 0 ? "+" : ""}${fmt(Math.round(pos.plusValueLatente))} FCFA — n'affecte PAS la Valeur nette ni les comptes principaux (portefeuille séparé), sauf les transactions Journal liées aux opérations créées depuis le 22/08/2026.`;
+          }),
         }),
       }, 65000); // légèrement au-dessus des 60s alloués à la fonction serveur (vercel.json), pour ne jamais abandonner avant elle
       if (!res.ok) {
@@ -11857,10 +12108,11 @@ function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh }: {
   );
 }
 
-function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected, undoSnapshotAt, onUndoRestore, settingsLog }: {
+function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus, lastSyncedAt, onForceSync, realtimeConnected, undoSnapshotAt, onUndoRestore, settingsLog, transactions, setTransactionsTracked }: {
   getSnapshot: () => any; restore: (data: any) => void; syncCode: string; setSyncCode: (c: string) => void;
   syncStatus: "idle" | "syncing" | "synced" | "error" | "disabled"; lastSyncedAt: string | null; onForceSync: () => void; realtimeConnected: boolean;
   undoSnapshotAt: string | null; onUndoRestore: () => void; settingsLog: SettingsLogEntry[];
+  transactions: Transaction[]; setTransactionsTracked: (t: Transaction[]) => void;
 }) {
   const [confirmUndo, setConfirmUndo] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -11872,6 +12124,51 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
   const [autoBackups, setAutoBackups] = useState<{ date: string; savedAt: string; data: any }[]>(() => {
     try { return JSON.parse(localStorage.getItem("gl-auto-backups") || "[]"); } catch { return []; }
   });
+  // Détection/suppression de doublons — sur demande explicite de l'utilisateur
+  // (23/08/2026), après un cas réel où environ la moitié des transactions s'est
+  // retrouvée dupliquée sous de nouveaux identifiants (cause exacte non identifiée avec
+  // certitude, mais l'effet est net et vérifiable : même date, montant, type, catégorie,
+  // sous-catégorie, compte ET note — une combinaison bien trop précise pour être une
+  // coïncidence sur une dépense récurrente). La clé de correspondance est volontairement
+  // stricte (7 champs) pour ne jamais fusionner deux transactions réellement distinctes.
+  //
+  // IMPORTANT — scindé en deux catégories après un test qui a révélé un vrai risque :
+  // deux dépenses courantes SANS note (ex: "Cadeaux/Pourboire 2000 FCFA" le même jour)
+  // peuvent légitimement se produire deux fois le même jour sans être un doublon. Seuls
+  // les groupes avec une NOTE non vide qui coïncide sont assez fiables pour une
+  // suppression automatique (une note identique sur date+montant+catégorie+compte, ça,
+  // ça n'arrive jamais par coïncidence). Les groupes sans note sont juste listés pour
+  // vérification manuelle, jamais supprimés automatiquement.
+  const allDuplicateGroups = useMemo(() => {
+    const groups = new Map<string, Transaction[]>();
+    transactions.forEach((t) => {
+      const key = [t.date, t.type, t.amount, t.category, t.subcategory || "", t.account || "", t.payee || "", t.note || ""].join("|");
+      const arr = groups.get(key) || [];
+      arr.push(t);
+      groups.set(key, arr);
+    });
+    return Array.from(groups.values()).filter((g) => g.length > 1);
+  }, [transactions]);
+  const certainDuplicateGroups = allDuplicateGroups.filter((g) => (g[0].note || "").trim());
+  const uncertainDuplicateGroups = allDuplicateGroups.filter((g) => !(g[0].note || "").trim());
+  const duplicateGroups = certainDuplicateGroups; // conservé pour compat avec le reste du composant
+  const duplicateCount = duplicateGroups.reduce((a, g) => a + (g.length - 1), 0); // -1 par groupe : on garde toujours un exemplaire
+  const uncertainCount = uncertainDuplicateGroups.reduce((a, g) => a + (g.length - 1), 0);
+  const [confirmDedupe, setConfirmDedupe] = useState(false);
+  const [dedupeResult, setDedupeResult] = useState<number | null>(null);
+  const removeDuplicates = () => {
+    const idsToRemove = new Set<string>();
+    duplicateGroups.forEach((g) => {
+      // Garde le premier par ordre alphabétique d'id (déterministe) — les exemplaires
+      // d'un même groupe sont, par construction, identiques sur tous les champs
+      // significatifs, donc lequel exactement on garde n'a pas d'impact sur les chiffres.
+      const sorted = [...g].sort((a, b) => a.id.localeCompare(b.id));
+      sorted.slice(1).forEach((t) => idsToRemove.add(t.id));
+    });
+    setTransactionsTracked(transactions.filter((t) => !idsToRemove.has(t.id)));
+    setDedupeResult(idsToRemove.size);
+    setConfirmDedupe(false);
+  };
   useEffect(() => {
     const refresh = () => { try { setAutoBackups(JSON.parse(localStorage.getItem("gl-auto-backups") || "[]")); } catch {} };
     document.addEventListener("visibilitychange", refresh);
@@ -12013,6 +12310,86 @@ function SauvegardeTab({ getSnapshot, restore, syncCode, setSyncCode, syncStatus
           </>
         )}
       </Panel>
+
+      <Panel title="Doublons de transactions" subtitle="Détecte les transactions identiques sur tous les champs significatifs (date, montant, type, catégorie, sous-catégorie, compte, bénéficiaire, note) — jamais deux transactions simplement similaires.">
+        {allDuplicateGroups.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: COLOR.inkMuted, fontStyle: "italic" }}>Aucun doublon détecté pour l'instant.</div>
+        ) : duplicateGroups.length === 0 ? null : (
+          <div>
+            <div style={{ fontSize: 13, color: COLOR.ink, marginBottom: 12 }}>
+              <b style={{ color: COLOR.claySoft }}>{duplicateCount} transaction{duplicateCount > 1 ? "s" : ""} en double</b> détectée{duplicateCount > 1 ? "s" : ""}, répartie{duplicateCount > 1 ? "s" : ""} sur {duplicateGroups.length} groupe{duplicateGroups.length > 1 ? "s" : ""}.
+            </div>
+            <div style={{ maxHeight: 200, overflowY: "auto", marginBottom: 14, border: `1px solid ${COLOR.hairline}`, borderRadius: 8 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                <thead><tr>{["Date", "Montant", "Catégorie", "Compte", "Note", "Exemplaires"].map((h) => <th key={h} style={{ textAlign: "left", padding: "6px 8px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, position: "sticky", top: 0, background: COLOR.surface }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {duplicateGroups.slice(0, 100).map((g, i) => {
+                    const t = g[0];
+                    return (
+                      <tr key={i}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(t.date)}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}` }}>{t.category}{t.subcategory ? ` / ${t.subcategory}` : ""}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{t.account || "—"}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted, fontStyle: "italic" }}>{t.note || t.payee || "—"}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.claySoft, fontWeight: 600 }}>×{g.length}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {duplicateGroups.length > 100 && <div style={{ padding: 8, fontSize: 11, color: COLOR.inkMuted, fontStyle: "italic" }}>… et {duplicateGroups.length - 100} groupe{duplicateGroups.length - 100 > 1 ? "s" : ""} de plus.</div>}
+            </div>
+            <button onClick={() => setConfirmDedupe(true)} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(193,84,63,0.14)", border: `1px solid ${COLOR.clay}`, borderRadius: 8, color: COLOR.claySoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
+              <Trash2 size={15} /> Supprimer les {duplicateCount} doublon{duplicateCount > 1 ? "s" : ""} (garde un exemplaire de chaque)
+            </button>
+          </div>
+        )}
+        {uncertainDuplicateGroups.length > 0 && (
+          <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px dashed ${COLOR.hairline}` }}>
+            <div style={{ fontSize: 12.5, color: COLOR.ink, marginBottom: 4 }}>
+              <b>{uncertainCount} transaction{uncertainCount > 1 ? "s" : ""} de plus</b> partage{uncertainCount > 1 ? "nt" : ""} exactement date/montant/catégorie/compte avec une autre — mais sans note pour trancher avec certitude (ex: deux pourboires de 2000 FCFA le même jour peuvent être deux vraies dépenses distinctes).
+            </div>
+            <div style={{ fontSize: 11, color: COLOR.inkMuted, marginBottom: 10, fontStyle: "italic" }}>
+              Pas supprimées automatiquement — à vérifier toi-même dans le Journal si tu penses que certaines sont vraiment en double.
+            </div>
+            <div style={{ maxHeight: 160, overflowY: "auto", border: `1px solid ${COLOR.hairline}`, borderRadius: 8 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <tbody>
+                  {uncertainDuplicateGroups.slice(0, 60).map((g, i) => {
+                    const t = g[0];
+                    return (
+                      <tr key={i}>
+                        <td style={{ padding: "5px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{dateLabelFull(t.date)}</td>
+                        <td style={{ padding: "5px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(t.amount)}</td>
+                        <td style={{ padding: "5px 8px", borderBottom: `1px solid ${COLOR.hairline}` }}>{t.category}{t.subcategory ? ` / ${t.subcategory}` : ""}</td>
+                        <td style={{ padding: "5px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{t.account}</td>
+                        <td style={{ padding: "5px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.claySoft }}>×{g.length}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {uncertainDuplicateGroups.length > 60 && <div style={{ padding: 8, fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic" }}>… et {uncertainDuplicateGroups.length - 60} de plus.</div>}
+            </div>
+          </div>
+        )}
+        {dedupeResult !== null && (
+          <div style={{ marginTop: 14, background: "rgba(95,194,152,0.1)", border: `1px solid ${COLOR.emerald}`, borderRadius: 10, padding: "10px 16px", fontSize: 12.5, color: COLOR.emeraldSoft, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>{dedupeResult} transaction{dedupeResult > 1 ? "s" : ""} en double supprimée{dedupeResult > 1 ? "s" : ""}.</span>
+            <button onClick={() => setDedupeResult(null)} style={{ background: "transparent", border: "none", color: COLOR.emeraldSoft, cursor: "pointer" }}><X size={14} /></button>
+          </div>
+        )}
+      </Panel>
+
+      <ConfirmDialog
+        open={confirmDedupe}
+        title="Supprimer les doublons ?"
+        message={`Cette action est définitive. ${duplicateCount} transaction${duplicateCount > 1 ? "s" : ""} identique${duplicateCount > 1 ? "s" : ""} en tout point (date, montant, catégorie, compte, note...) sera${duplicateCount > 1 ? "ont" : ""} supprimée${duplicateCount > 1 ? "s" : ""} — un seul exemplaire de chaque est conservé, ta Valeur nette baissera en conséquence.`}
+        onConfirm={removeDuplicates}
+        onCancel={() => setConfirmDedupe(false)}
+      />
+
       <Panel title="Sauvegarde" subtitle="Toutes tes données vivent uniquement dans ce navigateur — exporte-les régulièrement pour ne rien perdre">
         <button onClick={download} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>
           <Download size={15} /> Télécharger une sauvegarde complète (.json)
@@ -13715,6 +14092,10 @@ export default function GrandLivre() {
   const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity, canSaveGated);
   const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {}, canSaveGated);
   const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0, canSaveGated);
+  // Objectif de portefeuille Bourse — sur demande explicite de l'utilisateur
+  // (23/08/2026). Champ scalaire synchronisé au niveau racine, câblé à l'identique de
+  // monthlyObjective (le motif déjà éprouvé) pour ne prendre aucun risque.
+  const [bourseObjectif, setBourseObjectif] = usePersistentState<{ montant: number; date: string } | null>("gl-bourse-objectif", null, canSaveGated);
   const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, canSaveGated);
   const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, canSaveGated);
   const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
@@ -13908,13 +14289,13 @@ export default function GrandLivre() {
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
     };
   });
   const syncCodeRef = useRef(syncCode);
@@ -13951,7 +14332,7 @@ export default function GrandLivre() {
         categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
-        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds,
+        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds, bourseObjectif: snap.bourseObjectif,
       };
       list = list.filter((b) => b.date !== todayKey);
       list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
@@ -14046,6 +14427,7 @@ export default function GrandLivre() {
       const finalEnvelopeCap = localIsNewer || typeof d.envelopeCap !== "number" ? s.envelopeCap : d.envelopeCap;
       const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? s.monthlyObjective : d.monthlyObjective;
       const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? s.includeGrundfosVoiture : d.includeGrundfosVoiture;
+      const finalBourseObjectif = localIsNewer || typeof d.bourseObjectif === "undefined" ? s.bourseObjectif : d.bourseObjectif;
 
       const localChanged = !eq(mergedTransactions, s.transactions) || !eq(mergedLoans, s.loans) || !eq(mergedBudgets, s.budgets)
         || !eq(mergedGoals, s.goals) || !eq(mergedRecurring, s.recurring) || !eq(mergedRules, s.rules) || !eq(mergedAccounts, s.accounts)
@@ -14053,14 +14435,14 @@ export default function GrandLivre() {
         || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
         || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds) || !eq(mergedDeletedFundOperationIds, s.deletedFundOperationIds)
-        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture;
+        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture || !eq(finalBourseObjectif, s.bourseObjectif);
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
         || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds) || !eq(mergedDeletedFundOperationIds, d.deletedFundOperationIds)
-        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture;
+        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture || !eq(finalBourseObjectif, d.bourseObjectif);
 
       if (localChanged) {
         skipNextPush.current = true;
@@ -14088,6 +14470,7 @@ export default function GrandLivre() {
         setFundDailyValues(mergedFundDailyValues);
         setDeletedFundIds(mergedDeletedFundIds);
         setDeletedFundOperationIds(mergedDeletedFundOperationIds);
+        setBourseObjectif(finalBourseObjectif);
         // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
         // une synchronisation en attente se déclenche tout de suite après, elle reparte
         // bien de ce résultat fusionné plutôt que de l'ancien état.
@@ -14098,7 +14481,7 @@ export default function GrandLivre() {
           activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif,
         };
       }
 
@@ -14112,7 +14495,7 @@ export default function GrandLivre() {
           activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif,
         });
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -14150,7 +14533,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -14161,7 +14544,7 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
@@ -14232,7 +14615,7 @@ export default function GrandLivre() {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
+      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
     if (data.transactions) setTransactions(data.transactions);
@@ -14257,6 +14640,7 @@ export default function GrandLivre() {
     if (data.fundOperations) setFundOperations(data.fundOperations);
     if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
     if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
+    if (typeof data.bourseObjectif !== "undefined") setBourseObjectif(data.bourseObjectif);
   };
 
   if (!allLoaded) {
@@ -14427,8 +14811,8 @@ export default function GrandLivre() {
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
           {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
-          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} isMobile={isMobile} />}
-          {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} />}
+          {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} bourseObjectif={bourseObjectif} setBourseObjectif={setBourseObjectif} isMobile={isMobile} />}
+          {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} funds={funds} fundOperations={fundOperations} fundDailyValues={fundDailyValues} />}
           {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
@@ -14439,10 +14823,12 @@ export default function GrandLivre() {
           {tab === "export" && <ExportTab filtered={filtered} filters={filters} setFilters={setFilters} allMonths={allMonths} />}
           {tab === "sauvegarde" && (
             <SauvegardeTab
+              transactions={transactions}
+              setTransactionsTracked={setTransactionsTracked}
               getSnapshot={() => ({
                 transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
                 activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds,
+                funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif,
               })}
               restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
@@ -14472,6 +14858,7 @@ export default function GrandLivre() {
                 if (data.fundOperations) setFundOperations(data.fundOperations);
                 if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
                 if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
+                if (typeof data.bourseObjectif !== "undefined") setBourseObjectif(data.bourseObjectif);
                 setPreRestoreSnapshot(null);
                 setPreRestoreSnapshotAt(null);
               }}
