@@ -281,6 +281,11 @@ interface RecurringTemplate {
   nextDate: string;
   account?: string;
   payee?: string;
+  updatedAt?: string; // ajouté le 23/08/2026 — sans lui, mergeById fait TOUJOURS gagner
+  // la version distante par défaut (voir sa logique : si aucun des deux côtés n'a
+  // d'updatedAt, c'est "item" — le distant — qui l'emporte inconditionnellement), donc
+  // toute modification locale se faisait silencieusement écraser au cycle de synchro
+  // suivant. Même bug, même cause, que celui déjà corrigé sur Account.updatedAt.
 }
 // Portefeuille Bourse / FCP — sur demande explicite de l'utilisateur (21/08/2026),
 // inspiré d'un relevé NSIA Asset Management. Reconstruite le 21/08/2026 après un
@@ -12044,7 +12049,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
   const suggestions = fixedCharges.filter((r) => !existingRecurringCategories.has(r.poste.split("::")[0]));
 
   const addFromSuggestion = (r: { poste: string; amount: number }) => {
-    setRecurring([...recurring, { category: r.poste.split("::")[0], type: "Dépense", amount: Math.round(r.amount), frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name, id: uid("r") }]);
+    setRecurring([...recurring, { category: r.poste.split("::")[0], type: "Dépense", amount: Math.round(r.amount), frequency: "Mensuelle", nextDate: todayISO(), account: accounts[0]?.name, id: uid("r"), updatedAt: new Date().toISOString() }]);
   };
 
   const today = todayISO();
@@ -12054,10 +12059,10 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
   const add = () => {
     if (!form.category || form.amount <= 0) return;
     if (editingId) {
-      setRecurring(recurring.map((r) => (r.id === editingId ? { ...form, id: editingId } : r)));
+      setRecurring(recurring.map((r) => (r.id === editingId ? { ...form, id: editingId, updatedAt: new Date().toISOString() } : r)));
       setEditingId(null);
     } else {
-      setRecurring([...recurring, { ...form, id: uid("r") }]);
+      setRecurring([...recurring, { ...form, id: uid("r"), updatedAt: new Date().toISOString() }]);
     }
     resetForm();
     setAdding(false);
@@ -12071,7 +12076,7 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 
   const enregistrer = (r: RecurringTemplate) => {
     setTransactions([...transactions, { id: uid(), date: r.nextDate, time: nowTime(), category: r.category, type: r.type, amount: r.amount, account: r.account, payee: r.payee }]);
-    setRecurring(recurring.map((x) => (x.id === r.id ? { ...x, nextDate: addInterval(x.nextDate, x.frequency) } : x)));
+    setRecurring(recurring.map((x) => (x.id === r.id ? { ...x, nextDate: addInterval(x.nextDate, x.frequency), updatedAt: new Date().toISOString() } : x)));
   };
 
   return (
