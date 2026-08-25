@@ -177,6 +177,29 @@ async function pushRemoteState(syncCode: string, data: any): Promise<boolean> {
   } catch { return false; }
 }
 
+// Vérif "légère" (quelques octets — juste l'horodatage, jamais la colonne "data" qui
+// contient tout l'état de l'app) utilisée UNIQUEMENT par le sondage de secours
+// périodique ci-dessous, qui — contrairement au temps réel/édition/reconnexion — se
+// déclenche sans aucune preuve qu'un changement a réellement eu lieu. Corrigé le
+// 25/08/2026, dans la continuité directe du correctif du 23/08 (poll ramené de 20s à
+// 3 min) : ce sondage retéléchargeait encore le payload complet à chaque cycle, faute
+// de synchro différentielle — exactement la cause identifiée du dépassement de quota
+// Egress. Cette vérification comble ce trou : elle ne coûte quasiment rien, et le
+// payload complet n'est récupéré (via runSync) que si l'horodatage distant a réellement
+// avancé depuis la dernière synchro connue.
+async function fetchRemoteUpdatedAt(syncCode: string): Promise<string | null> {
+  if (!SYNC_ENABLED || !syncCode) return null;
+  try {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/app_state?sync_code=eq.${encodeURIComponent(syncCode)}&select=updated_at`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Cache-Control": "no-cache" },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows?.[0]?.updated_at || null;
+  } catch { return null; }
+}
+
 // Abonnement en temps réel (WebSocket) aux changements de la ligne sync_code, via
 // @supabase/supabase-js chargé dynamiquement — n'existe pas dans l'aperçu Claude (fallback
 // silencieux vers le mode "pull au chargement + push différé" déjà en place, qui continue
@@ -14929,6 +14952,20 @@ export default function GrandLivre() {
   const localChangeTrackInit = useRef(false);
   const syncInFlight = useRef(false);
   const syncQueued = useRef(false);
+  // Dernier horodatage distant confirmé — alimenté par runSync ci-dessous, consulté
+  // par le sondage de secours périodique (fetchRemoteUpdatedAt) pour décider s'il vaut
+  // la peine de retélécharger le payload complet.
+  const lastRemoteUpdatedAtRef = useRef<string>("");
+  // Compteur de cycles du sondage périodique — sur demande explicite de l'utilisateur
+  // (25/08/2026), après avoir repéré un vrai trou dans l'optimisation précédente : ce
+  // sondage servait AUSSI de filet de rattrapage pour une modification locale dont le
+  // push aurait échoué (coupure réseau passagère pendant une édition, par exemple) —
+  // rattrapage perdu dès lors que le sondage sautait carrément runSync() faute de
+  // changement distant détecté. Un vrai cycle complet, sans passer par la vérification
+  // légère, est donc forcé toutes les 4 itérations (~12 minutes avec un sondage à 3
+  // minutes) — assez rare pour ne pas annuler l'économie de bande passante, assez
+  // fréquent pour qu'une modification coincée ne reste jamais bloquée longtemps.
+  const pollCycleRef = useRef(0);
 
   // Le moteur lui-même : AUCUNE dépendance (tableau vide) — reste la même fonction sur
   // toute la durée de vie du composant, donc toujours sûr à passer à n'importe quel
@@ -14944,6 +14981,7 @@ export default function GrandLivre() {
       const s = syncedRef.current;
       const remote = await fetchRemoteState(code);
       if (!remote) { setSyncStatus("error"); return; }
+      if (remote.updatedAt) lastRemoteUpdatedAtRef.current = remote.updatedAt;
       const d = remote.data || {};
       const eq = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -15072,6 +15110,7 @@ export default function GrandLivre() {
         setSyncStatus("synced");
         setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
       } else {
+        const pushedAt = new Date().toISOString();
         const ok = await pushRemoteState(code, {
           transactions: mergedTransactions, categoryGroups: mergedCategoryGroups, categoryScope: mergedCategoryScope, rules: mergedRules,
           loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
@@ -15080,6 +15119,10 @@ export default function GrandLivre() {
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
           deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds, scalarTimestamps: mergedScalarTimestamps,
         });
+        // Le serveur horodate le push avec SA propre valeur (voir pushRemoteState) —
+        // on l'anticipe ici pour que le sondage de secours périodique ne considère pas
+        // notre propre push comme "un changement distant" au prochain cycle.
+        if (ok) lastRemoteUpdatedAtRef.current = pushedAt;
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
       }
@@ -15091,6 +15134,29 @@ export default function GrandLivre() {
       // seule fois, avec les données les plus fraîches (pas d'accumulation infinie).
       if (syncQueued.current) { syncQueued.current = false; runSync(); }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Enrobe runSync pour le sondage périodique de secours : vérifie d'abord l'horodatage
+  // distant (quelques octets) avant de lancer le cycle complet (qui, lui, retélécharge
+  // tout le payload). Les autres déclencheurs (édition, retour au premier plan,
+  // reconnexion, temps réel) appellent runSync directement, sans détour par cette
+  // vérification — ils réagissent déjà à un événement concret, contrairement à ce
+  // sondage qui se déclenche à l'aveugle toutes les 3 minutes.
+  const pollForRemoteChange = React.useCallback(async () => {
+    const code = syncCodeRef.current;
+    if (!SYNC_ENABLED || !code) return;
+    pollCycleRef.current += 1;
+    // Un cycle sur quatre, on ignore la vérification légère et on force un runSync()
+    // complet — c'est lui, et lui seul, qui sait retenter le push d'une modification
+    // locale restée coincée. La vérification légère ne sait détecter qu'un changement
+    // DISTANT, jamais un push LOCAL en attente.
+    const forceFullCycle = pollCycleRef.current % 4 === 0;
+    if (!forceFullCycle) {
+      const remoteTs = await fetchRemoteUpdatedAt(code);
+      if (remoteTs && lastRemoteUpdatedAtRef.current && new Date(remoteTs) <= new Date(lastRemoteUpdatedAtRef.current)) return;
+    }
+    runSync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -15147,7 +15213,7 @@ export default function GrandLivre() {
     // raison de tourner toutes les 20 secondes même quand rien ne change, et c'était la
     // source la plus probable de la surconsommation (l'app entière est retéléchargée à
     // chaque cycle, faute de synchro différentielle).
-    const interval = setInterval(runSync, 180000);
+    const interval = setInterval(pollForRemoteChange, 180000);
     return () => {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
