@@ -7796,6 +7796,38 @@ function GlobalReminderBanner({ transactions, dismissedDate, setDismissedDate, c
 // RAPPROCHEMENT BANCAIRE — pointer les transactions face au relevé bancaire
 // réel, compte par compte, pour repérer tout écart résiduel après import.
 // ============================================================
+// Rappel du soir pour exporter/importer le JSON — sur demande explicite de
+// l'utilisateur (23/08/2026), qui a choisi de travailler en local sur le téléphone et
+// d'apporter chaque soir une sauvegarde manuelle sur l'ordinateur (plutôt que la
+// synchro automatique en continu, pour rester loin du quota Supabase). Même motif que
+// GlobalReminderBanner juste au-dessus (rejet valable pour la journée seulement).
+function EveningExportReminder({ dismissedDate, setDismissedDate, onDownload }: {
+  dismissedDate: string | null; setDismissedDate: (d: string) => void; onDownload: () => void;
+}) {
+  const today = todayISO();
+  const hourNow = new Date().getHours();
+  // 22h — sur demande explicite de l'utilisateur (23/08/2026, ajusté depuis 18h).
+  if (hourNow < 22 || dismissedDate === today) return null;
+
+  return (
+    <div className="gl-noprint" style={{
+      display: "flex", alignItems: "center", gap: 12, background: "rgba(95,194,152,0.1)", border: `1px solid ${COLOR.emerald}`,
+      borderRadius: 10, padding: "12px 16px", marginBottom: 16,
+    }}>
+      <Download size={17} color={COLOR.emeraldSoft} style={{ flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: COLOR.ink }}>
+        <strong style={{ color: COLOR.emeraldSoft }}>C'est l'heure de la sauvegarde du soir</strong> — télécharge le JSON depuis ce téléphone, puis charge-le sur l'ordinateur pour garder les deux à jour.
+      </div>
+      <button onClick={onDownload} style={{ background: COLOR.emerald, border: "none", borderRadius: 6, color: COLOR.bg, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>
+        Télécharger
+      </button>
+      <button onClick={() => setDismissedDate(today)} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex", flexShrink: 0 }} title="Masquer pour aujourd'hui">
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+
 function RapprochementTab({ transactions, setTransactions, accounts }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[];
 }) {
@@ -8652,7 +8684,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   deletedFundOperationIds: Record<string, string>; setDeletedFundOperationIds: (d: Record<string, string>) => void;
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void;
   categoryGroups: Record<string, Group>; setCategoryGroups: (g: Record<string, Group>) => void;
-  bourseObjectif: { montant: number; date: string } | null; setBourseObjectif: (o: { montant: number; date: string } | null) => void;
+  bourseObjectif: { montant: number; date: string; updatedAt?: string } | null; setBourseObjectif: (o: { montant: number; date: string; updatedAt?: string } | null) => void;
   isMobile: boolean;
 }) {
   // Bascule Tableau de bord / Journal FCP — sur demande explicite de l'utilisateur
@@ -9334,7 +9366,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Date cible (optionnel)</div>
                 <input type="date" value={objectifDateDraft} onChange={(e) => setObjectifDateDraft(e.target.value)} style={inputStyle} />
               </div>
-              <button onClick={() => { if (objectifMontantDraft > 0) { setBourseObjectif({ montant: objectifMontantDraft, date: objectifDateDraft }); setObjectifFormOpen(false); } }} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+              <button onClick={() => { if (objectifMontantDraft > 0) { setBourseObjectif({ montant: objectifMontantDraft, date: objectifDateDraft, updatedAt: new Date().toISOString() }); setObjectifFormOpen(false); } }} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
               {bourseObjectif && (
                 <button onClick={() => { setBourseObjectif(null); setObjectifFormOpen(false); }} style={{ background: "transparent", border: `1px solid ${COLOR.clay}`, borderRadius: 8, color: COLOR.claySoft, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Retirer l'objectif</button>
               )}
@@ -13994,7 +14026,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} scope="jour" />
         <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} scope="mois" />
       </div>
-      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
+      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetail({ mode: "today", anchor: today })} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
@@ -14576,13 +14608,39 @@ export default function GrandLivre() {
   // Objectif de portefeuille Bourse — sur demande explicite de l'utilisateur
   // (23/08/2026). Champ scalaire synchronisé au niveau racine, câblé à l'identique de
   // monthlyObjective (le motif déjà éprouvé) pour ne prendre aucun risque.
-  const [bourseObjectif, setBourseObjectif] = usePersistentState<{ montant: number; date: string } | null>("gl-bourse-objectif", null, canSaveGated);
+  const [bourseObjectif, setBourseObjectif] = usePersistentState<{ montant: number; date: string; updatedAt?: string } | null>("gl-bourse-objectif", null, canSaveGated);
+  // Horodatages propres à chaque champ scalaire simple (envelopeCap, monthlyObjective,
+  // includeGrundfosVoiture) — sur demande explicite de l'utilisateur (23/08/2026), qui
+  // avait repéré (sur bourseObjectif, corrigé juste au-dessus) que le drapeau global
+  // "localIsNewer" pouvait faire perdre une modification qui venait pourtant d'être
+  // faite. Un seul champ synchronisé (plutôt que trois) pour limiter le câblage — un
+  // Record { nomDuChamp: horodatageISO } que chaque écriture met à jour pour SA propre
+  // clé, comparé directement entre deux appareils au lieu de passer par un état global.
+  const [scalarTimestamps, setScalarTimestamps] = usePersistentState<Record<string, string>>("gl-scalar-timestamps", {}, canSaveGated);
   const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, canSaveGated);
   const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, canSaveGated);
   const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
   const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
   const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
   const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
+  const [dismissedExportReminderDate, setDismissedExportReminderDate] = usePersistentState<string | null>("gl-dismissed-export-reminder-date", null);
+  // Fonction de snapshot partagée entre SauvegardeTab et le rappel du soir
+  // (EveningExportReminder), pour ne pas dupliquer la construction de l'objet à deux
+  // endroits — sur demande explicite de l'utilisateur (23/08/2026).
+  const getSnapshotRoot = () => ({
+    transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
+    activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+    funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
+  });
+  const downloadBackupNow = () => {
+    const data = getSnapshotRoot();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `grand-livre-sauvegarde-${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const [customDepSubcategories, setCustomDepSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-dep-subcats", depSubcategories, canSaveGated);
   const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, canSaveGated);
   CUSTOM_DEP_SUBCATS = customDepSubcategories;
@@ -14618,10 +14676,18 @@ export default function GrandLivre() {
   const setMonthlyObjectiveLogged = (next: number) => {
     if (next !== monthlyObjective) logChange(`Objectif de dépenses mensuel : ${fmt(monthlyObjective)} → ${fmt(next)} FCFA`);
     setMonthlyObjective(next);
+    setScalarTimestamps({ ...scalarTimestamps, monthlyObjective: new Date().toISOString() });
   };
   const setIncludeGrundfosVoitureLogged = (next: boolean) => {
     if (next !== includeGrundfosVoiture) logChange(`GRUNDFOS dans les charges : ${includeGrundfosVoiture ? "Inclus" : "Exclu"} → ${next ? "Inclus" : "Exclu"}`);
     setIncludeGrundfosVoiture(next);
+    setScalarTimestamps({ ...scalarTimestamps, includeGrundfosVoiture: new Date().toISOString() });
+  };
+  // Corrigé le 23/08/2026 — même besoin d'horodatage propre que les deux wrappers
+  // au-dessus, envelopeCap n'avait pas encore de wrapper dédié.
+  const setEnvelopeCapLogged = (next: number) => {
+    setEnvelopeCap(next);
+    setScalarTimestamps({ ...scalarTimestamps, envelopeCap: new Date().toISOString() });
   };
   const setCategoryScopeLogged = (next: Record<string, Scope>) => {
     Object.keys(next).forEach((k) => {
@@ -14774,13 +14840,13 @@ export default function GrandLivre() {
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
+    customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
-      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
+      customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
     };
   });
   const syncCodeRef = useRef(syncCode);
@@ -14817,7 +14883,7 @@ export default function GrandLivre() {
         categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
-        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds, bourseObjectif: snap.bourseObjectif, deletedAccountIds: snap.deletedAccountIds,
+        funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds, bourseObjectif: snap.bourseObjectif, deletedAccountIds: snap.deletedAccountIds, scalarTimestamps: snap.scalarTimestamps,
       };
       list = list.filter((b) => b.date !== todayKey);
       list.unshift({ date: todayKey, savedAt: new Date().toISOString(), data });
@@ -14910,10 +14976,39 @@ export default function GrandLivre() {
       const mergedCustomDep = d.customDepSubcategories ? { ...d.customDepSubcategories, ...s.customDepSubcategories } : s.customDepSubcategories;
       const mergedCustomRev = d.customRevSubcategories ? { ...d.customRevSubcategories, ...s.customRevSubcategories } : s.customRevSubcategories;
 
-      const finalEnvelopeCap = localIsNewer || typeof d.envelopeCap !== "number" ? s.envelopeCap : d.envelopeCap;
-      const finalMonthlyObjective = localIsNewer || typeof d.monthlyObjective !== "number" ? s.monthlyObjective : d.monthlyObjective;
-      const finalIncludeGrundfos = localIsNewer || typeof d.includeGrundfosVoiture !== "boolean" ? s.includeGrundfosVoiture : d.includeGrundfosVoiture;
-      const finalBourseObjectif = localIsNewer || typeof d.bourseObjectif === "undefined" ? s.bourseObjectif : d.bourseObjectif;
+      // Corrigé le 23/08/2026 — même principe que finalBourseObjectif juste en dessous :
+      // compare l'horodatage propre à CHAQUE champ (scalarTimestamps) au lieu du
+      // drapeau global "localIsNewer", fragile face aux décalages d'horloge et à
+      // l'ordre des cycles de synchro (déjà signalé dans le commentaire du moteur de
+      // synchro plus haut). "localIsNewer" reste défini pour d'éventuels autres usages,
+      // mais n'est plus utilisé pour ces trois champs précis.
+      const mergedScalarTimestamps = d.scalarTimestamps ? { ...d.scalarTimestamps, ...s.scalarTimestamps } : s.scalarTimestamps;
+      const scalarWins = (key: string) => {
+        const sT = s.scalarTimestamps?.[key] ? new Date(s.scalarTimestamps[key]).getTime() : -1;
+        const dT = d.scalarTimestamps?.[key] ? new Date(d.scalarTimestamps[key]).getTime() : -1;
+        if (sT === -1 && dT === -1) return localIsNewer; // ni l'un ni l'autre n'a jamais été horodaté — retombe sur l'ancien comportement, pour ne rien casser sur des données existantes
+        return sT >= dT;
+      };
+      const finalEnvelopeCap = typeof d.envelopeCap !== "number" ? s.envelopeCap : (scalarWins("envelopeCap") ? s.envelopeCap : d.envelopeCap);
+      const finalMonthlyObjective = typeof d.monthlyObjective !== "number" ? s.monthlyObjective : (scalarWins("monthlyObjective") ? s.monthlyObjective : d.monthlyObjective);
+      const finalIncludeGrundfos = typeof d.includeGrundfosVoiture !== "boolean" ? s.includeGrundfosVoiture : (scalarWins("includeGrundfosVoiture") ? s.includeGrundfosVoiture : d.includeGrundfosVoiture);
+      // Corrigé le 23/08/2026 : ne dépend plus du drapeau global "localIsNewer" (déjà
+      // signalé comme fragile dans le commentaire du moteur de synchro plus haut — un
+      // horodatage global pour TOUT l'état, comparé à un seul ref, est sensible aux
+      // petits décalages d'horloge entre appareils et à l'ordre exact des cycles de
+      // synchro). Compare directement les DEUX horodatages internes à bourseObjectif
+      // lui-même — chaque appareil timestampe SA propre modification à l'intérieur de
+      // l'objet, donc la comparaison ne dépend plus que de "lequel des deux objets a
+      // été modifié en dernier", sans passer par un état global partagé et fragile.
+      const finalBourseObjectif = (() => {
+        if (typeof d.bourseObjectif === "undefined") return s.bourseObjectif;
+        if (!s.bourseObjectif && !d.bourseObjectif) return null;
+        if (!s.bourseObjectif) return d.bourseObjectif;
+        if (!d.bourseObjectif) return s.bourseObjectif;
+        const sTime = s.bourseObjectif.updatedAt ? new Date(s.bourseObjectif.updatedAt).getTime() : 0;
+        const dTime = d.bourseObjectif.updatedAt ? new Date(d.bourseObjectif.updatedAt).getTime() : 0;
+        return sTime >= dTime ? s.bourseObjectif : d.bourseObjectif;
+      })();
 
       const localChanged = !eq(mergedTransactions, s.transactions) || !eq(mergedLoans, s.loans) || !eq(mergedBudgets, s.budgets)
         || !eq(mergedGoals, s.goals) || !eq(mergedRecurring, s.recurring) || !eq(mergedRules, s.rules) || !eq(mergedAccounts, s.accounts)
@@ -14921,14 +15016,14 @@ export default function GrandLivre() {
         || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
         || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds) || !eq(mergedDeletedFundOperationIds, s.deletedFundOperationIds)
-        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture || !eq(finalBourseObjectif, s.bourseObjectif) || !eq(mergedDeletedAccountIds, s.deletedAccountIds);
+        || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture || !eq(finalBourseObjectif, s.bourseObjectif) || !eq(mergedDeletedAccountIds, s.deletedAccountIds) || !eq(mergedScalarTimestamps, s.scalarTimestamps);
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
         || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
         || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds) || !eq(mergedDeletedFundOperationIds, d.deletedFundOperationIds)
-        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture || !eq(finalBourseObjectif, d.bourseObjectif) || !eq(mergedDeletedAccountIds, d.deletedAccountIds);
+        || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture || !eq(finalBourseObjectif, d.bourseObjectif) || !eq(mergedDeletedAccountIds, d.deletedAccountIds) || !eq(mergedScalarTimestamps, d.scalarTimestamps);
 
       if (localChanged) {
         skipNextPush.current = true;
@@ -14958,6 +15053,7 @@ export default function GrandLivre() {
         setDeletedFundIds(mergedDeletedFundIds);
         setDeletedFundOperationIds(mergedDeletedFundOperationIds);
         setBourseObjectif(finalBourseObjectif);
+        setScalarTimestamps(mergedScalarTimestamps);
         // Garde le ref à jour immédiatement (avant même le prochain rendu), pour que si
         // une synchronisation en attente se déclenche tout de suite après, elle reparte
         // bien de ce résultat fusionné plutôt que de l'ancien état.
@@ -14968,7 +15064,7 @@ export default function GrandLivre() {
           activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds, scalarTimestamps: mergedScalarTimestamps,
         };
       }
 
@@ -14982,7 +15078,7 @@ export default function GrandLivre() {
           activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
-          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds,
+          deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds, scalarTimestamps: mergedScalarTimestamps,
         });
         setSyncStatus(ok ? "synced" : "error");
         if (ok) setLastSyncedAt(new Date().toLocaleTimeString("fr-FR"));
@@ -15020,7 +15116,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -15031,18 +15127,27 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
-  // plan de l'app, et un sondage toutes les 20 secondes en dernier recours.
+  // plan de l'app, et un sondage toutes les 3 minutes en dernier recours (ramené de 20
+  // secondes le 23/08/2026, voir commentaire plus bas).
   useEffect(() => {
     if (!allLoaded || !SYNC_ENABLED || !syncCode) return;
     const onOnline = () => runSync();
     const onVisible = () => { if (document.visibilityState === "visible") runSync(); };
     window.addEventListener("online", onOnline);
     document.addEventListener("visibilitychange", onVisible);
-    const interval = setInterval(runSync, 20000);
+    // Sondage de secours — ramené de 20s à 3 minutes le 23/08/2026, sur demande
+    // explicite de l'utilisateur après un dépassement de quota Supabase (Egress à
+    // 802%). Le temps réel (WebSocket) et les autres déclencheurs (édition, retour au
+    // premier plan, reconnexion réseau) couvrent déjà l'essentiel des cas ; ce sondage
+    // n'est qu'un filet de sécurité en cas de notification manquée — il n'avait aucune
+    // raison de tourner toutes les 20 secondes même quand rien ne change, et c'était la
+    // source la plus probable de la surconsommation (l'app entière est retéléchargée à
+    // chaque cycle, faute de synchro différentielle).
+    const interval = setInterval(runSync, 180000);
     return () => {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
@@ -15102,7 +15207,7 @@ export default function GrandLivre() {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
       activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
+      funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
     if (data.transactions) setTransactions(data.transactions);
@@ -15129,6 +15234,7 @@ export default function GrandLivre() {
     if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
     if (data.deletedAccountIds) setDeletedAccountIds(data.deletedAccountIds);
     if (typeof data.bourseObjectif !== "undefined") setBourseObjectif(data.bourseObjectif);
+    if (data.scalarTimestamps) setScalarTimestamps(data.scalarTimestamps);
   };
 
   if (!allLoaded) {
@@ -15241,6 +15347,7 @@ export default function GrandLivre() {
 
         <main className="gl-print-full" style={{ maxWidth: 1180, padding: isMobile ? "16px 14px 100px 14px" : "24px 32px 60px 32px" }}>
           <GlobalReminderBanner transactions={transactions} dismissedDate={dismissedReminderDate} setDismissedDate={setDismissedReminderDate} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
+          <EveningExportReminder dismissedDate={dismissedExportReminderDate} setDismissedDate={setDismissedExportReminderDate} onDownload={downloadBackupNow} />
           {tab !== "saisie" && (
             <div className="gl-noprint" style={{ marginBottom: 20 }}>
               {isMobile ? (
@@ -15286,7 +15393,7 @@ export default function GrandLivre() {
             budgets={budgets} setBudgets={setBudgets}
           />}
           {tab === "groupes" && <GroupesTab filtered={filtered} />}
-          {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCap} />}
+          {tab === "enveloppes" && <EnveloppesTab filtered={filtered} cap={envelopeCap} setCap={setEnvelopeCapLogged} />}
           {tab === "budgets" && <BudgetsTab transactions={transactions} categoryGroups={resolvedGroups} budgets={budgets} setBudgets={setBudgets} allCategories={allCategories} recurring={recurring} />}
           {tab === "simulateur" && <SimulateurTab filtered={filtered} accounts={accounts} transactions={transactions} />}
           {tab === "objectif" && (
@@ -15313,11 +15420,7 @@ export default function GrandLivre() {
             <SauvegardeTab
               transactions={transactions}
               setTransactionsTracked={setTransactionsTracked}
-              getSnapshot={() => ({
-                transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-                activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
-                funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds,
-              })}
+              getSnapshot={getSnapshotRoot}
               restore={restoreFromBackup}
               undoSnapshotAt={preRestoreSnapshotAt}
               settingsLog={settingsLog}
@@ -15348,6 +15451,7 @@ export default function GrandLivre() {
                 if (data.deletedFundIds) setDeletedFundIds(data.deletedFundIds);
     if (data.deletedAccountIds) setDeletedAccountIds(data.deletedAccountIds);
                 if (typeof data.bourseObjectif !== "undefined") setBourseObjectif(data.bourseObjectif);
+    if (data.scalarTimestamps) setScalarTimestamps(data.scalarTimestamps);
                 setPreRestoreSnapshot(null);
                 setPreRestoreSnapshotAt(null);
               }}
