@@ -14956,16 +14956,6 @@ export default function GrandLivre() {
   // par le sondage de secours périodique (fetchRemoteUpdatedAt) pour décider s'il vaut
   // la peine de retélécharger le payload complet.
   const lastRemoteUpdatedAtRef = useRef<string>("");
-  // Compteur de cycles du sondage périodique — sur demande explicite de l'utilisateur
-  // (25/08/2026), après avoir repéré un vrai trou dans l'optimisation précédente : ce
-  // sondage servait AUSSI de filet de rattrapage pour une modification locale dont le
-  // push aurait échoué (coupure réseau passagère pendant une édition, par exemple) —
-  // rattrapage perdu dès lors que le sondage sautait carrément runSync() faute de
-  // changement distant détecté. Un vrai cycle complet, sans passer par la vérification
-  // légère, est donc forcé toutes les 4 itérations (~12 minutes avec un sondage à 3
-  // minutes) — assez rare pour ne pas annuler l'économie de bande passante, assez
-  // fréquent pour qu'une modification coincée ne reste jamais bloquée longtemps.
-  const pollCycleRef = useRef(0);
 
   // Le moteur lui-même : AUCUNE dépendance (tableau vide) — reste la même fonction sur
   // toute la durée de vie du composant, donc toujours sûr à passer à n'importe quel
@@ -15143,19 +15133,27 @@ export default function GrandLivre() {
   // reconnexion, temps réel) appellent runSync directement, sans détour par cette
   // vérification — ils réagissent déjà à un événement concret, contrairement à ce
   // sondage qui se déclenche à l'aveugle toutes les 3 minutes.
+  //
+  // Exception volontaire à ce filtre — ajoutée le 25/08/2026 après relecture critique
+  // du correctif initial : runSync() ne fait pas QUE tirer les changements distants, il
+  // sert aussi de filet de rattrapage pour un push local resté coincé (ex : coupure
+  // réseau passagère pendant la saisie, qui fait échouer silencieusement l'envoi —
+  // setSyncStatus("error") sans retentative programmée ailleurs que par ce sondage). Si
+  // on se fiait uniquement à "le distant a-t-il changé ?", un push resté coincé ne
+  // remonterait plus jamais tant que rien d'autre ne change côté distant — puisque, par
+  // définition, un push qui a échoué n'a JAMAIS atteint le distant. On détecte ce cas
+  // précisément (pas par un cycle forcé au hasard toutes les N fois, qui gaspillerait à
+  // nouveau de la bande passante même quand tout va bien) : si la dernière modification
+  // locale connue est plus récente que la dernière synchro distante confirmée, c'est le
+  // signe qu'un push est peut-être resté en attente — dans ce cas seulement, on force un
+  // cycle complet, sans passer par la vérification légère.
   const pollForRemoteChange = React.useCallback(async () => {
     const code = syncCodeRef.current;
     if (!SYNC_ENABLED || !code) return;
-    pollCycleRef.current += 1;
-    // Un cycle sur quatre, on ignore la vérification légère et on force un runSync()
-    // complet — c'est lui, et lui seul, qui sait retenter le push d'une modification
-    // locale restée coincée. La vérification légère ne sait détecter qu'un changement
-    // DISTANT, jamais un push LOCAL en attente.
-    const forceFullCycle = pollCycleRef.current % 4 === 0;
-    if (!forceFullCycle) {
-      const remoteTs = await fetchRemoteUpdatedAt(code);
-      if (remoteTs && lastRemoteUpdatedAtRef.current && new Date(remoteTs) <= new Date(lastRemoteUpdatedAtRef.current)) return;
-    }
+    const pendingLocalChange = !!lastLocalChangeRef.current && (!lastRemoteUpdatedAtRef.current || new Date(lastLocalChangeRef.current) > new Date(lastRemoteUpdatedAtRef.current));
+    if (pendingLocalChange) { runSync(); return; }
+    const remoteTs = await fetchRemoteUpdatedAt(code);
+    if (remoteTs && lastRemoteUpdatedAtRef.current && new Date(remoteTs) <= new Date(lastRemoteUpdatedAtRef.current)) return;
     runSync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
