@@ -14026,7 +14026,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} scope="jour" />
         <DayScoreBadge transactions={transactions} monthlyObjective={monthlyObjective} scope="mois" />
       </div>
-      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
+      <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetail({ mode: "today", anchor: today })} />
         <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
