@@ -8750,6 +8750,14 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [vlFormFundId, setVlFormFundId] = useState<string | null>(null);
   const [vlDate, setVlDate] = useState(todayISO());
   const [vlValue, setVlValue] = useState<number>(0);
+  // Miroir texte du champ VL — sur demande explicite de l'utilisateur (26/08/2026),
+  // après avoir constaté que la virgule "ne faisait rien" sur mobile. La vraie cause :
+  // reconvertir en Number() à chaque frappe puis réafficher fait disparaître le
+  // séparateur décimal en cours de saisie, silencieusement — "8628," et "8628" donnent
+  // le MÊME Number, donc le champ contrôlé revient instantanément à "8628" sans la
+  // virgule tapée. La solution standard : garder le texte brut tel que tapé pour
+  // l'affichage, dériver le nombre séparément pour les calculs.
+  const [vlValueText, setVlValueText] = useState("");
   // Saisie groupée des VL — sur demande explicite de l'utilisateur (22/08/2026), qui a
   // choisi de renseigner la VL quotidiennement : sans ça, il fallait rouvrir la modale
   // une fois par fonds (3 allers-retours par jour). Un seul écran, une seule date
@@ -8757,6 +8765,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [bulkVlOpen, setBulkVlOpen] = useState(false);
   const [bulkVlDate, setBulkVlDate] = useState(todayISO());
   const [bulkVlValues, setBulkVlValues] = useState<Record<string, number>>({});
+  const [bulkVlValuesText, setBulkVlValuesText] = useState<Record<string, string>>({});
   // Export PDF/Excel sur période — sur demande explicite de l'utilisateur (22/08/2026).
   const [exportFrom, setExportFrom] = useState(() => {
     const dates = fundOperations.map((o) => o.date).sort();
@@ -8775,6 +8784,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const [opDate, setOpDate] = useState(todayISO());
   const [opQty, setOpQty] = useState<number>(0);
   const [opVl, setOpVl] = useState<number>(0);
+  const [opVlText, setOpVlText] = useState("");
   const [opMontant, setOpMontant] = useState<number>(0);
   const [opFrais, setOpFrais] = useState<number>(0);
   const [opNote, setOpNote] = useState("");
@@ -8784,6 +8794,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // Alerte de seuil de VL — sur demande explicite de l'utilisateur (23/08/2026).
   const [alertFormFundId, setAlertFormFundId] = useState<string | null>(null);
   const [alertVl, setAlertVl] = useState<number>(0);
+  const [alertVlText, setAlertVlText] = useState("");
   const [alertDirection, setAlertDirection] = useState<"en dessous" | "au dessus">("en dessous");
   const saveAlertThreshold = (fundId: string) => {
     if (alertVl <= 0) return;
@@ -8819,7 +8830,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setFunds(funds.map((f) => f.id === fund.id ? { ...f, recurringPlan: { ...plan, nextDate: addInterval(plan.nextDate, plan.frequency) }, updatedAt: new Date().toISOString() } : f));
     const pos = computeFundPosition(fund.id, fundOperations, fundDailyValues);
     setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO());
-    setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(plan.montant); setOpFrais(0); setOpNote("Souscription récurrente planifiée"); setOpAccount(plan.account);
+    setOpQty(0); setOpVl(pos.currentVL || 0); setOpVlText(pos.currentVL ? String(pos.currentVL) : ""); setOpMontant(plan.montant); setOpFrais(0); setOpNote("Souscription récurrente planifiée"); setOpAccount(plan.account);
   };
   // Simulateur d'investissement — sur demande explicite de l'utilisateur (23/08/2026).
   const [simFundId, setSimFundId] = useState<string>("");
@@ -8979,16 +8990,19 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     } else {
       setFundDailyValues([...fundDailyValues, { id: uid("vl"), fundId: vlFormFundId, date: vlDate, vl: vlValue, updatedAt: new Date().toISOString() }]);
     }
-    setVlFormFundId(null); setVlValue(0);
+    setVlFormFundId(null); setVlValue(0); setVlValueText("");
   };
 
   const openBulkVl = () => {
     const initial: Record<string, number> = {};
+    const initialText: Record<string, string> = {};
     funds.forEach((f) => {
       const pos = computeFundPosition(f.id, fundOperations, fundDailyValues);
       initial[f.id] = pos.currentVL || 0;
+      initialText[f.id] = pos.currentVL ? String(pos.currentVL) : "";
     });
     setBulkVlValues(initial);
+    setBulkVlValuesText(initialText);
     setBulkVlDate(todayISO());
     setBulkVlOpen(true);
   };
@@ -9023,7 +9037,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setOpType(o.type);
     setOpDate(o.date);
     setOpQty(o.quantite);
-    setOpVl(o.vl);
+    setOpVl(o.vl); setOpVlText(o.vl ? String(o.vl) : "");
     setOpMontant(o.montant);
     setOpFrais(o.frais || 0);
     setOpAccount(o.account);
@@ -9061,7 +9075,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       } as Transaction;
       setTransactions([...transactions, linkedTx]);
     }
-    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpMontant(0); setOpFrais(0); setOpNote(""); setEditingOpId(null);
+    setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpVlText(""); setOpMontant(0); setOpFrais(0); setOpNote(""); setEditingOpId(null);
   };
 
   const positions = useMemo(() => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })), [funds, fundOperations, fundDailyValues]);
@@ -9359,7 +9373,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               {fmt(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
             </span>
           )}
-          <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b>{portfolioXIRR !== null && <> · Rendement annualisé (TRI) : <b style={{ color: portfolioXIRR >= 0 ? "#5fc298" : "#dd7b64" }}>{portfolioXIRR >= 0 ? "+" : ""}{(portfolioXIRR * 100).toFixed(1)}%/an</b></>}</span>
+          <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b>{totalCost > 0 && <> · Rendement cumulé : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{((totalPlusValue / totalCost) * 100).toFixed(1)}%</b></>}{portfolioXIRR !== null && <> · Rendement annualisé (TRI) : <b style={{ color: portfolioXIRR >= 0 ? "#5fc298" : "#dd7b64" }}>{portfolioXIRR >= 0 ? "+" : ""}{(portfolioXIRR * 100).toFixed(1)}%/an</b></>}</span>
         </div>
         {chartData.length > 1 ? (
           <div style={{ height: 100, marginTop: 16 }}>
@@ -9587,13 +9601,13 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => { setVlFormFundId(fund.id); setVlDate(todayISO()); setVlValue(pos.currentVL || 0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setVlFormFundId(fund.id); setVlDate(todayISO()); setVlValue(pos.currentVL || 0); setVlValueText(pos.currentVL ? String(pos.currentVL) : ""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <TrendingUp size={12} /> Renseigner la VL du jour
             </button>
-            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); setOpNote(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Souscription"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpVlText(pos.currentVL ? String(pos.currentVL) : ""); setOpMontant(0); setOpFrais(0); setOpNote(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Plus size={12} /> Souscription
             </button>
-            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpMontant(0); setOpFrais(0); setOpNote(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setEditingOpId(null); setOpFormFundId(fund.id); setOpType("Rachat"); setOpDate(todayISO()); setOpQty(0); setOpVl(pos.currentVL || 0); setOpVlText(pos.currentVL ? String(pos.currentVL) : ""); setOpMontant(0); setOpFrais(0); setOpNote(""); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.claySoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <Minus size={12} /> Rachat
             </button>
             <button onClick={() => setExpandedFundId(expandedFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.inkMuted, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
@@ -9602,7 +9616,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <button onClick={() => setChartFundId(chartFundId === fund.id ? null : fund.id)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.slateBlueSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <TrendingUp size={12} /> {chartFundId === fund.id ? "Masquer" : "Voir"} la courbe
             </button>
-            <button onClick={() => { setAlertFormFundId(alertFormFundId === fund.id ? null : fund.id); setAlertVl(fund.alertThreshold?.vl || pos.currentVL || 0); setAlertDirection(fund.alertThreshold?.direction || "en dessous"); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.goldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => { setAlertFormFundId(alertFormFundId === fund.id ? null : fund.id); setAlertVl(fund.alertThreshold?.vl || pos.currentVL || 0); setAlertVlText(String(fund.alertThreshold?.vl || pos.currentVL || "")); setAlertDirection(fund.alertThreshold?.direction || "en dessous"); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.goldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
               <AlertTriangle size={12} /> {fund.alertThreshold ? `Alerte : VL ${fund.alertThreshold.direction} ${fmt(fund.alertThreshold.vl)}` : "Définir une alerte"}
             </button>
             {fund.recurringPlan ? (
@@ -9638,7 +9652,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               </div>
               <div>
                 <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Seuil (VL)</div>
-                <input type="text" inputMode="decimal" value={alertVl || ""} onChange={(e) => setAlertVl(Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 130 }} />
+                <input type="text" inputMode="decimal" value={alertVlText} onChange={(e) => { const raw = e.target.value.replace(",", ".").replace(/[^0-9.]/g, ""); setAlertVlText(raw); setAlertVl(Number(raw) || 0); }} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 130 }} />
               </div>
               <button onClick={() => saveAlertThreshold(fund.id)} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
               {fund.alertThreshold && (
@@ -10120,8 +10134,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
                 }}>FCFA</div>
                 <input
-                  type="text" inputMode="decimal" value={vlValue || ""} placeholder="0" autoFocus={!isMobile}
-                  onChange={(e) => setVlValue(Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0)}
+                  type="text" inputMode="decimal" value={vlValueText} placeholder="0" autoFocus={!isMobile}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(",", ".").replace(/[^0-9.]/g, "");
+                    setVlValueText(raw);
+                    setVlValue(Number(raw) || 0);
+                  }}
                   onKeyDown={(e) => { if (e.key === "Enter") saveVl(); }}
                   style={{
                     position: "relative", background: "transparent", border: "none", outline: "none",
@@ -10184,8 +10202,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   <div style={{ fontSize: 13, color: COLOR.ink, fontWeight: 600, marginBottom: 8 }}>{f.name}</div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                     <input
-                      type="text" inputMode="decimal" value={bulkVlValues[f.id] || ""} placeholder="VL — laisser vide si pas de donnée aujourd'hui"
-                      onChange={(e) => setBulkVlValues({ ...bulkVlValues, [f.id]: Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0 })}
+                      type="text" inputMode="decimal" value={bulkVlValuesText[f.id] || ""} placeholder="VL — laisser vide si pas de donnée aujourd'hui"
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(",", ".").replace(/[^0-9.]/g, "");
+                        setBulkVlValuesText({ ...bulkVlValuesText, [f.id]: raw });
+                        setBulkVlValues({ ...bulkVlValues, [f.id]: Number(raw) || 0 });
+                      }}
                       style={{ background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 22, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", width: "100%" }}
                     />
                     <span style={{ fontSize: 12, color: COLOR.inkMuted, whiteSpace: "nowrap" }}>FCFA</span>
@@ -10360,9 +10382,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <div style={{ display: "flex", gap: 20 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>VL</div>
-                    <input type="text" inputMode="decimal" value={opVl || ""} placeholder="0"
+                    <input type="text" inputMode="decimal" value={opVlText} placeholder="0"
                       onChange={(e) => {
-                        const v = Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0;
+                        const raw = e.target.value.replace(",", ".").replace(/[^0-9.]/g, "");
+                        setOpVlText(raw);
+                        const v = Number(raw) || 0;
                         setOpVl(v);
                         if (v > 0 && opMontant > 0) setOpQty(Math.round((opMontant / v) * 10000) / 10000);
                       }}
