@@ -12421,29 +12421,13 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // avant que quoi que ce soit ne soit sauvegardé, pour ne plus jamais transformer
 // silencieusement des données de secours en "vraies" données. Sur demande explicite de
 // l'utilisateur (11/08/2026), après une perte de données réelle causée par ce défaut.
-function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh, syncCode }: {
-  onRestore: (data: any) => void; onConnectSync: (code: string) => Promise<boolean>; onStartFresh: () => void; syncCode: string;
+function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh }: {
+  onRestore: (data: any) => void; onConnectSync: (code: string) => Promise<boolean>; onStartFresh: () => void;
 }) {
-  // Se connecte directement si un code de synchro est déjà présent au chargement (via
-  // le lien ?sync=... dans l'URL) — sur demande explicite de l'utilisateur
-  // (26/08/2026), qui a dû retaper son code à la main après un appareil vidé, alors
-  // que le lien spécial censé éviter ça était pourtant bien utilisé. Passe directement
-  // en mode "sync" avec le champ préempli, plutôt que de forcer un choix à l'aveugle.
-  const [mode, setMode] = useState<"choix" | "sync" | "confirmFresh">(syncCode ? "sync" : "choix");
-  const [codeInput, setCodeInput] = useState(syncCode || "");
+  const [mode, setMode] = useState<"choix" | "sync" | "confirmFresh">("choix");
+  const [codeInput, setCodeInput] = useState("");
   const [syncTrying, setSyncTrying] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  // Le code venu de l'URL (?sync=...) arrive parfois APRÈS le tout premier rendu (lu
-  // dans un useEffect ailleurs dans l'app) — l'initialisation ci-dessus seule ne suffit
-  // pas à le capter s'il arrive en retard. Cet effet réagit au changement lui-même,
-  // peu importe quand il survient. Corrigé le 26/08/2026.
-  useEffect(() => {
-    if (syncCode && mode === "choix" && !codeInput) {
-      setCodeInput(syncCode);
-      setMode("sync");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncCode]);
   const [fileError, setFileError] = useState<string | null>(null);
 
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -15341,7 +15325,6 @@ export default function GrandLivre() {
           return false;
         }}
         onStartFresh={() => setDataGateResolved(true)}
-        syncCode={syncCode}
       />
     );
   }
