@@ -1900,6 +1900,14 @@ function classifyCharges(transactions: Transaction[], overrides: Record<string, 
   transactions.forEach((t) => {
     if (t.type !== "Dépense") return;
     if (!includeGrundfosVoiture && GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
+    // Une souscription Bourse liée (catégorie "Investissement bourse", créée
+    // automatiquement depuis le 22/08/2026 à chaque nouvelle souscription) n'est
+    // jamais une charge — c'est de l'épargne investie, déjà suivie et affichée à part
+    // dans Bourse (FCP) et le Diagnostic Financier. La compter ici gonflerait
+    // artificiellement les "charges fixes/variables" et ferait paraître le taux
+    // d'épargne plus bas qu'il ne l'est réellement. Sur demande explicite de
+    // l'utilisateur (26/08/2026).
+    if (t.category === INVESTMENT_CATEGORY) return;
     const tmk = dateToMonthKey(t.date);
     const poste = EXPAND_SUBCATS_FOR_CHARGES[t.category] ? `${t.category}::${t.subcategory || "(non précisé)"}` : t.category;
     if (lookback.includes(tmk)) {
@@ -2169,6 +2177,12 @@ function generateRatiosNarrative(ratios: RatioResult[]): { sections: { key: stri
 // popularisés en Chine, au Japon et à Singapour, distincts des repères
 // occidentaux (banques US/CFPB) déjà présents dans le Diagnostic Financier.
 // ============================================================
+// Catégorie utilisée pour la transaction liée au Journal principal, créée
+// automatiquement pour chaque souscription Bourse saisie à partir du 22/08/2026 (voir
+// note sur linkedTransactionId) — déclarée ICI (pas près du reste du code Bourse plus
+// bas) car CN_4321_CATEGORIES juste en dessous en a besoin dès le chargement du
+// module, avant que le reste du fichier ne s'exécute.
+const INVESTMENT_CATEGORY = "Investissement bourse";
 const CN_4321_CATEGORIES = {
   // Achat d'actifs (immobilier, véhicule générant des revenus, terrain, placements) +
   // investissement en capital humain (formation, éducation) — tout ce qui construit un
@@ -2183,7 +2197,12 @@ const CN_4321_CATEGORIES = {
   // (505 000 + 250 000 + 10 100 FCFA) — du capital déployé avec attente de retour,
   // pas une dépense consommée (à ne pas confondre avec "Dette", qui est un emprunt
   // que l'utilisateur rembourse — voir aussi l'onglet Créances pour le suivi détaillé).
-  investissement: ["INVEST SGO", "Épargne", "Achat Terrain Port", "Création Entreprise", "PAYEMENT MAISON", "Achat MAZDA", "FORMATION", "Éducation", "Dette", "Prêt"],
+  // "Investissement bourse" ajoutée le 26/08/2026 : catégorie créée automatiquement
+  // pour chaque souscription Bourse saisie depuis le 22/08/2026 (nom différent de
+  // l'ancienne "INVEST SGO" manuelle ci-dessus) — sans elle, ces vraies dépenses
+  // d'investissement tombaient par défaut dans "Vie courante" (le reliquat), faussant
+  // les deux postes à la fois.
+  investissement: ["INVEST SGO", "Épargne", "Achat Terrain Port", "Création Entreprise", "PAYEMENT MAISON", "Achat MAZDA", "FORMATION", "Éducation", "Dette", "Prêt", INVESTMENT_CATEGORY],
   protection: ["Âge D’or Retraite", "Plan Éducation", "Securicompte"],
 };
 const KAKEIBO_CATEGORIES = {
@@ -8531,10 +8550,6 @@ function transactionsToCompactCSV(transactions: Transaction[]): string {
 // demande explicite de l'utilisateur (21/08/2026) : la Bourse ne doit influencer
 // aucune donnée ailleurs dans l'app.
 // ============================================================
-
-// Catégorie utilisée pour la transaction liée au Journal principal — uniquement pour
-// les opérations saisies à partir du 22/08/2026 (voir note sur linkedTransactionId).
-const INVESTMENT_CATEGORY = "Investissement bourse";
 
 // TRI (taux de rendement interne) — sur demande explicite de l'utilisateur
 // (23/08/2026). Contrairement à "Plus-value latente" (qui dit COMBIEN on a gagné en
