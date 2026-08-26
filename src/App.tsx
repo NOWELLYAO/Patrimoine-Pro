@@ -9373,7 +9373,28 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               {fmt(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
             </span>
           )}
-          <span style={{ fontSize: 12, color: "#9fb3d9" }}>· Investi : {fmt(totalCost)} FCFA · Plus-value latente : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</b>{totalCost > 0 && <> · Rendement cumulé : <b style={{ color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64" }}>{totalPlusValue >= 0 ? "+" : ""}{((totalPlusValue / totalCost) * 100).toFixed(1)}%</b></>}{portfolioXIRR !== null && <> · Rendement annualisé (TRI) : <b style={{ color: portfolioXIRR >= 0 ? "#5fc298" : "#dd7b64" }}>{portfolioXIRR >= 0 ? "+" : ""}{(portfolioXIRR * 100).toFixed(1)}%/an</b></>}</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4, auto)", gap: isMobile ? "10px 16px" : 20, marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(159,179,217,0.15)" }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Investi</div>
+            <div style={{ fontSize: 13.5, color: "#fff", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(totalCost)} FCFA</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Plus-value latente</div>
+            <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64", fontWeight: 600 }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</div>
+          </div>
+          {totalCost > 0 && (
+            <div>
+              <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Rendement cumulé</div>
+              <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64", fontWeight: 600 }}>{totalPlusValue >= 0 ? "+" : ""}{((totalPlusValue / totalCost) * 100).toFixed(1)}%</div>
+            </div>
+          )}
+          {portfolioXIRR !== null && (
+            <div>
+              <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Rendement annualisé (TRI)</div>
+              <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: portfolioXIRR >= 0 ? "#5fc298" : "#dd7b64", fontWeight: 600 }}>{portfolioXIRR >= 0 ? "+" : ""}{(portfolioXIRR * 100).toFixed(1)}%/an</div>
+            </div>
+          )}
         </div>
         {chartData.length > 1 ? (
           <div style={{ height: 100, marginTop: 16 }}>
