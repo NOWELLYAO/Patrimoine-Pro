@@ -8615,6 +8615,28 @@ function computeOperationDetail(fundOp: FundOperation, allFundOperations: FundOp
   }
 }
 
+// Coût de revient sans les frais de souscription — fonction séparée de
+// computeFundPosition (utilisée à de nombreux endroits, on évite d'y toucher) pour
+// isoler précisément le montant net investi (hors frais) et son poids dans le coût
+// total. Même marche à suivre exacte (moyenne pondérée, réduction proportionnelle à
+// chaque rachat), vérifiée manuellement avant d'être ajoutée. Sur demande explicite de
+// l'utilisateur (26/08/2026).
+function computeFundCostWithoutFees(fundId: string, operations: FundOperation[]): number {
+  const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  let qty = 0, costSansFrais = 0;
+  ops.forEach((o) => {
+    if (o.type === "Souscription") {
+      qty += o.quantite;
+      costSansFrais += o.montant;
+    } else {
+      const avgCost = qty > 0 ? costSansFrais / qty : 0;
+      costSansFrais = Math.max(0, costSansFrais - avgCost * o.quantite);
+      qty = Math.max(0, qty - o.quantite);
+    }
+  });
+  return costSansFrais;
+}
+
 function computeFundPosition(fundId: string, operations: FundOperation[], dailyValues: FundDailyValue[]) {
   const ops = operations.filter((o) => o.fundId === fundId).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   let qty = 0, costTotal = 0, realizedGain = 0;
@@ -9087,6 +9109,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   );
   const totalValorisation = positions.reduce((a, p) => a + p.pos.valorisation, 0);
   const totalCost = positions.reduce((a, p) => a + p.pos.costTotal, 0);
+  const totalFraisRestants = useMemo(
+    () => Math.max(0, totalCost - funds.reduce((a, f) => a + computeFundCostWithoutFees(f.id, fundOperations), 0)),
+    [totalCost, funds, fundOperations]
+  );
   const totalPlusValue = totalValorisation - totalCost;
   const totalDayChange = positions.reduce((a, p) => a + (p.pos.dayChange || 0), 0);
   const totalPrevValorisation = totalValorisation - totalDayChange;
@@ -9393,6 +9419,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <div>
               <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Rendement cumulé</div>
               <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64", fontWeight: 600 }}>{totalPlusValue >= 0 ? "+" : ""}{((totalPlusValue / totalCost) * 100).toFixed(1)}%</div>
+            </div>
+          )}
+          {totalFraisRestants > 0 && (
+            <div>
+              <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Frais de souscription</div>
+              <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: "#dd7b64", fontWeight: 600 }}>{fmt(Math.round(totalFraisRestants))} FCFA <span style={{ fontSize: 11, fontWeight: 400 }}>({totalCost > 0 ? ((totalFraisRestants / totalCost) * 100).toFixed(1) : "0"}%)</span></div>
             </div>
           )}
           {portfolioXIRR !== null && (
