@@ -9078,7 +9078,13 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     setOpFormFundId(null); setOpQty(0); setOpVl(0); setOpVlText(""); setOpMontant(0); setOpFrais(0); setOpNote(""); setEditingOpId(null);
   };
 
-  const positions = useMemo(() => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })), [funds, fundOperations, fundDailyValues]);
+  // Triés par poids décroissant (le fonds le plus gros en tête) — sur demande
+  // explicite de l'utilisateur (26/08/2026). Un seul tri ici suffit pour toute la
+  // page, puisque `positions` alimente les cartes, le comparateur ET le graphique.
+  const positions = useMemo(
+    () => funds.map((f) => ({ fund: f, pos: computeFundPosition(f.id, fundOperations, fundDailyValues) })).sort((a, b) => b.pos.valorisation - a.pos.valorisation),
+    [funds, fundOperations, fundDailyValues]
+  );
   const totalValorisation = positions.reduce((a, p) => a + p.pos.valorisation, 0);
   const totalCost = positions.reduce((a, p) => a + p.pos.costTotal, 0);
   const totalPlusValue = totalValorisation - totalCost;
