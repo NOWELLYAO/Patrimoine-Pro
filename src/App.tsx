@@ -12421,13 +12421,29 @@ function RecurrencesTab({ recurring, setRecurring, transactions, setTransactions
 // avant que quoi que ce soit ne soit sauvegardé, pour ne plus jamais transformer
 // silencieusement des données de secours en "vraies" données. Sur demande explicite de
 // l'utilisateur (11/08/2026), après une perte de données réelle causée par ce défaut.
-function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh }: {
-  onRestore: (data: any) => void; onConnectSync: (code: string) => Promise<boolean>; onStartFresh: () => void;
+function DataRecoveryGate({ onRestore, onConnectSync, onStartFresh, syncCode }: {
+  onRestore: (data: any) => void; onConnectSync: (code: string) => Promise<boolean>; onStartFresh: () => void; syncCode: string;
 }) {
-  const [mode, setMode] = useState<"choix" | "sync" | "confirmFresh">("choix");
-  const [codeInput, setCodeInput] = useState("");
+  // Se connecte directement si un code de synchro est déjà présent au chargement (via
+  // le lien ?sync=... dans l'URL) — sur demande explicite de l'utilisateur
+  // (26/08/2026), qui a dû retaper son code à la main après un appareil vidé, alors
+  // que le lien spécial censé éviter ça était pourtant bien utilisé. Passe directement
+  // en mode "sync" avec le champ préempli, plutôt que de forcer un choix à l'aveugle.
+  const [mode, setMode] = useState<"choix" | "sync" | "confirmFresh">(syncCode ? "sync" : "choix");
+  const [codeInput, setCodeInput] = useState(syncCode || "");
   const [syncTrying, setSyncTrying] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // Le code venu de l'URL (?sync=...) arrive parfois APRÈS le tout premier rendu (lu
+  // dans un useEffect ailleurs dans l'app) — l'initialisation ci-dessus seule ne suffit
+  // pas à le capter s'il arrive en retard. Cet effet réagit au changement lui-même,
+  // peu importe quand il survient. Corrigé le 26/08/2026.
+  useEffect(() => {
+    if (syncCode && mode === "choix" && !codeInput) {
+      setCodeInput(syncCode);
+      setMode("sync");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncCode]);
   const [fileError, setFileError] = useState<string | null>(null);
 
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -14642,11 +14658,18 @@ export default function GrandLivre() {
   const [scalarTimestamps, setScalarTimestamps] = usePersistentState<Record<string, string>>("gl-scalar-timestamps", {}, canSaveGated);
   const [chargeOverrides, setChargeOverrides] = usePersistentState<Record<string, ChargeOverride>>("gl-charge-overrides", defaultChargeOverrides, canSaveGated);
   const [includeGrundfosVoiture, setIncludeGrundfosVoiture] = usePersistentState<boolean>("gl-include-grundfos-voiture", true, canSaveGated);
-  const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null);
-  const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null);
-  const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", []);
-  const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null);
-  const [dismissedExportReminderDate, setDismissedExportReminderDate] = usePersistentState<string | null>("gl-dismissed-export-reminder-date", null);
+  // Les cinq champs suivants n'ont pas besoin de la protection "attend un choix
+  // explicite avant d'écrire" (elle existe pour éviter qu'un jeu de données de
+  // démonstration n'écrase de vraies données distantes) — aucun n'est une donnée
+  // financière sensible, donc toujours sûr d'écrire dès qu'ils changent. Corrigé le
+  // 26/08/2026 après avoir trouvé le même bug que sur syncCode juste au-dessus : sans
+  // ce dernier argument, un champ qui démarre vide reste bloqué en écriture pour toute
+  // la session, même après avoir été rempli — perdu à chaque rechargement.
+  const [preRestoreSnapshot, setPreRestoreSnapshot] = usePersistentState<any>("gl-pre-restore-snapshot", null, true);
+  const [preRestoreSnapshotAt, setPreRestoreSnapshotAt] = usePersistentState<string | null>("gl-pre-restore-snapshot-at", null, true);
+  const [settingsLog, setSettingsLog] = usePersistentState<SettingsLogEntry[]>("gl-settings-log", [], true);
+  const [dismissedReminderDate, setDismissedReminderDate] = usePersistentState<string | null>("gl-dismissed-reminder-date", null, true);
+  const [dismissedExportReminderDate, setDismissedExportReminderDate] = usePersistentState<string | null>("gl-dismissed-export-reminder-date", null, true);
   // Fonction de snapshot partagée entre SauvegardeTab et le rappel du soir
   // (EveningExportReminder), pour ne pas dupliquer la construction de l'objet à deux
   // endroits — sur demande explicite de l'utilisateur (23/08/2026).
@@ -14751,7 +14774,16 @@ export default function GrandLivre() {
     }
   }, [isMobile, mobileMenuOpen]);
   const [filtersOpen, setFiltersOpen] = useState(!isMobile);
-  const [syncCode, setSyncCode, syncCodeLoaded] = usePersistentState<string>("gl-sync-code", "");
+  // Corrigé le 26/08/2026, bug sévère : sans troisième argument, le verrou de
+  // sauvegarde de usePersistentState reste bloqué à "false" pour toute la session dès
+  // que l'appareil démarre avec un code vide (foundReal=false au tout premier rendu,
+  // jamais réévalué ensuite) — la reconnexion fonctionnait bien en mémoire (l'app
+  // semblait connectée) mais n'était JAMAIS écrite dans localStorage, donc perdue à
+  // chaque fermeture de l'app. Un code de synchro n'a pas besoin de cette protection
+  // (elle existe pour éviter qu'un jeu de données de démonstration n'écrase de
+  // vraies données distantes avant un choix explicite — non pertinent ici) : toujours
+  // sûr d'écrire ce champ dès qu'il change.
+  const [syncCode, setSyncCode, syncCodeLoaded] = usePersistentState<string>("gl-sync-code", "", true);
 
   // Récupère le code de synchronisation depuis l'URL (?sync=code), si présent — utile si le
   // localStorage a été effacé par iOS. Marquer cette page en favori avec ce paramètre rend
@@ -15325,6 +15357,7 @@ export default function GrandLivre() {
           return false;
         }}
         onStartFresh={() => setDataGateResolved(true)}
+        syncCode={syncCode}
       />
     );
   }
