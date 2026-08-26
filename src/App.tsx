@@ -2011,7 +2011,7 @@ type RatioVerdict = "sain" | "vigilance" | "risque";
 interface RatioResult { key: string; label: string; value: number; unit: "%" | "mois" | "FCFA"; verdict: RatioVerdict; benchmark: string; explain: string; }
 
 function computeFinancialRatios(
-  transactions: Transaction[], accounts: Account[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, explicitRange?: [string, string]
+  transactions: Transaction[], accounts: Account[], chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean, explicitRange?: [string, string], bourseValue: number = 0
 ) {
   // Respecte le filtre global "Du mois / Au mois" quand il est fourni ; sinon, tout
   // l'historique depuis la première transaction (sur suggestion de l'utilisateur, 06/08/2026).
@@ -2019,6 +2019,15 @@ function computeFinancialRatios(
   const charges = classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, explicitRange);
   const netWorth = totalAccountsBalance(accounts, transactions);
   const essentialMonthly = charges.totalFixe + charges.totalVariable;
+  // Patrimoine total = comptes + Bourse — sur demande explicite de l'utilisateur
+  // (26/08/2026), qui voulait sa valorisation Bourse "intelligemment incluse" dans le
+  // diagnostic. Volontairement PAS mélangée dans "netWorth" lui-même : le ratio "Fonds
+  // d'urgence" plus bas mesure une réserve LIQUIDE mobilisable immédiatement, et
+  // laisser la Bourse (moins liquide, soumise aux délais de rachat) y gonfler
+  // artificiellement le chiffre aurait donné une fausse impression de sécurité en cas
+  // de coup dur. Le patrimoine total investi est présenté séparément, à côté, jamais
+  // fusionné dans un ratio de liquidité.
+  const totalPatrimoine = netWorth + bourseValue;
 
   const ratios: RatioResult[] = [];
 
@@ -2088,7 +2097,12 @@ function computeFinancialRatios(
     explain: `Part du revenu total (${charges.lookback.length} mois) apportée par la plus grosse source ("${topSource}") — plus c'est élevé, plus un choc sur cette seule source affecterait l'ensemble du budget.`,
   });
 
-  return { ratios, netWorth, essentialMonthly, topSource, topShare };
+  // Part du patrimoine investie en Bourse — exposée à part (pas dans `ratios`, qui
+  // n'accepte que des verdicts sain/vigilance/risque) puisque investir en Bourse
+  // n'est ni bon ni mauvais en soi, contrairement aux ratios ci-dessus.
+  const partBourse = bourseValue > 0 && totalPatrimoine > 0 ? (bourseValue / totalPatrimoine) * 100 : 0;
+
+  return { ratios, netWorth, essentialMonthly, topSource, topShare, totalPatrimoine, bourseValue, partBourse };
 }
 
 // Rapport narratif pour les 5 ratios institutionnels (DTI bancaire, règle des
@@ -10628,10 +10642,11 @@ function AssistantTab({ transactions, accounts, categoryGroups, budgets, recurri
   );
 }
 
-function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange, categoryGroups, categoryScope, recurring }: {
+function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfosVoiture, setIncludeGrundfosVoiture, onNavigate, periodRange, categoryGroups, categoryScope, recurring, funds, fundOperations, fundDailyValues }: {
   transactions: Transaction[]; accounts: Account[]; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
   setIncludeGrundfosVoiture: (b: boolean) => void; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
   categoryGroups: Record<string, Group>; categoryScope: Record<string, Scope>; recurring: RecurringTemplate[];
+  funds: Fund[]; fundOperations: FundOperation[]; fundDailyValues: FundDailyValue[];
 }) {
   const [dropPct, setDropPct] = useState(30);
   const [duration, setDuration] = useState(6);
@@ -10639,9 +10654,18 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
   const [ratiosNarrativeOpen, setRatiosNarrativeOpen] = useState(false);
   const [xlsState, setXlsState] = useState<"idle" | "loading" | "error">("idle");
 
-  const { ratios, netWorth, essentialMonthly } = useMemo(
-    () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange),
-    [transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange]
+  // Valorisation Bourse — sur demande explicite de l'utilisateur (26/08/2026), pour
+  // l'inclure intelligemment dans le diagnostic (voir le commentaire détaillé dans
+  // computeFinancialRatios sur pourquoi elle n'entre PAS dans le ratio "Fonds
+  // d'urgence", qui doit rester purement liquide).
+  const bourseValue = useMemo(
+    () => funds.reduce((sum, f) => sum + computeFundPosition(f.id, fundOperations, fundDailyValues).valorisation, 0),
+    [funds, fundOperations, fundDailyValues]
+  );
+
+  const { ratios, netWorth, essentialMonthly, totalPatrimoine, partBourse } = useMemo(
+    () => computeFinancialRatios(transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange, bourseValue),
+    [transactions, accounts, chargeOverrides, includeGrundfosVoiture, periodRange, bourseValue]
   );
   const windowMonths = useMemo(() => monthsSinceInception(transactions), [transactions]);
   const charges = useMemo(() => classifyCharges(transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange), [transactions, chargeOverrides, includeGrundfosVoiture, windowMonths, periodRange]);
@@ -10997,6 +11021,19 @@ function DiagnosticTab({ transactions, accounts, chargeOverrides, includeGrundfo
           <BookOpen size={13} /> Rapport détaillé
         </button>
       </div>
+
+      {bourseValue > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 16, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, borderRadius: 12, padding: "14px 18px", flexWrap: "wrap" }}>
+          <Rocket size={18} color={COLOR.goldSoft} style={{ flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 11, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Patrimoine total (comptes + Bourse)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 19, fontWeight: 600, color: COLOR.ink }}>{fmt(Math.round(totalPatrimoine))} FCFA</div>
+          </div>
+          <div style={{ fontSize: 12, color: COLOR.inkMuted, maxWidth: 380 }}>
+            {fmt(Math.round(netWorth))} FCFA liquide (comptes) + {fmt(Math.round(bourseValue))} FCFA investi en Bourse ({partBourse.toFixed(1)}% du total). La Bourse n'entre volontairement pas dans le ratio "Fonds d'urgence" ci-dessous, qui mesure une réserve mobilisable immédiatement.
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
         {ratios.map((r) => {
@@ -15363,6 +15400,21 @@ export default function GrandLivre() {
   }
 
   const lastNW = (() => { const s = liveNetWorthSeries(accounts, transactions); return s[s.length - 1][1]; })();
+  // Valorisation Bourse + gain du jour, calculés au niveau racine pour être affichés
+  // dans l'en-tête ET réutilisables ailleurs (Diagnostic Financier notamment) — sur
+  // demande explicite de l'utilisateur (26/08/2026).
+  const bourseTotalValorisation = useMemo(
+    () => funds.reduce((sum, f) => sum + computeFundPosition(f.id, fundOperations, fundDailyValues).valorisation, 0),
+    [funds, fundOperations, fundDailyValues]
+  );
+  const bourseTotalDayChange = useMemo(() => {
+    let total = 0, hasAny = false;
+    funds.forEach((f) => {
+      const dc = computeFundPosition(f.id, fundOperations, fundDailyValues).dayChange;
+      if (dc !== null) { total += dc; hasAny = true; }
+    });
+    return hasAny ? total : null;
+  }, [funds, fundOperations, fundDailyValues]);
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
@@ -15438,6 +15490,21 @@ export default function GrandLivre() {
                 )}
               </div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: isMobile ? 21 : 26, fontWeight: 600, color: COLOR.goldSoft }}>{fmt(lastNW)}<span style={{ fontSize: 12, color: COLOR.inkMuted, marginLeft: 6 }}>FCFA</span></div>
+              {funds.length > 0 && (
+                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2, alignItems: isMobile ? "flex-start" : "flex-end" }}>
+                  <div style={{ fontSize: 11.5, color: "#9fb3d9" }}>
+                    Bourse : <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.round(bourseTotalValorisation))} FCFA</span>
+                    {bourseTotalDayChange !== null && (
+                      <span style={{ color: bourseTotalDayChange >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, marginLeft: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5 }}>
+                        {bourseTotalDayChange >= 0 ? "+" : ""}{fmt(Math.round(bourseTotalDayChange))} aujourd'hui
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: COLOR.ink, fontWeight: 600 }}>
+                    Total : <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.round(lastNW + bourseTotalValorisation))} FCFA</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </header>
@@ -15505,7 +15572,7 @@ export default function GrandLivre() {
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} bourseObjectif={bourseObjectif} setBourseObjectif={setBourseObjectif} isMobile={isMobile} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} funds={funds} fundOperations={fundOperations} fundDailyValues={fundDailyValues} />}
-          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} />}
+          {tab === "diagnostic" && <DiagnosticTab transactions={transactions} accounts={accounts} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} categoryGroups={resolvedGroups} categoryScope={categoryScope} recurring={recurring} funds={funds} fundOperations={fundOperations} fundDailyValues={fundDailyValues} />}
           {tab === "rapprochement" && <RapprochementTab transactions={transactions} setTransactions={setTransactionsTracked} accounts={accounts} />}
           {tab === "creances" && <CreancesTab loans={loans} setLoans={setLoans} />}
           {tab === "comptes" && <ComptesTab accounts={accounts} setAccounts={setAccounts} transactions={transactions} setTransactions={setTransactionsTracked} recurring={recurring} setRecurring={setRecurring} funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} deletedAccountIds={deletedAccountIds} setDeletedAccountIds={setDeletedAccountIds} />}
