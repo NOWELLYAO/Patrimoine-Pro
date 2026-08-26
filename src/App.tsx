@@ -9638,7 +9638,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               </div>
               <div>
                 <div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 4 }}>Seuil (VL)</div>
-                <input type="number" inputMode="numeric" value={alertVl || ""} onChange={(e) => setAlertVl(Number(e.target.value) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 130 }} />
+                <input type="text" inputMode="decimal" value={alertVl || ""} onChange={(e) => setAlertVl(Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0)} placeholder="0" style={{ ...inputStyle, fontFamily: "'IBM Plex Mono', monospace", width: 130 }} />
               </div>
               <button onClick={() => saveAlertThreshold(fund.id)} style={{ background: COLOR.gold, border: "none", borderRadius: 8, color: "#0e1611", padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
               {fund.alertThreshold && (
@@ -10120,8 +10120,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   fontFamily: "'Fraunces', serif", pointerEvents: "none", userSelect: "none",
                 }}>FCFA</div>
                 <input
-                  type="number" inputMode="numeric" value={vlValue || ""} placeholder="0" autoFocus={!isMobile}
-                  onChange={(e) => setVlValue(Number(e.target.value) || 0)}
+                  type="text" inputMode="decimal" value={vlValue || ""} placeholder="0" autoFocus={!isMobile}
+                  onChange={(e) => setVlValue(Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0)}
                   onKeyDown={(e) => { if (e.key === "Enter") saveVl(); }}
                   style={{
                     position: "relative", background: "transparent", border: "none", outline: "none",
@@ -10184,8 +10184,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   <div style={{ fontSize: 13, color: COLOR.ink, fontWeight: 600, marginBottom: 8 }}>{f.name}</div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                     <input
-                      type="number" inputMode="numeric" value={bulkVlValues[f.id] || ""} placeholder="VL — laisser vide si pas de donnée aujourd'hui"
-                      onChange={(e) => setBulkVlValues({ ...bulkVlValues, [f.id]: Number(e.target.value) || 0 })}
+                      type="text" inputMode="decimal" value={bulkVlValues[f.id] || ""} placeholder="VL — laisser vide si pas de donnée aujourd'hui"
+                      onChange={(e) => setBulkVlValues({ ...bulkVlValues, [f.id]: Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0 })}
                       style={{ background: "transparent", border: "none", outline: "none", color: COLOR.ink, fontSize: 22, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", width: "100%" }}
                     />
                     <span style={{ fontSize: 12, color: COLOR.inkMuted, whiteSpace: "nowrap" }}>FCFA</span>
@@ -10360,9 +10360,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <div style={{ display: "flex", gap: 20 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>VL</div>
-                    <input type="number" inputMode="numeric" value={opVl || ""} placeholder="0"
+                    <input type="text" inputMode="decimal" value={opVl || ""} placeholder="0"
                       onChange={(e) => {
-                        const v = Number(e.target.value) || 0;
+                        const v = Number(e.target.value.replace(",", ".").replace(/[^0-9.]/g, "")) || 0;
                         setOpVl(v);
                         if (v > 0 && opMontant > 0) setOpQty(Math.round((opMontant / v) * 10000) / 10000);
                       }}
