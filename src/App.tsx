@@ -9663,6 +9663,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.dayChangePct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.dayChangePct >= 0 ? "+" : ""}{pos.dayChangePct.toFixed(2)}%</div>
               </div>
             )}
+            {pos.costTotal > 0 && (
+              <div>
+                <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Rendement cumulé</div>
+                <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.plusValueLatente >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.plusValueLatente >= 0 ? "+" : ""}{((pos.plusValueLatente / pos.costTotal) * 100).toFixed(1)}%</div>
+              </div>
+            )}
             {fundXIRR.get(fund.id) !== null && fundXIRR.get(fund.id) !== undefined && (
               <div>
                 <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Rendement annualisé (TRI)</div>
@@ -9825,7 +9831,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
                   <thead>
                     <tr>
-                      {["Fonds", "Catégorie", "Allocation", "Plus-value latente", "Rendement annualisé (TRI)", "Opérations"].map((h) => (
+                      {["Fonds", "Catégorie", "Allocation", "Rendement cumulé", "Rendement annualisé (TRI)", "Opérations"].map((h) => (
                         <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLOR.inkMuted, borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 500, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</th>
                       ))}
                     </tr>
