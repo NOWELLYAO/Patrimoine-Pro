@@ -9129,6 +9129,15 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   const totalDayChange = positions.reduce((a, p) => a + (p.pos.dayChange || 0), 0);
   const totalPrevValorisation = totalValorisation - totalDayChange;
   const totalDayChangePct = totalPrevValorisation !== 0 ? (totalDayChange / totalPrevValorisation) * 100 : 0;
+  // Même correctif que le header racine — sur demande explicite de l'utilisateur
+  // (27/08/2026) : "aujourd'hui" reste faux tant que la VL du jour n'a pas été
+  // renseignée (le calcul compare les deux dernières VL connues, pas forcément hier
+  // et aujourd'hui).
+  const lastValueDateOverall = positions.reduce((latest: string | null, p) => {
+    const d = p.pos.lastValueDate;
+    return d && (!latest || d > latest) ? d : latest;
+  }, null);
+  const dayChangeLabel = lastValueDateOverall === todayISO() ? "aujourd'hui" : lastValueDateOverall ? `au ${dateLabelFull(lastValueDateOverall)}` : "";
   const fundXIRR = useMemo(() => {
     const map = new Map<string, number | null>();
     positions.forEach(({ fund, pos }) => {
@@ -9414,7 +9423,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           {totalDayChange !== 0 && (
             <span style={{ display: "flex", alignItems: "center", gap: 4, color: totalDayChange >= 0 ? "#5fc298" : "#dd7b64", fontSize: 13, fontWeight: 600 }}>
               {totalDayChange >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-              {fmtPrecise(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
+              {fmtPrecise(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) {dayChangeLabel}
             </span>
           )}
         </div>
@@ -15531,6 +15540,20 @@ export default function GrandLivre() {
     });
     return hasAny ? total : null;
   }, [funds, fundOperations, fundDailyValues]);
+  // Date réelle de la dernière VL connue — sur demande explicite de l'utilisateur
+  // (27/08/2026), après avoir remarqué que "+X aujourd'hui" restait affiché même
+  // quand la VL du jour n'avait pas encore été renseignée (le calcul compare en
+  // réalité les deux DERNIÈRES VL connues, pas forcément hier et aujourd'hui). Le
+  // libellé reflète maintenant la vraie date plutôt que de toujours dire "aujourd'hui".
+  const bourseLastValueDate = useMemo(() => {
+    let latest: string | null = null;
+    funds.forEach((f) => {
+      const d = computeFundPosition(f.id, fundOperations, fundDailyValues).lastValueDate;
+      if (d && (!latest || d > latest)) latest = d;
+    });
+    return latest;
+  }, [funds, fundOperations, fundDailyValues]);
+  const bourseDayChangeLabel = bourseLastValueDate === todayISO() ? "aujourd'hui" : bourseLastValueDate ? `au ${dateLabelFull(bourseLastValueDate)}` : "";
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.ink, fontFamily: "'Inter', sans-serif", display: isMobile ? "block" : "flex" }}>
@@ -15612,7 +15635,7 @@ export default function GrandLivre() {
                     Bourse : <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.round(bourseTotalValorisation))} FCFA</span>
                     {bourseTotalDayChange !== null && (
                       <span style={{ color: bourseTotalDayChange >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, marginLeft: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5 }}>
-                        {bourseTotalDayChange >= 0 ? "+" : ""}{fmt(Math.round(bourseTotalDayChange))} aujourd'hui
+                        {bourseTotalDayChange >= 0 ? "+" : ""}{fmt(Math.round(bourseTotalDayChange))} {bourseDayChangeLabel}
                       </span>
                     )}
                   </div>
