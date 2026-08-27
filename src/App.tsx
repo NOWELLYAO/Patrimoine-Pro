@@ -628,12 +628,24 @@ function scheduleAmountForWindow(schedule: ChargeScheduleEntry[], lookback: stri
   return covered.reduce((a, v) => a + v, 0) / covered.length;
 }
 const fmt = (n: number) => new Intl.NumberFormat("fr-FR").format(Math.round(n));
+// Version précise (2 décimales, jamais arrondie à l'entier) — sur demande explicite de
+// l'utilisateur (26/08/2026), spécifiquement pour la page Bourse : les montants FCFA
+// classiques (comptes, budgets...) restent arrondis via fmt() partout ailleurs dans
+// l'app, volontairement inchangé.
+const fmtPrecise = (n: number) => new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+// VL (valeur liquidative) toujours à 4 décimales — c'est la précision réellement
+// publiée par NSIA sur les relevés (ex: 8 249,7037), jamais arrondie à 2 comme les
+// montants FCFA classiques. Sur demande explicite de l'utilisateur (26/08/2026).
+const fmtVL = (n: number) => new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(n);
 // Les PDF utilisent les polices standard de jsPDF (Helvetica), qui ne supportent
 // que l'encodage WinAnsi/Latin-1 — l'espace fine insécable utilisée par fmt() pour
 // séparer les milliers (format français réel) n'en fait pas partie et s'affichait
 // comme "/" ou coupait le nombre. On utilise ici une espace normale, sûre dans
 // n'importe quelle police PDF, uniquement pour ce qui part dans un export PDF.
 const fmtPdf = (n: number) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+// Variante 4 décimales pour la VL dans les exports PDF Bourse — même logique que
+// fmtVL côté app, sur demande explicite de l'utilisateur (26/08/2026).
+const fmtPdfVL = (n: number) => n.toFixed(4).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d)\,)/g, " ");
 const fmtShort = (n: number) => {
   const abs = Math.abs(n);
   if (abs >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
@@ -8700,7 +8712,7 @@ function computeBourseAdvice(funds: Fund[], fundOperations: FundOperation[], fun
     if (!fund.alertThreshold || pos.currentVL <= 0) return;
     const crossed = fund.alertThreshold.direction === "en dessous" ? pos.currentVL <= fund.alertThreshold.vl : pos.currentVL >= fund.alertThreshold.vl;
     if (crossed) {
-      tips.push({ icon: AlertTriangle, tone: "warn", text: `${fund.name} : VL actuelle ${fmt(pos.currentVL)} — seuil d'alerte (${fund.alertThreshold.direction} ${fmt(fund.alertThreshold.vl)}) franchi.` });
+      tips.push({ icon: AlertTriangle, tone: "warn", text: `${fund.name} : VL actuelle ${fmtVL(pos.currentVL)} — seuil d'alerte (${fund.alertThreshold.direction} ${fmtVL(fund.alertThreshold.vl)}) franchi.` });
     }
   });
 
@@ -9080,7 +9092,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         : o));
       if (existing?.linkedTransactionId) {
         setTransactions(transactions.map((t) => t.id === existing.linkedTransactionId
-          ? { ...t, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu", subcategory: fund.name, amount: montant, account: opAccount, note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}` }
+          ? { ...t, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu", subcategory: fund.name, amount: montant, account: opAccount, note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmtVL(opVl)}` }
           : t));
       }
     } else {
@@ -9093,7 +9105,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
       const linkedTx: Transaction = {
         id: txId, date: opDate, type: opType === "Souscription" ? "Dépense" : "Revenu",
         category: INVESTMENT_CATEGORY, subcategory: fund.name, amount: montant, account: opAccount,
-        note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmt(opVl)}`,
+        note: `${opType} ${fund.name} — ${opQty} parts à VL ${fmtVL(opVl)}`,
       } as Transaction;
       setTransactions([...transactions, linkedTx]);
     }
@@ -9309,7 +9321,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         startY: 74,
         head: [["OPCVM", "Quantité", "VL actuelle", "Valorisation", "Allocation", "PRU", "Plus-value latente"]],
         body: positions.map(({ fund, pos }) => [
-          fund.name, pos.qty.toFixed(4), fmtPdf(pos.currentVL), fmtPdf(pos.valorisation),
+          fund.name, pos.qty.toFixed(4), fmtPdfVL(pos.currentVL), fmtPdf(pos.valorisation),
           `${totalValorisation > 0 ? ((pos.valorisation / totalValorisation) * 100).toFixed(1) : "0.0"}%`,
           fmtPdf(pos.avgCost), `${pos.plusValueLatente >= 0 ? "+" : ""}${fmtPdf(pos.plusValueLatente)}`,
         ]),
@@ -9331,7 +9343,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           const pos = fund ? computeFundPosition(fund.id, fundOperations, fundDailyValues) : null;
           const detail = fund ? computeOperationDetail(o, fundOperations, pos?.currentVL || 0) : null;
           return [
-            dateLabelFull(o.date), o.type, fund?.name || "", o.quantite.toFixed(4), fmtPdf(o.vl), fmtPdf(o.montant), o.account,
+            dateLabelFull(o.date), o.type, fund?.name || "", o.quantite.toFixed(4), fmtPdfVL(o.vl), fmtPdf(o.montant), o.account,
             detail ? `${detail.gain >= 0 ? "+" : ""}${fmtPdf(detail.gain)}` : "—",
             detail ? `${detail.gainPct >= 0 ? "+" : ""}${detail.gainPct.toFixed(1)}%${detail.realized ? " (réalisé)" : ""}` : "—",
           ];
@@ -9397,23 +9409,23 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ background: `linear-gradient(135deg, #0d1f3d, #142b52)`, borderRadius: 16, padding: 24, border: `1px solid ${COLOR.hairline}` }}>
         <div style={{ fontSize: 12, color: "#9fb3d9", textTransform: "uppercase", letterSpacing: "0.05em" }}>Valeur du portefeuille Bourse</div>
-        <div style={{ fontSize: 34, fontWeight: 700, color: "#fff", marginTop: 6, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(totalValorisation)} <span style={{ fontSize: 15, fontWeight: 400, color: "#9fb3d9" }}>FCFA</span></div>
+        <div style={{ fontSize: 34, fontWeight: 700, color: "#fff", marginTop: 6, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(totalValorisation)} <span style={{ fontSize: 15, fontWeight: 400, color: "#9fb3d9" }}>FCFA</span></div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
           {totalDayChange !== 0 && (
             <span style={{ display: "flex", alignItems: "center", gap: 4, color: totalDayChange >= 0 ? "#5fc298" : "#dd7b64", fontSize: 13, fontWeight: 600 }}>
               {totalDayChange >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-              {fmt(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
+              {fmtPrecise(Math.abs(totalDayChange))} ({totalDayChangePct >= 0 ? "+" : ""}{totalDayChangePct.toFixed(1)}%) aujourd'hui
             </span>
           )}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4, auto)", gap: isMobile ? "10px 16px" : 20, marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(159,179,217,0.15)" }}>
           <div>
             <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Investi</div>
-            <div style={{ fontSize: 13.5, color: "#fff", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(totalCost)} FCFA</div>
+            <div style={{ fontSize: 13.5, color: "#fff", fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(totalCost)} FCFA</div>
           </div>
           <div>
             <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Plus-value latente</div>
-            <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64", fontWeight: 600 }}>{totalPlusValue >= 0 ? "+" : ""}{fmt(totalPlusValue)} FCFA</div>
+            <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: totalPlusValue >= 0 ? "#5fc298" : "#dd7b64", fontWeight: 600 }}>{totalPlusValue >= 0 ? "+" : ""}{fmtPrecise(totalPlusValue)} FCFA</div>
           </div>
           {totalCost > 0 && (
             <div>
@@ -9424,7 +9436,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           {totalFraisRestants > 0 && (
             <div>
               <div style={{ fontSize: 10.5, color: "#9fb3d9" }}>Frais de souscription</div>
-              <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: "#dd7b64", fontWeight: 600 }}>{fmt(Math.round(totalFraisRestants))} FCFA <span style={{ fontSize: 11, fontWeight: 400 }}>({totalCost > 0 ? ((totalFraisRestants / totalCost) * 100).toFixed(1) : "0"}%)</span></div>
+              <div style={{ fontSize: 13.5, fontFamily: "'IBM Plex Mono', monospace", color: "#dd7b64", fontWeight: 600 }}>{fmtPrecise(totalFraisRestants)} FCFA <span style={{ fontSize: 11, fontWeight: 400 }}>({totalCost > 0 ? ((totalFraisRestants / totalCost) * 100).toFixed(1) : "0"}%)</span></div>
             </div>
           )}
           {portfolioXIRR !== null && (
@@ -9468,7 +9480,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             return (
               <div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
-                  <span style={{ fontSize: 13, color: COLOR.ink }}>{fmt(totalValorisation)} / {fmt(bourseObjectif.montant)} FCFA{bourseObjectif.date && ` · cible ${dateLabelFull(bourseObjectif.date)}`}</span>
+                  <span style={{ fontSize: 13, color: COLOR.ink }}>{fmtPrecise(totalValorisation)} / {fmtPrecise(bourseObjectif.montant)} FCFA{bourseObjectif.date && ` · cible ${dateLabelFull(bourseObjectif.date)}`}</span>
                   <span style={{ fontSize: 13, color: COLOR.goldSoft, fontWeight: 700 }}>{pct.toFixed(1)}%</span>
                 </div>
                 <div style={{ height: 8, background: COLOR.surfaceRaised, borderRadius: 4, overflow: "hidden" }}>
@@ -9604,7 +9616,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 14 }}>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Valorisation</div>
-              <div style={{ fontSize: 17, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(pos.valorisation)} FCFA</div>
+              <div style={{ fontSize: 17, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmtPrecise(pos.valorisation)} FCFA</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Allocation {typeof fund.targetAllocationPct === "number" && `(cible ${fund.targetAllocationPct}%)`}</div>
@@ -9624,20 +9636,20 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Prix de revient (PRU)</div>
-              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(pos.avgCost)} FCFA</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmtPrecise(pos.avgCost)} FCFA</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Investi (montant total)</div>
-              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(Math.round(pos.costTotal))} FCFA</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmtPrecise(pos.costTotal)} FCFA</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>Plus-value latente</div>
-              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.plusValueLatente >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.plusValueLatente >= 0 ? "+" : ""}{fmt(Math.round(pos.plusValueLatente))} FCFA</div>
+              <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: pos.plusValueLatente >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{pos.plusValueLatente >= 0 ? "+" : ""}{fmtPrecise(pos.plusValueLatente)} FCFA</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: COLOR.inkMuted }}>VL actuelle {pos.lastValueDate && `(${dateLabelFull(pos.lastValueDate)})`}</div>
               <div style={{ fontSize: 15, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, display: "flex", alignItems: "center", gap: 6 }}>
-                {fmt(pos.currentVL)} FCFA
+                {fmtVL(pos.currentVL)} FCFA
                 {pos.lastValueDate && Math.floor((new Date(todayISO()).getTime() - new Date(pos.lastValueDate).getTime()) / 86400000) >= 3 && (
                   <span title="VL non mise à jour depuis 3 jours ou plus" style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "rgba(201,162,39,0.14)", border: `1px solid ${COLOR.gold}`, borderRadius: 20, padding: "2px 7px", fontSize: 9.5, fontFamily: "'Inter', sans-serif", color: COLOR.goldSoft, fontWeight: 600 }}>
                     <AlertTriangle size={9} /> périmée
@@ -9676,12 +9688,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               <TrendingUp size={12} /> {chartFundId === fund.id ? "Masquer" : "Voir"} la courbe
             </button>
             <button onClick={() => { setAlertFormFundId(alertFormFundId === fund.id ? null : fund.id); setAlertVl(fund.alertThreshold?.vl || pos.currentVL || 0); setAlertVlText(String(fund.alertThreshold?.vl || pos.currentVL || "")); setAlertDirection(fund.alertThreshold?.direction || "en dessous"); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: COLOR.goldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
-              <AlertTriangle size={12} /> {fund.alertThreshold ? `Alerte : VL ${fund.alertThreshold.direction} ${fmt(fund.alertThreshold.vl)}` : "Définir une alerte"}
+              <AlertTriangle size={12} /> {fund.alertThreshold ? `Alerte : VL ${fund.alertThreshold.direction} ${fmtVL(fund.alertThreshold.vl)}` : "Définir une alerte"}
             </button>
             {fund.recurringPlan ? (
               <>
                 <button onClick={() => markRecurringDone(fund)} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(95,194,152,0.12)", border: `1px solid ${COLOR.emerald}`, borderRadius: 6, color: COLOR.emeraldSoft, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
-                  <Rocket size={12} /> Récurrent : {fmt(fund.recurringPlan.montant)} le {dateLabelFull(fund.recurringPlan.nextDate)} — Marquer fait
+                  <Rocket size={12} /> Récurrent : {fmtPrecise(fund.recurringPlan.montant)} le {dateLabelFull(fund.recurringPlan.nextDate)} — Marquer fait
                 </button>
                 <button onClick={() => { setRecurringFormFundId(fund.id); setRecurringMontant(fund.recurringPlan!.montant); setRecurringFrequency(fund.recurringPlan!.frequency); setRecurringNextDate(fund.recurringPlan!.nextDate); setRecurringAccount(fund.recurringPlan!.account); }} style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", padding: 4, display: "flex" }} title="Modifier la récurrence">
                   <Pencil size={13} />
@@ -9781,8 +9793,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(o.date)}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, color: o.type === "Souscription" ? COLOR.emeraldSoft : COLOR.claySoft }}>{o.type}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{o.quantite.toFixed(4)}</td>
-                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
-                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.montant)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtVL(o.vl)}</td>
+                      <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(o.montant)}</td>
                       <td style={{ padding: "6px 8px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}>
                         <button onClick={() => setDetailOpId(o.id)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", padding: 4 }} title="Voir le détail">
                           <Info size={13} />
@@ -9863,10 +9875,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                             {r.hasLaterRachat && <div style={{ fontSize: 10, color: COLOR.claySoft, fontStyle: "italic" }}>⚠ rachat(s) depuis</div>}
                           </td>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{r.fundName}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.investi)}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.vlAchat)}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.round(r.valeurTheorique))}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: r.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{r.gain >= 0 ? "+" : ""}{fmt(Math.round(r.gain))}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(r.investi)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtVL(r.vlAchat)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(r.valeurTheorique)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: r.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{r.gain >= 0 ? "+" : ""}{fmtPrecise(r.gain)}</td>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: r.gainPct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{r.gainPct >= 0 ? "+" : ""}{r.gainPct.toFixed(1)}%</td>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{r.xirr !== null ? `~${(r.xirr * 100).toFixed(1)}%` : "—"}</td>
                         </tr>
@@ -9880,7 +9892,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                     <BarChart data={subscriptionPerformance.map((r) => ({ name: `${dateLabelFull(r.date)}${r.fundName ? ` (${r.fundName.split(" ")[0]})` : ""}`, gain: Math.round(r.gain) }))} layout="vertical" margin={{ left: 10 }}>
                       <XAxis type="number" tick={{ fontSize: 10, fill: COLOR.inkMuted }} />
                       <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 10, fill: COLOR.inkMuted }} />
-                      <Tooltip formatter={(v: any) => `${fmt(v)} FCFA`} contentStyle={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, fontSize: 11 }} />
+                      <Tooltip formatter={(v: any) => `${fmtPrecise(v)} FCFA`} contentStyle={{ background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, fontSize: 11 }} />
                       <Bar dataKey="gain" fill={COLOR.gold} radius={[0, 3, 3, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
@@ -9909,20 +9921,20 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                         <tr key={i} style={{ opacity: soldOut ? 0.55 : 1 }}>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>{dateLabelFull(r.date)}</td>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{r.fundName}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.investiOriginal)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(r.investiOriginal)}</td>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{r.partsRestantes.toFixed(4)}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{soldOut ? "—" : fmt(Math.round(r.valeurAujourdhui))}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: soldOut ? COLOR.inkMuted : (r.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft), fontWeight: 600 }}>{soldOut ? "—" : `${r.gain >= 0 ? "+" : ""}${fmt(Math.round(r.gain))}`}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{soldOut ? "—" : fmtPrecise(r.valeurAujourdhui)}</td>
+                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: soldOut ? COLOR.inkMuted : (r.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft), fontWeight: 600 }}>{soldOut ? "—" : `${r.gain >= 0 ? "+" : ""}${fmtPrecise(r.gain)}`}</td>
                           <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: soldOut ? COLOR.inkMuted : (r.gainPct >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) }}>{soldOut ? "—" : `${r.gainPct >= 0 ? "+" : ""}${r.gainPct.toFixed(1)}%`}</td>
                         </tr>
                       );
                     })}
                     <tr style={{ fontWeight: 700 }}>
                       <td colSpan={2} style={{ padding: "10px" }}>TOTAL</td>
-                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(subscriptionLots.totalInvesti)}</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>{fmtPrecise(subscriptionLots.totalInvesti)}</td>
                       <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>{subscriptionLots.totalParts.toFixed(4)}</td>
-                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>≈{fmt(Math.round(subscriptionLots.totalValeur))}</td>
-                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace", color: subscriptionLots.totalGain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>≈{subscriptionLots.totalGain >= 0 ? "+" : ""}{fmt(Math.round(subscriptionLots.totalGain))}</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace" }}>≈{fmtPrecise(subscriptionLots.totalValeur)}</td>
+                      <td style={{ padding: "10px", fontFamily: "'IBM Plex Mono', monospace", color: subscriptionLots.totalGain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>≈{subscriptionLots.totalGain >= 0 ? "+" : ""}{fmtPrecise(subscriptionLots.totalGain)}</td>
                       <td style={{ padding: "10px" }}>—</td>
                     </tr>
                   </tbody>
@@ -9948,7 +9960,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                     {fiscalByYear.map((y) => (
                       <tr key={y.year}>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontWeight: 600 }}>{y.year}</td>
-                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: y.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{y.gain >= 0 ? "+" : ""}{fmt(Math.round(y.gain))} FCFA</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: y.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 600 }}>{y.gain >= 0 ? "+" : ""}{fmtPrecise(y.gain)} FCFA</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{y.count}</td>
                       </tr>
                     ))}
@@ -10001,15 +10013,15 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
               <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
                 <div>
                   <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Total investi sur {simYears} an{simYears > 1 ? "s" : ""}</div>
-                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmt(Math.round(totalInvested))} FCFA</div>
+                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink, fontWeight: 600 }}>{fmtPrecise(totalInvested)} FCFA</div>
                 </div>
                 <div>
                   <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Valeur estimée à terme</div>
-                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 700 }}>{fmt(Math.round(futureValue))} FCFA</div>
+                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 700 }}>{fmtPrecise(futureValue)} FCFA</div>
                 </div>
                 <div>
                   <div style={{ fontSize: 10.5, color: COLOR.inkMuted }}>Gain estimé</div>
-                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 700 }}>{gain >= 0 ? "+" : ""}{fmt(Math.round(gain))} FCFA</div>
+                  <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", color: gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft, fontWeight: 700 }}>{gain >= 0 ? "+" : ""}{fmtPrecise(gain)} FCFA</div>
                 </div>
               </div>
             )}
@@ -10106,10 +10118,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                           {o.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", marginTop: 2 }}>{o.note}</div>}
                         </td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{o.quantite.toFixed(4)}</td>
-                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(o.vl)}</td>
-                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{fmt(o.montant)}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtVL(o.vl)}</td>
+                        <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{fmtPrecise(o.montant)}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", color: realizedHere !== null ? (realizedHere >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) : COLOR.inkMuted }}>
-                          {realizedHere !== null ? `${realizedHere >= 0 ? "+" : ""}${fmt(Math.round(realizedHere))}` : "—"}
+                          {realizedHere !== null ? `${realizedHere >= 0 ? "+" : ""}${fmtPrecise(realizedHere)}` : "—"}
                         </td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}`, color: COLOR.inkMuted }}>{o.account}</td>
                         <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLOR.hairline}` }}>
@@ -10308,9 +10320,9 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 18 }}>
                 <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Quantité</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{op.quantite.toFixed(4)}</div></div>
-                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>VL à l'opération</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(op.vl)}</div></div>
-                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Montant net</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(op.montant)}</div></div>
-                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Frais</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{op.frais ? fmt(op.frais) : "—"}</div></div>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>VL à l'opération</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmtVL(op.vl)}</div></div>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Montant net</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmtPrecise(op.montant)}</div></div>
+                <div><div style={{ fontSize: 10, color: COLOR.inkMuted, marginBottom: 2 }}>Frais</div><div style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{op.frais ? fmtPrecise(op.frais) : "—"}</div></div>
               </div>
 
               {detail && (
@@ -10320,15 +10332,15 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                     <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>Prix de revient de cette part</span>
-                    <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(detail.costBasis)} FCFA</span>
+                    <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmtPrecise(detail.costBasis)} FCFA</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                     <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{detail.realized ? "Montant reçu" : "Valorisation actuelle"}</span>
-                    <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmt(detail.valorisationActuelle)} FCFA</span>
+                    <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{fmtPrecise(detail.valorisationActuelle)} FCFA</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                     <span style={{ fontSize: 12.5, color: COLOR.inkMuted }}>{detail.realized ? "Plus-value réalisée" : "Plus-value latente"}</span>
-                    <span style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: detail.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{detail.gain >= 0 ? "+" : ""}{fmt(Math.round(detail.gain))} FCFA ({detail.gainPct >= 0 ? "+" : ""}{detail.gainPct.toFixed(1)}%)</span>
+                    <span style={{ fontSize: 14, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: detail.gain >= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{detail.gain >= 0 ? "+" : ""}{fmtPrecise(detail.gain)} FCFA ({detail.gainPct >= 0 ? "+" : ""}{detail.gainPct.toFixed(1)}%)</span>
                   </div>
                   {!detail.realized && detail.xirr !== null && (
                     <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -10348,7 +10360,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
 
               <div style={{ fontSize: 11, color: COLOR.inkMuted, paddingTop: 14, borderTop: `1px dashed ${COLOR.hairline}` }}>
                 {linkedTx
-                  ? `Transaction liée dans le Journal principal : ${linkedTx.category}${linkedTx.subcategory ? ` / ${linkedTx.subcategory}` : ""}, ${fmt(linkedTx.amount)} FCFA.`
+                  ? `Transaction liée dans le Journal principal : ${linkedTx.category}${linkedTx.subcategory ? ` / ${linkedTx.subcategory}` : ""}, ${fmtPrecise(linkedTx.amount)} FCFA.`
                   : "Aucune transaction liée dans le Journal principal (opération historique importée, ou saisie avant le 22/08/2026)."}
               </div>
             </div>
@@ -10432,7 +10444,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                   }}
                 />
                 <span style={{ position: "relative", fontSize: 12, color: COLOR.inkMuted, marginTop: 4 }}>
-                  {opVl > 0 ? `= ${opQty.toFixed(4)} parts à VL ${fmt(opVl)}` : "Montant net"}
+                  {opVl > 0 ? `= ${opQty.toFixed(4)} parts à VL ${fmtVL(opVl)}` : "Montant net"}
                 </span>
               </div>
 
