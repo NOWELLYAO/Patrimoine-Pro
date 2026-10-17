@@ -2862,7 +2862,21 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
       results.push({ category: poste.replace("::", " · "), monthsPresent: presentMonths.length, typicalDay, typicalAmount });
     }
   });
-  return results.sort((a, b) => b.typicalAmount - a.typicalAmount).slice(0, 4);
+  const auto = results.sort((a, b) => b.typicalAmount - a.typicalAmount).slice(0, 4);
+  // Liste de charges fixes de fin de mois (Pilotage de fin de mois) : source de vérité pour le
+  // mois en cours — le Conseiller quotidien et le bandeau d'alerte lisent donc les mêmes
+  // montants que la carte. Les postes détectés automatiquement ne sont gardés que s'ils ne
+  // sont pas déjà couverts par la liste (ex. Électricité), pour ne rien compter deux fois.
+  if (FIXED_MONTH_CHARGES_GLOBAL.length && curMonth === dateToMonthKey(todayISO())) {
+    const fm = computeFixedMonth(transactions, FIXED_MONTH_CHARGES_GLOBAL, FIXED_MONTH_STATE_GLOBAL, todayISO());
+    const fromList = fm.rows.filter((r) => r.remaining > 0).map((r) => ({ category: r.label, monthsPresent: 0, typicalDay: r.dayFrom ?? dayNum, typicalAmount: r.remaining }));
+    const uncovered = auto.filter((a) => {
+      const [cat, sub] = a.category.split(" · ");
+      return !fm.rows.some((r) => normalizeText(r.category) === normalizeText(cat) && (!r.subcategory || normalizeText(r.subcategory) === normalizeText(sub || "")));
+    });
+    return [...fromList, ...uncovered].sort((x, y) => y.typicalAmount - x.typicalAmount);
+  }
+  return auto;
 }
 
 // Repère, sous-catégorie par sous-catégorie, où le comportement du mois en cours
@@ -2970,7 +2984,7 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     insights.push({
       kind: "conseil",
       title: `${upcoming.length} charge(s) périodique(s) probablement encore à venir`,
-      text: `Sur tes 6 derniers mois, ces postes reviennent presque systématiquement et n'ont rien enregistré ce mois-ci : ${detail}. Historiquement, ce type de dépense arrive plutôt en fin de mois — mieux vaut réserver ces ${fmt(upcomingTotal)} FCFA maintenant que les découvrir le 30.`,
+      text: `Ces charges (ta liste de charges fixes de fin de mois et les postes récurrents détectés) ne sont pas encore réglées ce mois-ci : ${detail}. Historiquement, ce type de dépense arrive plutôt en fin de mois — mieux vaut réserver ces ${fmt(upcomingTotal)} FCFA maintenant que les découvrir le 30.`,
     });
   }
 
@@ -14071,10 +14085,17 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
 // PILOTAGE DE FIN DE MOIS — sur demande explicite de l'utilisateur (17/10/2026).
 // Calcule ce qu'on peut encore dépenser PAR JOUR jusqu'à la fin du mois, APRÈS avoir
 // réservé les charges fixes de fin de mois pas encore payées (loyer, Maman, Nesher,
-// Âge d'or, Plan éducation, Hemra…). Liste modifiable, enregistrée sur cet appareil.
+// Âge d'or, Plan éducation, Hemra…). La liste est aussi lue par le Conseiller quotidien
+// (via detectRecurringExpenses) pour que tous les chiffres soient cohérents.
+// Chaque charge peut être : marquée payée à la main, ignorée ce mois-ci, avoir un montant
+// différent ce mois-ci, être liée à des transactions précises, ou être payée directement
+// (création de la transaction dans le Journal).
 // ============================================================
 // dayFrom/dayTo : jour(s) du mois où la charge tombe habituellement (absents = date imprécise).
-interface FixedMonthCharge { id: string; label: string; amount: number; category: string; subcategory?: string; dayFrom?: number; dayTo?: number; }
+// onlyMonth : charge ponctuelle valable pour un seul mois ("2026_10").
+interface FixedMonthCharge { id: string; label: string; amount: number; category: string; subcategory?: string; dayFrom?: number; dayTo?: number; onlyMonth?: string; }
+interface FixedMonthEntry { paid?: boolean; amount?: number; skip?: boolean; links?: string[]; }
+type FixedMonthState = Record<string, Record<string, FixedMonthEntry>>;
 const DEFAULT_FIXED_MONTH_CHARGES: FixedMonthCharge[] = [
   { id: "fm-loyer", label: "Loyer", amount: 650000, category: "Logement", subcategory: "Location", dayFrom: 27, dayTo: 31 },
   { id: "fm-maman", label: "Maman", amount: 70700, category: "Enfants & Maman", subcategory: "Maman", dayFrom: 27, dayTo: 31 },
@@ -14089,10 +14110,204 @@ const DEFAULT_FIXED_MONTH_CHARGES: FixedMonthCharge[] = [
   { id: "fm-spotify", label: "Spotify", amount: 2100, category: "Abonnements", subcategory: "Spotify", dayFrom: 11, dayTo: 11 },
   { id: "fm-frais-bancaires", label: "Frais bancaires", amount: 14500, category: "Ajustement", subcategory: "Frais Bancaire", dayFrom: 30, dayTo: 30 },
 ];
-function FinDeMoisCard({ transactions }: { transactions: Transaction[] }) {
-  const [charges, setCharges] = usePersistentState<FixedMonthCharge[]>("gl-fixed-month-charges-v3", DEFAULT_FIXED_MONTH_CHARGES, true);
-  const [editing, setEditing] = useState(false);
-  const [showList, setShowList] = useState(false);
+// Copie "globale" lue par detectRecurringExpenses (Conseiller quotidien, bandeau d'alerte…),
+// alimentée à chaque rendu par le composant racine — même mécanisme que CUSTOM_DEP_SUBCATS.
+let FIXED_MONTH_CHARGES_GLOBAL: FixedMonthCharge[] = [];
+let FIXED_MONTH_STATE_GLOBAL: FixedMonthState = {};
+
+type FixedRow = FixedMonthCharge & { amountDue: number; paid: number; remaining: number; status: "open" | "paid" | "manual" | "skip"; linkedSum: number };
+function computeFixedMonth(transactions: Transaction[], charges: FixedMonthCharge[], state: FixedMonthState, today: string) {
+  const mk = dateToMonthKey(today);
+  const st = state[mk] || {};
+  const monthTx = transactions.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === mk && t.date <= today);
+  const byId = new Map(monthTx.map((t) => [t.id, t]));
+  const active = charges.filter((c) => !c.onlyMonth || c.onlyMonth === mk);
+  const matches = (t: Transaction, c: FixedMonthCharge) =>
+    normalizeText(t.category) === normalizeText(c.category) &&
+    (!c.subcategory || normalizeText(t.subcategory || "") === normalizeText(c.subcategory));
+  const linkedAll = new Set<string>();
+  active.forEach((c) => (st[c.id]?.links || []).forEach((id) => { if (byId.has(id)) linkedAll.add(id); }));
+
+  // Plusieurs lignes peuvent viser la même catégorie (ex. Hemra : 50 000 datés + 30 000 à date
+  // imprécise) : le total payé est réparti dans l'ordre, lignes datées d'abord, sans double compte.
+  const ordered = [...active].sort((a, b) => (a.dayFrom ?? 99) - (b.dayFrom ?? 99));
+  const pools: Record<string, number> = {};
+  const rows: FixedRow[] = ordered.map((c) => {
+    const e = st[c.id] || {};
+    const amountDue = e.amount ?? c.amount;
+    if (e.skip) return { ...c, amountDue, paid: 0, remaining: 0, status: "skip", linkedSum: 0 };
+    const linkedSum = (e.links || []).reduce((a, id) => a + (byId.get(id)?.amount || 0), 0);
+    const key = `${normalizeText(c.category)}|${normalizeText(c.subcategory || "")}`;
+    if (pools[key] === undefined) pools[key] = monthTx.filter((t) => matches(t, c) && !linkedAll.has(t.id)).reduce((a, t) => a + t.amount, 0);
+    const auto = Math.min(pools[key], Math.max(0, amountDue - linkedSum));
+    pools[key] -= auto;
+    const paid = linkedSum + auto;
+    const remaining = e.paid ? 0 : Math.max(0, amountDue - paid);
+    return { ...c, amountDue, paid, remaining, status: e.paid && paid < amountDue ? "manual" : remaining === 0 ? "paid" : "open", linkedSum };
+  });
+  const remainingTotal = rows.reduce((a, r) => a + r.remaining, 0);
+  const isFixedTx = (t: Transaction) => linkedAll.has(t.id) || rows.some((r) => r.status !== "skip" && t.type === "Dépense" && matches(t, r));
+  return { rows, remainingTotal, isFixedTx, matches };
+}
+
+function FixedChargeManageSheet({ row, monthKey, transactions, accounts, entry, onClose, onEntry, onCharge, onPay, onOpenSaisie, onDelete }: {
+  row: FixedRow | null; monthKey: string; transactions: Transaction[]; accounts: Account[]; entry: FixedMonthEntry;
+  onClose: () => void; onEntry: (patch: FixedMonthEntry) => void; onCharge: (patch: Partial<FixedMonthCharge>) => void;
+  onPay: (amount: number, date: string, account: string) => void; onOpenSaisie: (amount: number) => void; onDelete: () => void;
+}) {
+  const [section, setSection] = useState<"link" | "pay" | "month" | "edit" | null>(null);
+  const [amountTxt, setAmountTxt] = useState("");
+  const [payAmount, setPayAmount] = useState("");
+  const [payDate, setPayDate] = useState(todayISO());
+  const [payAccount, setPayAccount] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+  useEffect(() => {
+    if (row) { setSection(row.label === "Nouvelle charge" ? "edit" : null); setAmountTxt(String(row.amountDue)); setPayAmount(String(row.remaining || row.amountDue)); setPayDate(todayISO()); setPayAccount(defaultQuickAccount(accounts)); setConfirmDel(false); }
+  }, [row?.id]);
+  if (!row) return null;
+  const today = todayISO();
+  const monthTx = transactions.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === monthKey && t.date <= today).sort((a, b) => b.date.localeCompare(a.date));
+  const links = entry.links || [];
+  const sameCat = (t: Transaction) => normalizeText(t.category) === normalizeText(row.category) && (!row.subcategory || normalizeText(t.subcategory || "") === normalizeText(row.subcategory));
+  const candidates = [...monthTx.filter(sameCat), ...monthTx.filter((t) => !sameCat(t))];
+  const detected = monthTx.filter((t) => sameCat(t) || links.includes(t.id));
+  const toggleLink = (id: string) => onEntry({ links: links.includes(id) ? links.filter((x) => x !== id) : [...links, id] });
+  const num = (s: string) => Number(s.replace(/\D/g, "")) || 0;
+  const isPaid = row.status === "paid" || row.status === "manual";
+  const bannerColor = row.status === "skip" ? COLOR.inkMuted : isPaid ? COLOR.emeraldSoft : COLOR.claySoft;
+  const bannerText = row.status === "skip" ? "Ignorée ce mois-ci" : row.status === "manual" ? "✓ PAYÉE (marquée à la main)" : row.status === "paid" ? "✓ PAYÉE" : `À PAYER · reste ${fmt(row.remaining)} FCFA`;
+
+  const btn: React.CSSProperties = { background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, color: COLOR.ink, padding: "11px 12px", fontSize: 13, cursor: "pointer", textAlign: "left" };
+  const lbl: React.CSSProperties = { fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", margin: "0 0 6px" };
+  const sectionBtn = (id: typeof section, text: string) => (
+    <button onClick={() => setSection(section === id ? null : id)} style={{ ...btn, width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, borderColor: section === id ? COLOR.goldSoft : COLOR.hairline }}>
+      <span>{text}</span><ChevronDown size={14} style={{ transform: section === id ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+    </button>
+  );
+  const box: React.CSSProperties = { padding: "12px 4px 4px" };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 450, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 12 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto", background: COLOR.surface, border: `1px solid ${COLOR.hairline}`, borderRadius: 16, padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+          <div>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18, color: COLOR.ink }}>{row.label}</div>
+            <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{row.category}{row.subcategory ? ` › ${row.subcategory}` : ""} · {row.onlyMonth ? "ponctuelle" : row.dayFrom === undefined ? "date imprécise" : row.dayTo === undefined || row.dayTo === row.dayFrom ? `le ${row.dayFrom}` : `du ${row.dayFrom} au ${row.dayTo}`}</div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: COLOR.inkMuted, cursor: "pointer", display: "flex" }}><X size={18} /></button>
+        </div>
+
+        <div style={{ border: `1px solid ${bannerColor}`, background: `${bannerColor}18`, borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: bannerColor, letterSpacing: "0.03em" }}>{bannerText}</div>
+          <div style={{ fontSize: 12, color: COLOR.inkMuted, marginTop: 4 }}>
+            Prévu {fmt(row.amountDue)}{row.amountDue !== row.amount ? ` (habituel ${fmt(row.amount)})` : ""} · payé {fmt(row.paid)}
+          </div>
+        </div>
+
+        {detected.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={lbl}>Transactions comptées pour cette charge</div>
+            {detected.map((t) => (
+              <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0", color: COLOR.ink }}>
+                <span>{t.date.slice(8, 10)}/{t.date.slice(5, 7)} · {t.category}{t.subcategory ? ` › ${t.subcategory}` : ""}{t.note ? ` · ${t.note}` : ""}{links.includes(t.id) ? " 🔗" : ""}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.emeraldSoft }}>{fmt(t.amount)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <button style={{ ...btn, background: COLOR.gold, color: COLOR.bg, border: "none", fontWeight: 600 }} onClick={() => { onOpenSaisie(row.remaining || row.amountDue); onClose(); }}>✎ Payer : ouvrir la saisie</button>
+          <button style={{ ...btn, borderColor: entry.paid ? COLOR.emeraldSoft : COLOR.hairline, color: entry.paid ? COLOR.emeraldSoft : COLOR.ink }} onClick={() => onEntry({ paid: !entry.paid, skip: false })}>{entry.paid ? "✓ Payée (annuler)" : "✓ Marquer payée"}</button>
+        </div>
+
+        {sectionBtn("link", `🔗 Relier à une transaction déjà payée${links.length ? ` (${links.length})` : ""}`)}
+        {section === "link" && (
+          <div style={box}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 230, overflowY: "auto", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: 6 }}>
+              {candidates.map((t) => (
+                <label key={t.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: COLOR.ink, padding: "5px 2px", cursor: "pointer" }}>
+                  <input type="checkbox" checked={links.includes(t.id)} onChange={() => toggleLink(t.id)} />
+                  <span style={{ flex: 1 }}>{t.date.slice(8, 10)}/{t.date.slice(5, 7)} · {t.category}{t.subcategory ? ` › ${t.subcategory}` : ""}{t.note ? ` · ${t.note}` : ""}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: sameCat(t) ? COLOR.goldSoft : COLOR.inkMuted }}>{fmt(t.amount)}</span>
+                </label>
+              ))}
+              {!candidates.length && <div style={{ fontSize: 12, color: COLOR.inkMuted, padding: 6 }}>Aucune dépense ce mois-ci.</div>}
+            </div>
+            <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 6, lineHeight: 1.5 }}>Une transaction cochée compte pour cette charge quelle que soit sa catégorie. Celles de la même catégorie sont en premier (en doré).</div>
+          </div>
+        )}
+
+        {sectionBtn("pay", "⚡ Enregistrer le paiement directement")}
+        {section === "pay" && (
+          <div style={box}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <input type="text" inputMode="numeric" style={{ ...inputStyle, flex: "1 1 100px", width: "auto" }} value={payAmount} onChange={(e) => setPayAmount(e.target.value.replace(/\D/g, ""))} />
+              <input type="date" style={{ ...inputStyle, flex: "1 1 130px", width: "auto" }} value={payDate} onChange={(e) => setPayDate(e.target.value)} />
+              <select style={{ ...inputStyle, flex: "1 1 110px", width: "auto" }} value={payAccount} onChange={(e) => setPayAccount(e.target.value)}>
+                {accounts.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+              </select>
+            </div>
+            <button style={{ ...btn, background: COLOR.gold, color: COLOR.bg, border: "none", fontWeight: 600, opacity: num(payAmount) > 0 ? 1 : 0.5 }} disabled={num(payAmount) <= 0} onClick={() => { onPay(num(payAmount), payDate, payAccount); onClose(); }}>
+              Enregistrer {fmt(num(payAmount))} FCFA
+            </button>
+            <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 6 }}>Crée la dépense dans le Journal ({row.category}{row.subcategory ? ` › ${row.subcategory}` : ""}).</div>
+          </div>
+        )}
+
+        {sectionBtn("month", `📅 Montant ou statut pour ce mois seulement${entry.amount !== undefined || entry.skip ? " ●" : ""}`)}
+        {section === "month" && (
+          <div style={box}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <input type="text" inputMode="numeric" style={{ ...inputStyle, flex: 1 }} value={amountTxt} onChange={(e) => setAmountTxt(e.target.value.replace(/\D/g, ""))} />
+              <button style={{ ...btn, padding: "8px 12px" }} onClick={() => onEntry({ amount: num(amountTxt) })}>Appliquer</button>
+              {entry.amount !== undefined && <button style={{ ...btn, padding: "8px 12px" }} onClick={() => { onEntry({ amount: undefined }); setAmountTxt(String(row.amount)); }}>Remettre {fmt(row.amount)}</button>}
+            </div>
+            <button style={{ ...btn, borderColor: entry.skip ? COLOR.goldSoft : COLOR.hairline, color: entry.skip ? COLOR.goldSoft : COLOR.ink }} onClick={() => onEntry({ skip: !entry.skip, paid: false })}>{entry.skip ? "Ignorée ce mois (annuler)" : "Ignorer cette charge ce mois-ci"}</button>
+          </div>
+        )}
+
+        {sectionBtn("edit", "✎ Modifier la charge (permanent)")}
+        {section === "edit" && (
+          <div style={{ ...box, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div><div style={lbl}>Nom</div><input style={inputStyle} value={row.label} onChange={(e) => onCharge({ label: e.target.value })} /></div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><div style={lbl}>Catégorie</div>
+                <select style={inputStyle} value={row.category} onChange={(e) => onCharge({ category: e.target.value, subcategory: "" })}>
+                  {Array.from(new Set([row.category, ...categoriesForType(transactions, "Dépense")])).map((c) => <option key={c} value={c}>{c}</option>)}
+                </select></div>
+              <div style={{ flex: 1 }}><div style={lbl}>Sous-catégorie</div>
+                <select style={inputStyle} value={row.subcategory || ""} onChange={(e) => onCharge({ subcategory: e.target.value })}>
+                  <option value="">Toutes</option>
+                  {getSubcategories("Dépense", row.category).map((s) => <option key={s} value={s}>{s}</option>)}
+                </select></div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><div style={lbl}>Du jour</div><input type="text" inputMode="numeric" style={inputStyle} value={row.dayFrom ?? ""} placeholder="imprécis" onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); onCharge({ dayFrom: v >= 1 && v <= 31 ? v : undefined, dayTo: v >= 1 && v <= 31 ? (row.dayTo ?? v) : undefined }); }} /></div>
+              <div style={{ flex: 1 }}><div style={lbl}>Au jour</div><input type="text" inputMode="numeric" style={inputStyle} value={row.dayTo ?? ""} placeholder="imprécis" onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); onCharge({ dayTo: v >= 1 && v <= 31 ? v : row.dayFrom }); }} /></div>
+              <div style={{ flex: 1.3 }}><div style={lbl}>Montant habituel</div><input type="text" inputMode="numeric" style={inputStyle} value={row.amount} onChange={(e) => onCharge({ amount: Number(e.target.value.replace(/\D/g, "")) || 0 })} /></div>
+            </div>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
+              <input type="checkbox" checked={!!row.onlyMonth} onChange={(e) => onCharge({ onlyMonth: e.target.checked ? monthKey : undefined })} /> Charge ponctuelle (ce mois seulement, disparaît le mois suivant)
+            </label>
+            {!confirmDel
+              ? <button style={{ ...btn, color: COLOR.claySoft }} onClick={() => setConfirmDel(true)}>🗑 Supprimer cette charge de la liste</button>
+              : <button style={{ ...btn, background: COLOR.clay, color: COLOR.bg, border: "none", fontWeight: 600 }} onClick={() => { onDelete(); onClose(); }}>Confirmer la suppression</button>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCharges, fixedState, setFixedState, onOpenSaisie }: {
+  transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[];
+  onOpenSaisie: (p: { category: string; subcategory?: string; amount: number; note: string }) => void;
+  charges: FixedMonthCharge[]; setCharges: (c: FixedMonthCharge[]) => void;
+  fixedState: FixedMonthState; setFixedState: (s: FixedMonthState) => void;
+}) {
+  const [showList, setShowList] = useState(true);
+  const [managingId, setManagingId] = useState<string | null>(null);
 
   const today = todayISO();
   const mk = dateToMonthKey(today);
@@ -14102,35 +14317,19 @@ function FinDeMoisCard({ transactions }: { transactions: Transaction[] }) {
   const daysLeft = dim - dayNum + 1; // aujourd'hui inclus
   const pdim = daysInMonthOf(pmk);
 
-  const matches = (t: Transaction, c: FixedMonthCharge) =>
-    t.type === "Dépense" && normalizeText(t.category) === normalizeText(c.category) &&
-    (!c.subcategory || normalizeText(t.subcategory || "") === normalizeText(c.subcategory));
-  const isFixed = (t: Transaction) => charges.some((c) => matches(t, c));
+  const fm = computeFixedMonth(transactions, charges, fixedState, today);
+  const { rows, remainingTotal: fixedRemaining, isFixedTx } = fm;
+  const isFixed = (t: Transaction) => isFixedTx(t);
 
   const monthTx = transactions.filter((t) => dateToMonthKey(t.date) === mk && t.date <= today);
   const rev = monthTx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const dep = monthTx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const solde = rev - dep;
-
-  // Plusieurs lignes peuvent viser la même catégorie (ex. Hemra : 50 000 datés + 30 000 à date
-  // imprécise) : le total payé est réparti dans l'ordre, lignes datées d'abord, sans double compte.
-  const dueSort = (c: FixedMonthCharge) => (c.dayFrom ?? 99);
-  const ordered = [...charges].sort((a, b) => dueSort(a) - dueSort(b));
-  const pools: Record<string, number> = {};
-  const rowsById: Record<string, { paid: number; remaining: number }> = {};
-  ordered.forEach((c) => {
-    const key = `${normalizeText(c.category)}|${normalizeText(c.subcategory || "")}`;
-    if (pools[key] === undefined) pools[key] = monthTx.filter((t) => matches(t, c)).reduce((a, t) => a + t.amount, 0);
-    const paid = Math.min(pools[key], c.amount);
-    pools[key] -= paid;
-    rowsById[c.id] = { paid, remaining: c.amount - paid };
-  });
-  const rows = ordered.map((c) => ({ ...c, ...rowsById[c.id] }));
-  const dueLabel = (c: FixedMonthCharge) => c.dayFrom === undefined ? "date imprécise" : (c.dayTo === undefined || c.dayTo === c.dayFrom ? `le ${c.dayFrom}` : `du ${c.dayFrom} au ${c.dayTo}`);
-  const isLate = (r: { dayFrom?: number; dayTo?: number; remaining: number }) => r.remaining > 0 && r.dayFrom !== undefined && (r.dayTo ?? r.dayFrom) < dayNum;
-  const fixedRemaining = rows.reduce((a, r) => a + r.remaining, 0);
   const reste = solde - fixedRemaining;
   const perDay = reste / daysLeft;
+
+  const dueLabel = (c: FixedMonthCharge) => c.onlyMonth ? "ponctuelle" : c.dayFrom === undefined ? "date imprécise" : (c.dayTo === undefined || c.dayTo === c.dayFrom ? `le ${c.dayFrom}` : `du ${c.dayFrom} au ${c.dayTo}`);
+  const isLate = (r: FixedRow) => r.status === "open" && r.dayFrom !== undefined && (r.dayTo ?? r.dayFrom) < dayNum;
 
   const discretionarySoFar = monthTx.filter((t) => t.type === "Dépense" && !isFixed(t)).reduce((a, t) => a + t.amount, 0);
   const rateNow = dayNum > 0 ? discretionarySoFar / dayNum : 0;
@@ -14152,6 +14351,11 @@ function FinDeMoisCard({ transactions }: { transactions: Transaction[] }) {
       ? `Ton rythme actuel (${fmt(rateNow)} FCFA/jour) est sous ta limite : tu es dans les clous.`
       : `Ton rythme actuel (${fmt(rateNow)} FCFA/jour) dépasse ta limite : ralentis de ${fmt(rateNow - perDay)} FCFA/jour.`;
 
+  const countable = rows.filter((r) => r.status !== "skip");
+  const totalDue = countable.reduce((a, r) => a + r.amountDue, 0);
+  const totalDone = totalDue - fixedRemaining;
+  const nextDue = rows.filter((r) => r.status === "open" && r.dayFrom !== undefined).sort((a, b) => (a.dayFrom as number) - (b.dayFrom as number)).find((r) => (r.dayTo ?? (r.dayFrom as number)) >= dayNum);
+
   const mini = (label: string, value: string, color?: string) => (
     <div style={{ flex: "1 1 150px", minWidth: 140 }}>
       <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{label}</div>
@@ -14159,6 +14363,26 @@ function FinDeMoisCard({ transactions }: { transactions: Transaction[] }) {
     </div>
   );
   const upd = (id: string, patch: Partial<FixedMonthCharge>) => setCharges(charges.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  const updEntry = (id: string, patch: FixedMonthEntry) => {
+    const month = { ...(fixedState[mk] || {}) };
+    const next = { ...(month[id] || {}), ...patch };
+    (Object.keys(next) as (keyof FixedMonthEntry)[]).forEach((k) => { if (next[k] === undefined || next[k] === false || (Array.isArray(next[k]) && !(next[k] as string[]).length)) delete next[k]; });
+    if (Object.keys(next).length) month[id] = next; else delete month[id];
+    setFixedState({ ...fixedState, [mk]: month });
+  };
+  const payCharge = (row: FixedRow, amount: number, date: string, account: string) => {
+    const tx: Transaction = { id: uid(), date, time: nowTime(), category: row.category, subcategory: row.subcategory || undefined, type: "Dépense", amount, account: account || undefined, note: `Charge fixe : ${row.label}` };
+    setTransactions([...transactions, tx]);
+  };
+  const managing = managingId ? rows.find((r) => r.id === managingId) || null : null;
+
+  const statusBadge = (r: FixedRow) => {
+    if (r.status === "skip") return { txt: "ignorée ce mois", color: COLOR.inkMuted };
+    if (r.status === "manual") return { txt: "✓ payée (manuel)", color: COLOR.emeraldSoft };
+    if (r.status === "paid") return { txt: "✓ payé", color: COLOR.emeraldSoft };
+    if (isLate(r)) return { txt: `⚠ à vérifier · ${fmt(r.remaining)}`, color: COLOR.goldSoft };
+    return { txt: `reste ${fmt(r.remaining)}`, color: COLOR.claySoft };
+  };
 
   return (
     <div style={{ background: COLOR.surface, border: `1px solid ${tone}`, borderRadius: 14, padding: 18 }}>
@@ -14186,56 +14410,67 @@ function FinDeMoisCard({ transactions }: { transactions: Transaction[] }) {
         {mini("Fin de mois si rythme du mois dernier", fmt(projectedPrevStyle), projectedPrevStyle >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
       </div>
 
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: COLOR.inkMuted, marginBottom: 5 }}>
+          <span>Charges fixes réglées : {fmt(totalDone)} / {fmt(totalDue)} FCFA</span>
+          <span>{nextDue ? `Prochaine : ${nextDue.label} (${dueLabel(nextDue)})` : "Aucune échéance datée à venir"}</span>
+        </div>
+        <div style={{ height: 6, background: COLOR.surfaceInput, borderRadius: 3, overflow: "hidden" }}>
+          <div style={{ width: `${totalDue > 0 ? Math.min(100, (totalDone / totalDue) * 100) : 0}%`, height: "100%", background: COLOR.emeraldSoft }} />
+        </div>
+      </div>
+
       <button onClick={() => setShowList(!showList)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>
-        {showList ? "Masquer" : "Voir"} les charges fixes de fin de mois ({fmt(fixedRemaining)} FCFA restants)
+        {showList ? "Masquer" : "Afficher"} les charges fixes de fin de mois ({fmt(fixedRemaining)} FCFA restants)
       </button>
 
       {showList && (
-        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-          {rows.map((r) => (
-            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5 }}>
-              {editing ? (
-                <>
-                  <input style={{ ...inputStyle, flex: "1 1 110px", width: "auto" }} value={r.label} onChange={(e) => upd(r.id, { label: e.target.value })} />
-                  <select style={{ ...inputStyle, flex: "1 1 130px", width: "auto" }} value={r.category} onChange={(e) => upd(r.id, { category: e.target.value, subcategory: "" })}>
-                    {Array.from(new Set([r.category, ...categoriesForType(transactions, "Dépense")])).map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                  <select style={{ ...inputStyle, flex: "1 1 110px", width: "auto" }} value={r.subcategory || ""} onChange={(e) => upd(r.id, { subcategory: e.target.value })}>
-                    <option value="">Toutes</option>
-                    {getSubcategories("Dépense", r.category).map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                  <input type="text" inputMode="numeric" placeholder="du jour" title="Jour du mois (début)" style={{ ...inputStyle, flex: "0 1 62px", width: 62 }} value={r.dayFrom ?? ""} onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); upd(r.id, { dayFrom: v >= 1 && v <= 31 ? v : undefined, dayTo: v >= 1 && v <= 31 ? (r.dayTo ?? v) : undefined }); }} />
-                  <input type="text" inputMode="numeric" placeholder="au jour" title="Jour du mois (fin)" style={{ ...inputStyle, flex: "0 1 62px", width: 62 }} value={r.dayTo ?? ""} onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); upd(r.id, { dayTo: v >= 1 && v <= 31 ? v : r.dayFrom }); }} />
-                  <input type="text" inputMode="numeric" style={{ ...inputStyle, flex: "0 1 100px", width: 100 }} value={r.amount} onChange={(e) => upd(r.id, { amount: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
-                  <button onClick={() => setCharges(charges.filter((c) => c.id !== r.id))} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer" }}>✕</button>
-                </>
-              ) : (
-                <>
-                  <span style={{ flex: 1, color: COLOR.ink }}>{r.label} <span style={{ color: COLOR.inkMuted, fontSize: 11 }}>({dueLabel(r)} · {r.category}{r.subcategory ? ` › ${r.subcategory}` : ""})</span></span>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(r.amount)}</span>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", minWidth: 120, textAlign: "right", color: r.remaining === 0 ? COLOR.emeraldSoft : isLate(r) ? COLOR.goldSoft : COLOR.claySoft }}>
-                    {r.remaining === 0 ? "✓ payé" : isLate(r) ? `⚠ à vérifier · ${fmt(r.remaining)}` : `reste ${fmt(r.remaining)}`}
-                  </span>
-                </>
-              )}
-            </div>
-          ))}
-          <div style={{ display: "flex", gap: 14, marginTop: 4 }}>
-            <button onClick={() => setEditing(!editing)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>{editing ? "Terminer" : "Modifier la liste"}</button>
-            {editing && <button onClick={() => setCharges([...charges, { id: uid("fm"), label: "Nouvelle charge", amount: 0, category: categoriesForType(transactions, "Dépense")[0] || "" }])} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>+ Ajouter une charge</button>}
-          </div>
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.map((r) => {
+            const b = statusBadge(r);
+            const done = r.status === "paid" || r.status === "manual";
+            const ring = done ? COLOR.emeraldSoft : r.status === "skip" ? COLOR.inkMuted : isLate(r) ? COLOR.goldSoft : COLOR.claySoft;
+            return (
+              <div key={r.id} onClick={() => setManagingId(r.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 10px", borderRadius: 10, background: COLOR.surfaceRaised, border: `1px solid ${COLOR.hairline}`, cursor: "pointer", opacity: r.status === "skip" ? 0.55 : 1 }}>
+                <button aria-label={`Gérer ${r.label}`} onClick={(e) => { e.stopPropagation(); setManagingId(r.id); }} style={{ width: 30, height: 30, borderRadius: "50%", flexShrink: 0, border: `2px solid ${ring}`, background: done ? ring : "transparent", color: done ? COLOR.bg : ring, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, padding: 0 }}>
+                  {done ? "✓" : r.status === "skip" ? "–" : isLate(r) ? "!" : ""}
+                </button>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, color: COLOR.ink }}>{r.label}</div>
+                  <div style={{ fontSize: 11, color: COLOR.inkMuted }}>{dueLabel(r)} · {r.category}{r.subcategory ? ` › ${r.subcategory}` : ""}</div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: r.amountDue !== r.amount ? COLOR.goldSoft : COLOR.ink }}>{fmt(r.amountDue)}</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: b.color }}>{b.txt}</div>
+                </div>
+              </div>
+            );
+          })}
+          <button onClick={() => { const id = uid("fm"); setCharges([...charges, { id, label: "Nouvelle charge", amount: 0, category: categoriesForType(transactions, "Dépense")[0] || "" }]); setManagingId(id); }} style={{ background: "transparent", border: `1px dashed ${COLOR.goldSoft}`, borderRadius: 10, color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: "10px" }}>+ Ajouter une charge</button>
           <div style={{ fontSize: 11, color: COLOR.inkMuted, lineHeight: 1.5 }}>
-            Une charge est « payée » dès que tes dépenses du mois dans cette catégorie atteignent son montant. Si tu en as payé une partie, seul le reste est réservé. « ⚠ à vérifier » = la date habituelle est passée sans paiement trouvé (peut-être saisi dans une autre catégorie). Ces dépenses sont exclues de ton « rythme hors fixes ».
+            Touche une charge pour la gérer : payer (saisie ou enregistrement direct), la relier à une transaction déjà payée, la marquer payée, changer son montant ce mois-ci ou la modifier. Elle passe au vert dès que tes dépenses du mois dans sa catégorie atteignent son montant. « ! » = date habituelle passée sans paiement trouvé. Les charges restantes alimentent aussi le Conseiller quotidien.
           </div>
         </div>
       )}
+
+      <FixedChargeManageSheet
+        row={managing} monthKey={mk} transactions={transactions} accounts={accounts}
+        entry={(managing && (fixedState[mk] || {})[managing.id]) || {}}
+        onClose={() => setManagingId(null)}
+        onEntry={(patch) => managing && updEntry(managing.id, patch)}
+        onCharge={(patch) => managing && upd(managing.id, patch)}
+        onOpenSaisie={(amount) => managing && onOpenSaisie({ category: managing.category, subcategory: managing.subcategory, amount, note: `Charge fixe : ${managing.label}` })}
+        onPay={(amount, date, account) => managing && payCharge(managing, amount, date, account)}
+        onDelete={() => managing && setCharges(charges.filter((c) => c.id !== managing.id))}
+      />
     </div>
   );
 }
 
-function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture }: {
+function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, setFixedMonthCharges, fixedMonthState, setFixedMonthState }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
   monthlyObjective: number; setMonthlyObjective: (n: number) => void; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
+  fixedMonthCharges: FixedMonthCharge[]; setFixedMonthCharges: (c: FixedMonthCharge[]) => void; fixedMonthState: FixedMonthState; setFixedMonthState: (s: FixedMonthState) => void;
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
   const [quickTime, setQuickTime] = useState(nowTime());
@@ -14250,6 +14485,13 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // Pré-remplit la Saisie rapide (depuis une charge fixe de fin de mois) et y fait défiler la page.
+  const prefillQuick = (p: { category: string; subcategory?: string; amount: number; note: string }) => {
+    setEditingId(null); setQuickType("Dépense"); setQuickDate(todayISO()); setQuickTime(nowTime());
+    setQuickCategory(p.category); setQuickSubcategory(p.subcategory || ""); setQuickAmount(p.amount); setQuickNote(p.note);
+    setTimeout(() => { try { document.getElementById("saisie-rapide-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" }); } catch {} }, 60);
+  };
 
   const today = todayISO();
   const currentMonthKey = dateToMonthKey(today);
@@ -14448,7 +14690,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
         <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
-      <FinDeMoisCard transactions={transactions} />
+      <FinDeMoisCard onOpenSaisie={prefillQuick} transactions={transactions} setTransactions={setTransactions} accounts={accounts} charges={fixedMonthCharges} setCharges={setFixedMonthCharges} fixedState={fixedMonthState} setFixedState={setFixedMonthState} />
 
       {kpiDetail && (() => {
         const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor);
@@ -14461,6 +14703,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         );
       })()}
 
+      <div id="saisie-rapide-anchor" />
       <Panel title="Saisie rapide" subtitle="Ajoutez vos dépenses et revenus au fil de la journée — comptabilisés instantanément">
         {(() => {
           const typeColor = quickType === "Revenu" ? COLOR.emerald : COLOR.clay;
@@ -15053,6 +15296,7 @@ export default function GrandLivre() {
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
     funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
+    fixedMonthCharges, fixedMonthState,
   });
   const downloadBackupNow = () => {
     const data = getSnapshotRoot();
@@ -15067,6 +15311,10 @@ export default function GrandLivre() {
   const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, canSaveGated);
   CUSTOM_DEP_SUBCATS = customDepSubcategories;
   CUSTOM_REV_SUBCATS = customRevSubcategories;
+  const [fixedMonthCharges, setFixedMonthCharges] = usePersistentState<FixedMonthCharge[]>("gl-fixed-month-charges-v3", DEFAULT_FIXED_MONTH_CHARGES, true);
+  const [fixedMonthState, setFixedMonthState] = usePersistentState<FixedMonthState>("gl-fixed-month-state", {}, true);
+  FIXED_MONTH_CHARGES_GLOBAL = fixedMonthCharges;
+  FIXED_MONTH_STATE_GLOBAL = fixedMonthState;
   SUBCAT_SETTERS.Dépense = setCustomDepSubcategories;
   SUBCAT_SETTERS.Revenu = setCustomRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
@@ -15702,6 +15950,8 @@ export default function GrandLivre() {
     if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
     if (data.customDepSubcategories) setCustomDepSubcategories(data.customDepSubcategories);
     if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
+    if (data.fixedMonthCharges) setFixedMonthCharges(data.fixedMonthCharges);
+    if (data.fixedMonthState) setFixedMonthState(data.fixedMonthState);
     if (data.funds) setFunds(data.funds);
     if (data.fundOperations) setFundOperations(data.fundOperations);
     if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
@@ -15898,7 +16148,7 @@ export default function GrandLivre() {
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} navContext={navContext} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} fixedMonthCharges={fixedMonthCharges} setFixedMonthCharges={setFixedMonthCharges} fixedMonthState={fixedMonthState} setFixedMonthState={setFixedMonthState} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
