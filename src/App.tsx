@@ -8264,9 +8264,9 @@ function CalcDetailIcon({ onClick }: { onClick: () => void }) {
   );
 }
 
-function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext, badge }: {
+function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext, badge, topSlot }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
-  onPrev?: () => void; onNext?: () => void; badge?: { text: string; tone: "live" | "past" };
+  onPrev?: () => void; onNext?: () => void; badge?: { text: string; tone: "live" | "past" }; topSlot?: React.ReactNode;
 }) {
   const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   if (!open) return null;
@@ -8407,6 +8407,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
           </div>
         </div>
         <div className="gl-scroll" style={{ flex: 1, overflowY: "auto", padding: "18px 22px", WebkitOverflowScrolling: "touch" }}>
+          {topSlot}
           {blocks.map((b, i) => {
             if (b.kind === "kv") return (
               <div key={i} style={{ marginBottom: 16 }}>
@@ -14664,7 +14665,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       .map((g) => ({ group: g, value: byGroup[g], pct: (byGroup[g] / total) * 100 }))
       .filter((r) => r.value > 0);
   };
-  const [kpiDetail, setKpiDetail] = useState<{ mode: "today" | "month"; anchor: string } | null>(null);
+  const [kpiDetail, setKpiDetail] = useState<{ mode: "today" | "month"; anchor: string; cmp?: string } | null>(null);
 
   // Comparaisons "vs même période le mois dernier" — même logique que la carte déjà
   // existante dans le Conseiller quotidien ("Mieux que le mois dernier à la même date"),
@@ -14688,11 +14689,12 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   // vouloir dire qu'on se prive de l'essentiel plutôt que de vraiment progresser) ?
   // "anchor" est navigable (jour ou mois précédent/suivant) — corrigé le 12/08/2026 :
   // la fiche était figée sur "aujourd'hui" et devenait invisible dès que le jour passait.
-  const buildKpiGroupDetail = (mode: "today" | "month", anchor: string) => {
+  const buildKpiGroupDetail = (mode: "today" | "month", anchor: string, cmp?: string) => {
     const anchorMonthKey = mode === "today" ? dateToMonthKey(anchor) : anchor;
     const anchorDayNum = mode === "today" ? new Date(anchor + "T00:00:00").getDate() : dayNum;
     const prevAnchorMonthKey = prevMonthKey(anchorMonthKey);
-    const anchorSameDayLastMonth = mode === "today" ? mkDate(prevAnchorMonthKey, clampDay(prevAnchorMonthKey, anchorDayNum)) : "";
+    // cmp : jour précis du mois précédent choisi avec les flèches de la fiche (sinon, même jour que l'ancre).
+    const anchorSameDayLastMonth = mode === "today" ? (cmp || mkDate(prevAnchorMonthKey, clampDay(prevAnchorMonthKey, anchorDayNum))) : "";
 
     const curPred = mode === "today" ? (t: any) => t.date === anchor : (t: any) => dateToMonthKey(t.date) === anchorMonthKey;
     const prevPred = mode === "today"
@@ -14703,7 +14705,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const curTotal = curRows.reduce((a, r) => a + r.value, 0);
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
     const curLabel = mode === "today" ? dateLabelFull(anchor) : monthLabel(anchorMonthKey);
-    const prevLabel = `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
+    const prevLabel = mode === "today" && cmp ? `${dateLabelFull(cmp)} (mois précédent)` : `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
     // Distingue la vraie période en cours (aujourd'hui / mois civil actuel) d'une période
     // passée qu'on consulte via les flèches ◀▶ — demande explicite de l'utilisateur
     // (13/08/2026) : le libellé de colonne "Ce mois" ne changeait jamais en naviguant,
@@ -14718,7 +14720,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const curLabelShort = isCurrentPeriod
       ? (mode === "today" ? "Ce jour" : "Ce mois")
       : (mode === "today" ? dateLabelShort(anchor) : monthLabel(anchorMonthKey));
-    const prevLabelShort = "Mois dernier";
+    const prevLabelShort = mode === "today" ? dateLabelShort(anchorSameDayLastMonth) : "Mois dernier";
 
     const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
     const valueOf = (rows: typeof curRows, g: string) => rows.find((r) => r.group === g)?.value || 0;
@@ -14770,6 +14772,15 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           footerRow: ["Total", fmt(curTotal), fmt(prevTotal), `${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)}`, `${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(0)}%`],
           footerColors: [undefined, undefined, undefined, undefined, Math.abs(totalDelta) < 1 ? COLOR.inkMuted : totalDelta < 0 ? COLOR.emeraldSoft : COLOR.claySoft],
         },
+        ...(mode === "today" ? [{
+          kind: "kv" as const,
+          rows: (() => {
+            const dayTx = withGroup.filter((t) => t.type === "Dépense" && t.date === anchorSameDayLastMonth).sort((a, b) => b.amount - a.amount);
+            const rows = dayTx.slice(0, 8).map((t) => ({ label: `${t.category}${t.subcategory ? ` › ${t.subcategory}` : ""}`, value: fmt(t.amount) }));
+            if (dayTx.length > 8) rows.push({ label: `… et ${dayTx.length - 8} autre(s)`, value: fmt(dayTx.slice(8).reduce((a, t) => a + t.amount, 0)) });
+            return [{ label: `Dépensé le ${dateLabelFull(anchorSameDayLastMonth)}`, value: `${fmt(prevTotal)} FCFA`, strong: true } as any, ...(rows.length ? rows : [{ label: "Aucune dépense ce jour-là", value: "—" }])];
+          })(),
+        }] : []),
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
       ],
     };
@@ -14835,13 +14846,38 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       <FinDeMoisCard onOpenSaisie={prefillQuick} transactions={transactions} setTransactions={setTransactions} accounts={accounts} charges={fixedMonthCharges} setCharges={setFixedMonthCharges} fixedState={fixedMonthState} setFixedState={setFixedMonthState} expectedIncomes={expectedIncomes} setExpectedIncomes={setExpectedIncomes} />
 
       {kpiDetail && (() => {
-        const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor);
+        const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor, kpiDetail.cmp);
+        // Navigation dans les jours du mois précédent (flèches ‹ ›), ouverte sur le même jour que l'ancre.
+        const anchorMk = dateToMonthKey(kpiDetail.anchor);
+        const pmkNav = prevMonthKey(anchorMk);
+        const defaultCmp = mkDate(pmkNav, clampDay(pmkNav, new Date(kpiDetail.anchor + "T00:00:00").getDate()));
+        const cmpDate = kpiDetail.cmp || defaultCmp;
+        const cmpFirst = mkDate(pmkNav, 1), cmpLast = mkDate(pmkNav, daysInMonthOf(pmkNav));
+        const stepCmp = (n: number) => { const nd = addDays(cmpDate, n); if (nd >= cmpFirst && nd <= cmpLast) setKpiDetail({ ...kpiDetail, cmp: nd }); };
+        const cmpTotal = withGroup.filter((t) => t.type === "Dépense" && t.date === cmpDate).reduce((a, t) => a + t.amount, 0);
+        const arrowBtn = (dis: boolean): React.CSSProperties => ({ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: dis ? COLOR.hairline : COLOR.goldSoft, cursor: dis ? "default" : "pointer", display: "flex", padding: 6 });
+        const topSlot = kpiDetail.mode === "today" ? (
+          <div style={{ marginBottom: 16, padding: "10px 12px", border: `1px solid ${COLOR.hairline}`, borderRadius: 12, background: COLOR.surfaceRaised }}>
+            <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Jours du mois précédent ({monthLabel(pmkNav)})</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button aria-label="Jour précédent" disabled={cmpDate <= cmpFirst} onClick={() => stepCmp(-1)} style={arrowBtn(cmpDate <= cmpFirst)}><ChevronLeft size={18} /></button>
+              <div style={{ flex: 1, textAlign: "center" }}>
+                <div style={{ fontSize: 13.5, color: COLOR.ink, fontWeight: 600 }}>{dateLabelFull(cmpDate)}</div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: COLOR.goldSoft }}>{fmt(cmpTotal)} FCFA dépensés</div>
+              </div>
+              <button aria-label="Jour suivant" disabled={cmpDate >= cmpLast} onClick={() => stepCmp(1)} style={arrowBtn(cmpDate >= cmpLast)}><ChevronRight size={18} /></button>
+            </div>
+            {kpiDetail.cmp && kpiDetail.cmp !== defaultCmp && (
+              <button onClick={() => setKpiDetail({ ...kpiDetail, cmp: undefined })} style={{ marginTop: 8, background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 11.5, padding: 0 }}>↺ Revenir au même jour que {dateLabelShort(kpiDetail.anchor)}</button>
+            )}
+          </div>
+        ) : undefined;
         const goPrev = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, -1) : prevMonthKey(kpiDetail.anchor) });
         const goNext = () => setKpiDetail({ mode: kpiDetail.mode, anchor: kpiDetail.mode === "today" ? addDays(kpiDetail.anchor, 1) : nextMonthKey(kpiDetail.anchor) });
         const atToday = kpiDetail.mode === "today" ? kpiDetail.anchor >= today : kpiDetail.anchor >= currentMonthKey;
         return (
           <CalcDetailSheet open={!!kpiDetail} onClose={() => setKpiDetail(null)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} badge={d.badge}
-            onPrev={goPrev} onNext={atToday ? undefined : goNext} />
+            onPrev={goPrev} onNext={atToday ? undefined : goNext} topSlot={topSlot} />
         );
       })()}
 
