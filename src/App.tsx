@@ -2955,6 +2955,11 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
   const remainingBudget = hasObjective ? monthlyObjective - spent : null;
   const remainingAfterUpcoming = hasObjective ? (remainingBudget as number) - upcomingTotal : null;
   const dailyThreshold = hasObjective && daysRemaining > 0 ? Math.max(0, ((remainingAfterUpcoming ?? remainingBudget) as number) / daysRemaining) : null;
+  // Seuil "du matin" : même calcul mais en remettant dans le budget ce qui a déjà été dépensé aujourd'hui.
+  // C'est la bonne référence pour juger la journée (le seuil "en direct" ci-dessus a déjà retiré
+  // les dépenses du jour, les comparer à lui reviendrait à les compter deux fois).
+  const spentTodayAdvice = txThisMonthSoFar.filter((t) => t.type === "Dépense" && t.date === today).reduce((a, t) => a + t.amount, 0);
+  const morningThreshold = hasObjective && daysRemaining > 0 ? Math.max(0, ((remainingAfterUpcoming as number) + spentTodayAdvice) / daysRemaining) : null;
   const onTrack = hasObjective ? projectedEndOfMonth <= monthlyObjective : null;
 
   const insights: Insight[] = [];
@@ -3052,7 +3057,7 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     }
   }
 
-  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, remainingBudget, hasObjective, upcomingTotal };
+  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, morningThreshold, spentTodayAdvice, remainingBudget, hasObjective, upcomingTotal };
 }
 
 // Note du jour : Excellent / Bon / Moyen / Faible — combine trois signaux concrets :
@@ -3083,7 +3088,7 @@ function computeDayScore(transactions: Transaction[], monthlyObjective: number) 
   const avgHistDaily = median(last30);
 
   const advice = generateDailyAdvice(transactions, monthlyObjective);
-  const dailyThreshold = advice.dailyThreshold;
+  const dailyThreshold = advice.morningThreshold;
 
   // A. Respect du seuil quotidien (si un objectif mensuel est défini)
   let seuilScore = 60;
@@ -16169,9 +16174,9 @@ export default function GrandLivre() {
   const headerThreshold = useMemo(() => {
     try {
       const a = generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture);
-      if (!a.hasObjective || a.dailyThreshold === null) return null;
+      if (!a.hasObjective || a.dailyThreshold === null || a.morningThreshold === null) return null;
       const spentToday = transactions.filter((t) => t.type === "Dépense" && t.date === todayISO()).reduce((x, t) => x + t.amount, 0);
-      return { threshold: a.dailyThreshold as number, spentToday };
+      return { threshold: (a.morningThreshold ?? a.dailyThreshold) as number, spentToday };
     } catch { return null; }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, fixedMonthState]);
@@ -16315,7 +16320,7 @@ export default function GrandLivre() {
                 const col = left >= 0 ? COLOR.emeraldSoft : COLOR.claySoft;
                 return (
                   <div style={{ marginTop: 6, fontSize: 12, color: COLOR.inkMuted }}>
-                    Seuil du jour : <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 600 }}>{fmt(Math.round(headerThreshold.threshold))} FCFA</span>
+                    Budget de la journée : <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 600 }}>{fmt(Math.round(headerThreshold.threshold))} FCFA</span>
                     <span style={{ marginLeft: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: col }}>
                       {left >= 0 ? `reste ${fmt(Math.round(left))}` : `dépassé de ${fmt(Math.round(-left))}`}
                     </span>
