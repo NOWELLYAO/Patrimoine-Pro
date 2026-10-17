@@ -14199,7 +14199,7 @@ const DEFAULT_FIXED_MONTH_CHARGES: FixedMonthCharge[] = [
   { id: "fm-loyer", label: "Loyer", amount: 650000, category: "Logement", subcategory: "Location", dayFrom: 27, dayTo: 31 },
   { id: "fm-maman", label: "Maman", amount: 70700, category: "Enfants & Maman", subcategory: "Maman", dayFrom: 27, dayTo: 31 },
   { id: "fm-nesher", label: "Nesher", amount: 60600, category: "Enfants & Maman", subcategory: "Nesher", dayFrom: 27, dayTo: 31 },
-  { id: "fm-hemra", label: "Hemra", amount: 50000, category: "Enfants & Maman", subcategory: "Hemra", dayFrom: 27, dayTo: 31 },
+  { id: "fm-hemra", label: "Hemra", amount: 50000, category: "Enfants & Maman", subcategory: "Hemra", dayFrom: 27, dayTo: 31, minAmount: 50000 },
   { id: "fm-hemra-2", label: "Hemra (date imprécise)", amount: 30000, category: "Enfants & Maman", subcategory: "Hemra" },
   { id: "fm-agedor", label: "Âge d'or", amount: 40000, category: "Âge D’or Retraite", dayFrom: 17, dayTo: 28 },
   { id: "fm-plan", label: "Plan éducation", amount: 32457, category: "Plan Éducation", dayFrom: 17, dayTo: 28 },
@@ -14240,7 +14240,11 @@ function computeFixedMonth(transactions: Transaction[], charges: FixedMonthCharg
     if (e.skip) return { ...c, amountDue, paid: 0, remaining: 0, status: "skip", linkedSum: 0 };
     const linkedSum = (e.links || []).reduce((a, id) => a + (byId.get(id)?.amount || 0), 0);
     const key = `${normalizeText(c.category)}|${normalizeText(c.subcategory || "")}|${c.minAmount || 0}`;
-    if (pools[key] === undefined) pools[key] = monthTx.filter((t) => matches(t, c) && !linkedAll.has(t.id)).reduce((a, t) => a + t.amount, 0);
+    // Une transaction ne paie qu'une seule ligne : si une ligne plus stricte (minAmount plus élevé) de la même
+    // catégorie la réclame (ex. paiement Hemra de 50 000), elle ne compte pas pour la ligne « date imprécise ».
+    const claimedByStricter = (t: Transaction) => active.some((d) => d.id !== c.id && !st[d.id]?.skip && (d.minAmount || 0) > (c.minAmount || 0) &&
+      normalizeText(d.category) === normalizeText(c.category) && normalizeText(d.subcategory || "") === normalizeText(c.subcategory || "") && t.amount >= (d.minAmount || 0));
+    if (pools[key] === undefined) pools[key] = monthTx.filter((t) => matches(t, c) && !linkedAll.has(t.id) && !claimedByStricter(t)).reduce((a, t) => a + t.amount, 0);
     const auto = Math.min(pools[key], Math.max(0, amountDue - linkedSum));
     pools[key] -= auto;
     const paid = linkedSum + auto;
@@ -14390,7 +14394,7 @@ function FixedChargeManageSheet({ row, monthKey, transactions, accounts, entry, 
               <div style={{ flex: 1.3 }}><div style={lbl}>Montant habituel</div><input type="text" inputMode="numeric" style={inputStyle} value={row.amount} onChange={(e) => onCharge({ amount: Number(e.target.value.replace(/\D/g, "")) || 0 })} /></div>
             </div>
             <div><div style={lbl}>Seules les transactions de ce montant ou plus comptent pour cette charge (FCFA)</div>
-              <input type="text" inputMode="numeric" style={inputStyle} value={row.minAmount ?? ""} placeholder="0 = toutes" onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); onCharge({ minAmount: v > 0 ? v : undefined }); }} />
+              <input type="text" inputMode="numeric" style={inputStyle} value={row.minAmount ?? ""} placeholder="0 = toutes" onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); onCharge({ minAmount: v > 0 ? v : 0 }); }} />
               <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 4, lineHeight: 1.5 }}>Exemple : mets 14 500 pour les frais bancaires. Un paiement de 14 500 est reconnu comme ce frais fixe ; les petits frais (500, 800…) sont des dépenses variables, comptées dans ton rythme du jour et jamais dans cette charge. Laisse vide pour que toutes les transactions de la catégorie comptent.</div></div>
             <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
               <input type="checkbox" checked={!!row.onlyMonth} onChange={(e) => onCharge({ onlyMonth: e.target.checked ? monthKey : undefined })} /> Charge ponctuelle (ce mois seulement, disparaît le mois suivant)
@@ -15520,6 +15524,12 @@ export default function GrandLivre() {
   useEffect(() => {
     if (fixedMonthCharges.some((c) => c.id === "fm-frais-bancaires" && (c.minAmount === undefined || c.minAmount === 10000))) {
       setFixedMonthCharges(fixedMonthCharges.map((c) => (c.id === "fm-frais-bancaires" && (c.minAmount === undefined || c.minAmount === 10000) ? { ...c, minAmount: 14500 } : c)));
+    }
+  }, [fixedMonthCharges]);
+  // Migration unique : Hemra 50 000 est une charge fixe (comme les frais bancaires) → seul un paiement ≥ 50 000 la couvre.
+  useEffect(() => {
+    if (fixedMonthCharges.some((c) => c.id === "fm-hemra" && c.minAmount === undefined)) {
+      setFixedMonthCharges(fixedMonthCharges.map((c) => (c.id === "fm-hemra" && c.minAmount === undefined ? { ...c, minAmount: 50000 } : c)));
     }
   }, [fixedMonthCharges]);
   SUBCAT_SETTERS.Dépense = setCustomDepSubcategories;
