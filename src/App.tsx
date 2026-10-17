@@ -711,6 +711,9 @@ const GROUPS: Group[] = ["Nécessaire", "Productif", "Non-productif", "Non class
 // n'a été faite, on retombe sur les listes intégrées ci-dessus.
 let CUSTOM_DEP_SUBCATS: Record<string, string[]> | null = null;
 let CUSTOM_REV_SUBCATS: Record<string, string[]> | null = null;
+// Setters des catégories personnalisées, exposés pour que le sélecteur de catégorie puisse
+// en créer à la volée (17/10/2026), sans devoir repasser par "Gestion des catégories".
+const SUBCAT_SETTERS: { Dépense?: (m: Record<string, string[]>) => void; Revenu?: (m: Record<string, string[]>) => void } = {};
 function activeSubcatMap(type: TxType): Record<string, string[]> {
   return (type === "Dépense" ? CUSTOM_DEP_SUBCATS : CUSTOM_REV_SUBCATS) || (type === "Dépense" ? depSubcategories : revSubcategories);
 }
@@ -1446,8 +1449,27 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
 }) {
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  useEffect(() => { if (open) { setQuery(""); setExpanded(new Set(value ? [value] : [])); } }, [open, value]);
+  const [addMode, setAddMode] = useState<null | { cat?: string }>(null);
+  const [newName, setNewName] = useState("");
+  useEffect(() => { if (open) { setQuery(""); setAddMode(null); setNewName(""); setExpanded(new Set(value ? [value] : [])); } }, [open, value]);
   if (!open) return null;
+
+  const confirmAdd = () => {
+    const name = newName.trim();
+    const setter = SUBCAT_SETTERS[type];
+    if (!name || !setter || !addMode) return;
+    const map = activeSubcatMap(type);
+    if (addMode.cat) {
+      const subs = map[addMode.cat] || [];
+      if (!subs.some((x) => normalizeText(x) === normalizeText(name))) setter({ ...map, [addMode.cat]: [...subs, name] });
+      onSelect(addMode.cat, name);
+    } else {
+      const existing = categoriesForType(transactions, type).find((x) => normalizeText(x) === normalizeText(name));
+      if (!existing) setter({ ...map, [name]: [] });
+      onSelect(existing || name, "");
+    }
+    setAddMode(null); setNewName(""); onClose();
+  };
 
   const cats = categoriesForType(transactions, type);
   const q = normalizeText(query.trim());
@@ -1502,6 +1524,18 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
                         }}>{s}</button>
                       );
                     })}
+                    <button onClick={() => { setAddMode({ cat: c }); setNewName(""); }} style={{
+                      padding: "7px 14px", borderRadius: 16, fontSize: 12.5, cursor: "pointer", whiteSpace: "nowrap",
+                      border: `1px dashed ${COLOR.goldSoft}`, background: "transparent", color: COLOR.goldSoft,
+                    }}>+ Sous-catégorie</button>
+                  </div>
+                )}
+                {!subs.length && value === c && (
+                  <div style={{ padding: "0 8px 10px 33px" }}>
+                    <button onClick={() => { setAddMode({ cat: c }); setNewName(""); }} style={{
+                      padding: "7px 14px", borderRadius: 16, fontSize: 12.5, cursor: "pointer",
+                      border: `1px dashed ${COLOR.goldSoft}`, background: "transparent", color: COLOR.goldSoft,
+                    }}>+ Sous-catégorie</button>
                   </div>
                 )}
               </div>
@@ -1510,11 +1544,24 @@ function CategoryPickerSheet({ open, onClose, transactions, type, value, subvalu
           {!filteredCats.length && <div style={{ padding: "30px 10px", textAlign: "center", color: COLOR.inkMuted, fontSize: 13 }}>Aucun résultat pour "{query}"</div>}
         </div>
         <div className="gl-safe-bottom" style={{ padding: "12px 16px", borderTop: `1px solid ${COLOR.hairline}` }}>
+          {addMode ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 11.5, color: COLOR.inkMuted }}>{addMode.cat ? `Nouvelle sous-catégorie dans « ${addMode.cat} »` : `Nouvelle catégorie de ${type === "Revenu" ? "revenu" : "dépense"}`}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input autoFocus value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") confirmAdd(); }} placeholder="Nom…"
+                  style={{ flex: 1, background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "11px 14px", color: COLOR.ink, fontSize: 16, boxSizing: "border-box", outline: "none" }} />
+                <button onClick={confirmAdd} disabled={!newName.trim()} style={{ background: COLOR.gold, color: COLOR.bg, border: "none", borderRadius: 10, padding: "0 16px", fontWeight: 600, cursor: "pointer", opacity: newName.trim() ? 1 : 0.5 }}>Créer</button>
+                <button onClick={() => setAddMode(null)} style={{ background: "transparent", color: COLOR.inkMuted, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "0 12px", cursor: "pointer" }}>Annuler</button>
+              </div>
+            </div>
+          ) : (<>
+          <button onClick={() => { setAddMode({}); setNewName(query.trim()); }} style={{ width: "100%", marginBottom: 10, padding: "10px", borderRadius: 10, border: `1px dashed ${COLOR.goldSoft}`, background: "transparent", color: COLOR.goldSoft, fontSize: 13, cursor: "pointer" }}>+ Nouvelle catégorie</button>
           <div style={{ position: "relative" }}>
             <Search size={14} color={COLOR.inkMuted} style={{ position: "absolute", left: 12, top: 12 }} />
             <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher catégorie ou sous-catégorie…"
               style={{ width: "100%", background: COLOR.surfaceInput, border: `1px solid ${COLOR.hairline}`, borderRadius: 10, padding: "11px 14px 11px 34px", color: COLOR.ink, fontSize: 14, boxSizing: "border-box", outline: "none" }} />
           </div>
+          </>)}
         </div>
       </div>
     </div>
@@ -14853,6 +14900,8 @@ export default function GrandLivre() {
   const [customRevSubcategories, setCustomRevSubcategories] = usePersistentState<Record<string, string[]>>("gl-custom-rev-subcats", revSubcategories, canSaveGated);
   CUSTOM_DEP_SUBCATS = customDepSubcategories;
   CUSTOM_REV_SUBCATS = customRevSubcategories;
+  SUBCAT_SETTERS.Dépense = setCustomDepSubcategories;
+  SUBCAT_SETTERS.Revenu = setCustomRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
 
   const chargeModeDesc = (o?: ChargeOverride) => !o || o.mode === "auto" ? "Auto" : o.mode === "fixe" ? `Fixe${o.amount !== undefined ? ` (${fmt(o.amount)} FCFA)` : ""}` : o.mode === "variable" ? "Variable régulière" : o.mode === "exclu" ? "Exclu" : "Occasionnelle";
