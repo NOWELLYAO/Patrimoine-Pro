@@ -14093,7 +14093,8 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
 // ============================================================
 // dayFrom/dayTo : jour(s) du mois où la charge tombe habituellement (absents = date imprécise).
 // onlyMonth : charge ponctuelle valable pour un seul mois ("2026_10").
-interface FixedMonthCharge { id: string; label: string; amount: number; category: string; subcategory?: string; dayFrom?: number; dayTo?: number; onlyMonth?: string; }
+interface FixedMonthCharge { id: string; label: string; amount: number; category: string; subcategory?: string; dayFrom?: number; dayTo?: number; onlyMonth?: string; minAmount?: number; }
+interface ExpectedIncome { id: string; label: string; amount: number; day?: number; received?: boolean; }
 interface FixedMonthEntry { paid?: boolean; amount?: number; skip?: boolean; links?: string[]; }
 type FixedMonthState = Record<string, Record<string, FixedMonthEntry>>;
 const DEFAULT_FIXED_MONTH_CHARGES: FixedMonthCharge[] = [
@@ -14108,7 +14109,7 @@ const DEFAULT_FIXED_MONTH_CHARGES: FixedMonthCharge[] = [
   { id: "fm-grundfos-internet-2", label: "Grundfos · Internet (date imprécise)", amount: 10000, category: "GRUNDFOS", subcategory: "Internet" },
   { id: "fm-claude", label: "Claude", amount: 12700, category: "Abonnements", subcategory: "Claude", dayFrom: 8, dayTo: 8 },
   { id: "fm-spotify", label: "Spotify", amount: 2100, category: "Abonnements", subcategory: "Spotify", dayFrom: 11, dayTo: 11 },
-  { id: "fm-frais-bancaires", label: "Frais bancaires", amount: 14500, category: "Ajustement", subcategory: "Frais Bancaire", dayFrom: 30, dayTo: 30 },
+  { id: "fm-frais-bancaires", label: "Frais bancaires", amount: 14500, category: "Ajustement", subcategory: "Frais Bancaire", dayFrom: 30, dayTo: 30, minAmount: 14500 },
 ];
 // Copie "globale" lue par detectRecurringExpenses (Conseiller quotidien, bandeau d'alerte…),
 // alimentée à chaque rendu par le composant racine — même mécanisme que CUSTOM_DEP_SUBCATS.
@@ -14122,9 +14123,12 @@ function computeFixedMonth(transactions: Transaction[], charges: FixedMonthCharg
   const monthTx = transactions.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === mk && t.date <= today);
   const byId = new Map(monthTx.map((t) => [t.id, t]));
   const active = charges.filter((c) => !c.onlyMonth || c.onlyMonth === mk);
+  // minAmount : seuil en dessous duquel une transaction de la même catégorie n'est PAS comptée
+  // pour cette charge (ex. petits frais bancaires variables vs frais fixe de 14 500).
   const matches = (t: Transaction, c: FixedMonthCharge) =>
     normalizeText(t.category) === normalizeText(c.category) &&
-    (!c.subcategory || normalizeText(t.subcategory || "") === normalizeText(c.subcategory));
+    (!c.subcategory || normalizeText(t.subcategory || "") === normalizeText(c.subcategory)) &&
+    (!c.minAmount || t.amount >= c.minAmount);
   const linkedAll = new Set<string>();
   active.forEach((c) => (st[c.id]?.links || []).forEach((id) => { if (byId.has(id)) linkedAll.add(id); }));
 
@@ -14137,7 +14141,7 @@ function computeFixedMonth(transactions: Transaction[], charges: FixedMonthCharg
     const amountDue = e.amount ?? c.amount;
     if (e.skip) return { ...c, amountDue, paid: 0, remaining: 0, status: "skip", linkedSum: 0 };
     const linkedSum = (e.links || []).reduce((a, id) => a + (byId.get(id)?.amount || 0), 0);
-    const key = `${normalizeText(c.category)}|${normalizeText(c.subcategory || "")}`;
+    const key = `${normalizeText(c.category)}|${normalizeText(c.subcategory || "")}|${c.minAmount || 0}`;
     if (pools[key] === undefined) pools[key] = monthTx.filter((t) => matches(t, c) && !linkedAll.has(t.id)).reduce((a, t) => a + t.amount, 0);
     const auto = Math.min(pools[key], Math.max(0, amountDue - linkedSum));
     pools[key] -= auto;
@@ -14168,7 +14172,7 @@ function FixedChargeManageSheet({ row, monthKey, transactions, accounts, entry, 
   const today = todayISO();
   const monthTx = transactions.filter((t) => t.type === "Dépense" && dateToMonthKey(t.date) === monthKey && t.date <= today).sort((a, b) => b.date.localeCompare(a.date));
   const links = entry.links || [];
-  const sameCat = (t: Transaction) => normalizeText(t.category) === normalizeText(row.category) && (!row.subcategory || normalizeText(t.subcategory || "") === normalizeText(row.subcategory));
+  const sameCat = (t: Transaction) => normalizeText(t.category) === normalizeText(row.category) && (!row.subcategory || normalizeText(t.subcategory || "") === normalizeText(row.subcategory)) && (!row.minAmount || t.amount >= row.minAmount);
   const candidates = [...monthTx.filter(sameCat), ...monthTx.filter((t) => !sameCat(t))];
   const detected = monthTx.filter((t) => sameCat(t) || links.includes(t.id));
   const toggleLink = (id: string) => onEntry({ links: links.includes(id) ? links.filter((x) => x !== id) : [...links, id] });
@@ -14287,6 +14291,9 @@ function FixedChargeManageSheet({ row, monthKey, transactions, accounts, entry, 
               <div style={{ flex: 1 }}><div style={lbl}>Au jour</div><input type="text" inputMode="numeric" style={inputStyle} value={row.dayTo ?? ""} placeholder="imprécis" onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); onCharge({ dayTo: v >= 1 && v <= 31 ? v : row.dayFrom }); }} /></div>
               <div style={{ flex: 1.3 }}><div style={lbl}>Montant habituel</div><input type="text" inputMode="numeric" style={inputStyle} value={row.amount} onChange={(e) => onCharge({ amount: Number(e.target.value.replace(/\D/g, "")) || 0 })} /></div>
             </div>
+            <div><div style={lbl}>Seules les transactions de ce montant ou plus comptent pour cette charge (FCFA)</div>
+              <input type="text" inputMode="numeric" style={inputStyle} value={row.minAmount ?? ""} placeholder="0 = toutes" onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); onCharge({ minAmount: v > 0 ? v : undefined }); }} />
+              <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 4, lineHeight: 1.5 }}>Exemple : mets 14 500 pour les frais bancaires. Un paiement de 14 500 est reconnu comme ce frais fixe ; les petits frais (500, 800…) sont des dépenses variables, comptées dans ton rythme du jour et jamais dans cette charge. Laisse vide pour que toutes les transactions de la catégorie comptent.</div></div>
             <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: COLOR.ink, cursor: "pointer" }}>
               <input type="checkbox" checked={!!row.onlyMonth} onChange={(e) => onCharge({ onlyMonth: e.target.checked ? monthKey : undefined })} /> Charge ponctuelle (ce mois seulement, disparaît le mois suivant)
             </label>
@@ -14300,12 +14307,17 @@ function FixedChargeManageSheet({ row, monthKey, transactions, accounts, entry, 
   );
 }
 
-function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCharges, fixedState, setFixedState, onOpenSaisie }: {
+function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCharges, fixedState, setFixedState, expectedIncomes, setExpectedIncomes, onOpenSaisie }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; accounts: Account[];
   onOpenSaisie: (p: { category: string; subcategory?: string; amount: number; note: string }) => void;
   charges: FixedMonthCharge[]; setCharges: (c: FixedMonthCharge[]) => void;
   fixedState: FixedMonthState; setFixedState: (s: FixedMonthState) => void;
+  expectedIncomes: Record<string, ExpectedIncome[]>; setExpectedIncomes: (m: Record<string, ExpectedIncome[]>) => void;
 }) {
+  const [addingIncome, setAddingIncome] = useState(false);
+  const [incLabel, setIncLabel] = useState("");
+  const [incAmount, setIncAmount] = useState("");
+  const [incDay, setIncDay] = useState("");
   const [showList, setShowList] = useState(true);
   const [managingId, setManagingId] = useState<string | null>(null);
 
@@ -14325,8 +14337,18 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
   const rev = monthTx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
   const dep = monthTx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
   const solde = rev - dep;
-  const reste = solde - fixedRemaining;
+  const incomesThisMonth = expectedIncomes[mk] || [];
+  const expectedTotal = incomesThisMonth.filter((i) => !i.received).reduce((a, i) => a + i.amount, 0);
+  const reste = solde - fixedRemaining + expectedTotal;
   const perDay = reste / daysLeft;
+  const setIncomes = (list: ExpectedIncome[]) => setExpectedIncomes({ ...expectedIncomes, [mk]: list });
+  const addIncome = () => {
+    const amount = Number(incAmount.replace(/\D/g, "")) || 0;
+    if (!amount) return;
+    const d = Number(incDay.replace(/\D/g, ""));
+    setIncomes([...incomesThisMonth, { id: uid("ei"), label: incLabel.trim() || "Revenu attendu", amount, day: d >= 1 && d <= 31 ? d : undefined }]);
+    setIncLabel(""); setIncAmount(""); setIncDay(""); setAddingIncome(false);
+  };
 
   const dueLabel = (c: FixedMonthCharge) => c.onlyMonth ? "ponctuelle" : c.dayFrom === undefined ? "date imprécise" : (c.dayTo === undefined || c.dayTo === c.dayFrom ? `le ${c.dayFrom}` : `du ${c.dayFrom} au ${c.dayTo}`);
   const isLate = (r: FixedRow) => r.status === "open" && r.dayFrom !== undefined && (r.dayTo ?? r.dayFrom) < dayNum;
@@ -14346,7 +14368,7 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
   const ok = perDay >= 0;
   const tone = !ok ? COLOR.claySoft : perDay >= rateNow ? COLOR.emeraldSoft : COLOR.goldSoft;
   const verdict = !ok
-    ? `Après les charges fixes à venir, il te manque ${fmt(-reste)} FCFA pour finir le mois.`
+    ? `Après les charges fixes à venir${expectedTotal > 0 ? " et les revenus attendus" : ""}, il te manque ${fmt(-reste)} FCFA pour finir le mois.`
     : perDay >= rateNow
       ? `Ton rythme actuel (${fmt(rateNow)} FCFA/jour) est sous ta limite : tu es dans les clous.`
       : `Ton rythme actuel (${fmt(rateNow)} FCFA/jour) dépasse ta limite : ralentis de ${fmt(rateNow - perDay)} FCFA/jour.`;
@@ -14400,6 +14422,7 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
         {mini("Solde du mois", fmt(solde), solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
         {mini("− Charges fixes à venir", fmt(fixedRemaining), COLOR.claySoft)}
+        {mini("+ Revenus attendus", fmt(expectedTotal), expectedTotal > 0 ? COLOR.emeraldSoft : COLOR.inkMuted)}
         {mini("= Reste à vivre", fmt(reste), reste >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
       </div>
 
@@ -14418,6 +14441,32 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
         <div style={{ height: 6, background: COLOR.surfaceInput, borderRadius: 3, overflow: "hidden" }}>
           <div style={{ width: `${totalDue > 0 ? Math.min(100, (totalDone / totalDue) * 100) : 0}%`, height: "100%", background: COLOR.emeraldSoft }} />
         </div>
+      </div>
+
+      <div style={{ marginBottom: 14, padding: "12px 14px", borderRadius: 10, border: `1px solid ${COLOR.hairline}`, background: COLOR.surfaceRaised }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 6, marginBottom: incomesThisMonth.length || addingIncome ? 8 : 0 }}>
+          <span style={{ fontSize: 12.5, color: COLOR.ink, fontWeight: 600 }}>Revenus attendus d'ici la fin du mois <span style={{ color: COLOR.emeraldSoft, fontFamily: "'IBM Plex Mono', monospace" }}>{expectedTotal > 0 ? `+${fmt(expectedTotal)}` : ""}</span></span>
+          {!addingIncome && <button onClick={() => setAddingIncome(true)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>+ Ajouter un revenu attendu</button>}
+        </div>
+        {incomesThisMonth.map((i) => (
+          <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, padding: "4px 0", opacity: i.received ? 0.5 : 1 }}>
+            <span style={{ flex: 1, color: COLOR.ink, textDecoration: i.received ? "line-through" : "none" }}>{i.label}{i.day ? <span style={{ color: COLOR.inkMuted, fontSize: 11 }}> · vers le {i.day}</span> : null}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.emeraldSoft }}>{fmt(i.amount)}</span>
+            <button onClick={() => setIncomes(incomesThisMonth.map((x) => (x.id === i.id ? { ...x, received: !x.received } : x)))} title="Quand il est arrivé et saisi dans le Journal, marque-le reçu pour ne pas le compter deux fois" style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 6, color: i.received ? COLOR.emeraldSoft : COLOR.goldSoft, cursor: "pointer", fontSize: 11, padding: "2px 8px" }}>{i.received ? "✓ reçu" : "Marquer reçu"}</button>
+            <button onClick={() => setIncomes(incomesThisMonth.filter((x) => x.id !== i.id))} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer" }}>✕</button>
+          </div>
+        ))}
+        {addingIncome && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+            <input style={{ ...inputStyle, flex: "2 1 140px", width: "auto" }} placeholder="Nom (ex. Salaire)" value={incLabel} onChange={(e) => setIncLabel(e.target.value)} />
+            <input type="text" inputMode="numeric" style={{ ...inputStyle, flex: "1 1 100px", width: "auto" }} placeholder="Montant" value={incAmount} onChange={(e) => setIncAmount(e.target.value.replace(/\D/g, ""))} />
+            <input type="text" inputMode="numeric" style={{ ...inputStyle, flex: "0 1 80px", width: 80 }} placeholder="Jour" value={incDay} onChange={(e) => setIncDay(e.target.value.replace(/\D/g, ""))} />
+            <button onClick={addIncome} disabled={!Number(incAmount)} style={{ background: COLOR.gold, color: COLOR.bg, border: "none", borderRadius: 8, padding: "0 14px", fontWeight: 600, cursor: "pointer", opacity: Number(incAmount) ? 1 : 0.5 }}>Ajouter</button>
+            <button onClick={() => setAddingIncome(false)} style={{ background: "transparent", color: COLOR.inkMuted, border: `1px solid ${COLOR.hairline}`, borderRadius: 8, padding: "0 12px", cursor: "pointer" }}>Annuler</button>
+          </div>
+        )}
+        {!incomesThisMonth.length && !addingIncome && <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 6 }}>Aucun revenu attendu : la carte ne compte que l'argent déjà reçu. Ajoute ton salaire ou un paiement à venir pour un chiffre par jour juste.</div>}
+        {incomesThisMonth.length > 0 && <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 6, lineHeight: 1.5 }}>Quand un revenu arrive et que tu le saisis dans le Journal, touche « Marquer reçu » : il est alors dans ton solde et n'est plus compté ici.</div>}
       </div>
 
       <button onClick={() => setShowList(!showList)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>
@@ -14467,10 +14516,11 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
   );
 }
 
-function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, setFixedMonthCharges, fixedMonthState, setFixedMonthState }: {
+function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, setFixedMonthCharges, fixedMonthState, setFixedMonthState, expectedIncomes, setExpectedIncomes }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
   monthlyObjective: number; setMonthlyObjective: (n: number) => void; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
   fixedMonthCharges: FixedMonthCharge[]; setFixedMonthCharges: (c: FixedMonthCharge[]) => void; fixedMonthState: FixedMonthState; setFixedMonthState: (s: FixedMonthState) => void;
+  expectedIncomes: Record<string, ExpectedIncome[]>; setExpectedIncomes: (m: Record<string, ExpectedIncome[]>) => void;
 }) {
   const [quickDate, setQuickDate] = useState(todayISO());
   const [quickTime, setQuickTime] = useState(nowTime());
@@ -14690,7 +14740,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
         <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
-      <FinDeMoisCard onOpenSaisie={prefillQuick} transactions={transactions} setTransactions={setTransactions} accounts={accounts} charges={fixedMonthCharges} setCharges={setFixedMonthCharges} fixedState={fixedMonthState} setFixedState={setFixedMonthState} />
+      <FinDeMoisCard onOpenSaisie={prefillQuick} transactions={transactions} setTransactions={setTransactions} accounts={accounts} charges={fixedMonthCharges} setCharges={setFixedMonthCharges} fixedState={fixedMonthState} setFixedState={setFixedMonthState} expectedIncomes={expectedIncomes} setExpectedIncomes={setExpectedIncomes} />
 
       {kpiDetail && (() => {
         const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor);
@@ -15296,7 +15346,7 @@ export default function GrandLivre() {
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
     activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
     funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
-    fixedMonthCharges, fixedMonthState,
+    fixedMonthCharges, fixedMonthState, expectedIncomes,
   });
   const downloadBackupNow = () => {
     const data = getSnapshotRoot();
@@ -15315,6 +15365,13 @@ export default function GrandLivre() {
   const [fixedMonthState, setFixedMonthState] = usePersistentState<FixedMonthState>("gl-fixed-month-state", {}, true);
   FIXED_MONTH_CHARGES_GLOBAL = fixedMonthCharges;
   FIXED_MONTH_STATE_GLOBAL = fixedMonthState;
+  const [expectedIncomes, setExpectedIncomes] = usePersistentState<Record<string, ExpectedIncome[]>>("gl-expected-incomes", {}, true);
+  // Migration unique : la charge « Frais bancaires » (14 500, fin de mois) ne doit pas absorber les petits frais variables.
+  useEffect(() => {
+    if (fixedMonthCharges.some((c) => c.id === "fm-frais-bancaires" && (c.minAmount === undefined || c.minAmount === 10000))) {
+      setFixedMonthCharges(fixedMonthCharges.map((c) => (c.id === "fm-frais-bancaires" && (c.minAmount === undefined || c.minAmount === 10000) ? { ...c, minAmount: 14500 } : c)));
+    }
+  }, [fixedMonthCharges]);
   SUBCAT_SETTERS.Dépense = setCustomDepSubcategories;
   SUBCAT_SETTERS.Revenu = setCustomRevSubcategories;
   const logChange = (text: string) => setSettingsLog([{ at: `${dateLabelFull(todayISO())} à ${nowTime()}`, text }, ...settingsLog].slice(0, 300));
@@ -15952,6 +16009,7 @@ export default function GrandLivre() {
     if (data.customRevSubcategories) setCustomRevSubcategories(data.customRevSubcategories);
     if (data.fixedMonthCharges) setFixedMonthCharges(data.fixedMonthCharges);
     if (data.fixedMonthState) setFixedMonthState(data.fixedMonthState);
+    if (data.expectedIncomes) setExpectedIncomes(data.expectedIncomes);
     if (data.funds) setFunds(data.funds);
     if (data.fundOperations) setFundOperations(data.fundOperations);
     if (data.fundDailyValues) setFundDailyValues(data.fundDailyValues);
@@ -16148,7 +16206,7 @@ export default function GrandLivre() {
           {tab === "comparateur" && <ComparateurTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} />}
           {tab === "topcategories" && <TopCategoriesTab transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} allMonths={allMonths} accounts={accounts} onNavigate={navigateTo} />}
           {tab === "categoryoverview" && <CategoryOverviewTab transactions={transactions} categoryGroups={resolvedGroups} allMonths={allMonths} navContext={navContext} />}
-          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} fixedMonthCharges={fixedMonthCharges} setFixedMonthCharges={setFixedMonthCharges} fixedMonthState={fixedMonthState} setFixedMonthState={setFixedMonthState} />}
+          {tab === "saisie" && <SaisieQuotidienneTab transactions={transactions} setTransactions={setTransactionsTracked} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjectiveLogged} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} fixedMonthCharges={fixedMonthCharges} setFixedMonthCharges={setFixedMonthCharges} fixedMonthState={fixedMonthState} setFixedMonthState={setFixedMonthState} expectedIncomes={expectedIncomes} setExpectedIncomes={setExpectedIncomes} />}
           {tab === "mensuel" && <MensuelTab filtered={filtered} />}
           {tab === "journalier" && <JournalierTab filtered={filtered} />}
           {tab === "categories" && <CategoriesTab filtered={filtered} categoryGroups={categoryGroups} resolvedGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} />}
