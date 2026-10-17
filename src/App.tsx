@@ -14696,7 +14696,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     // cmp : jour précis du mois précédent choisi avec les flèches de la fiche (sinon, même jour que l'ancre).
     const anchorSameDayLastMonth = mode === "today" ? (cmp || mkDate(prevAnchorMonthKey, clampDay(prevAnchorMonthKey, anchorDayNum))) : "";
 
-    const curPred = mode === "today" ? (t: any) => t.date === anchor : (t: any) => dateToMonthKey(t.date) === anchorMonthKey;
+    // Côté "mois en cours" : quand on parcourt un jour du mois précédent, on compare au même quantième
+    // du mois de l'ancre (16 sept. ↔ 16 oct.). Si ce jour n'est pas encore arrivé → 0 (à venir).
+    const curDate = mode === "today" ? (cmp ? mkDate(anchorMonthKey, clampDay(anchorMonthKey, new Date(cmp + "T00:00:00").getDate())) : anchor) : "";
+    const curIsFuture = mode === "today" && curDate > today;
+    const curPred = mode === "today" ? (t: any) => !curIsFuture && t.date === curDate : (t: any) => dateToMonthKey(t.date) === anchorMonthKey;
     const prevPred = mode === "today"
       ? (t: any) => t.date === anchorSameDayLastMonth
       : (t: any) => dateToMonthKey(t.date) === prevAnchorMonthKey && new Date(t.date + "T00:00:00").getDate() <= anchorDayNum;
@@ -14704,7 +14708,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const prevRows = groupBreakdown(prevPred);
     const curTotal = curRows.reduce((a, r) => a + r.value, 0);
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
-    const curLabel = mode === "today" ? dateLabelFull(anchor) : monthLabel(anchorMonthKey);
+    const curLabel = mode === "today" ? dateLabelFull(curDate) : monthLabel(anchorMonthKey);
     const prevLabel = mode === "today" && cmp ? `${dateLabelFull(cmp)} (mois précédent)` : `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
     // Distingue la vraie période en cours (aujourd'hui / mois civil actuel) d'une période
     // passée qu'on consulte via les flèches ◀▶ — demande explicite de l'utilisateur
@@ -14713,13 +14717,13 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     // mois révolu. Sur une période passée, la colonne affiche maintenant le nom du mois
     // lui-même (ex. "juil 26") au lieu du générique "Ce mois", et perd le surlignage doré
     // réservé à la période réellement en cours.
-    const isCurrentPeriod = mode === "today" ? anchor === today : anchorMonthKey === currentMonthKey;
+    const isCurrentPeriod = mode === "today" ? curDate === today : anchorMonthKey === currentMonthKey;
     // Intitulés courts pour les en-têtes du tableau — la version complète reste dans la
     // ligne "formula" juste au-dessus, pour ne pas forcer un défilement horizontal sur
     // mobile avec des en-têtes trop longs, sur demande explicite de l'utilisateur (11/08/2026).
     const curLabelShort = isCurrentPeriod
       ? (mode === "today" ? "Ce jour" : "Ce mois")
-      : (mode === "today" ? dateLabelShort(anchor) : monthLabel(anchorMonthKey));
+      : (mode === "today" ? dateLabelShort(curDate) + (curIsFuture ? " (à venir)" : "") : monthLabel(anchorMonthKey));
     const prevLabelShort = mode === "today" ? dateLabelShort(anchorSameDayLastMonth) : "Mois dernier";
 
     const groups = ["Nécessaire", "Productif", "Non-productif", "Non classifié"] as const;
@@ -14756,7 +14760,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       title: `${curLabel} — dépenses par nature`,
       headline: `${fmt(curTotal)} FCFA (${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)} FCFA vs période comparative)`,
       formula: `${curLabel} vs ${prevLabel} — écart par nature (Nécessaire / Productif / Non-productif)`,
-      badge: { text: isCurrentPeriod ? (mode === "today" ? "Aujourd'hui" : "Mois en cours") : "Période passée", tone: (isCurrentPeriod ? "live" : "past") as "live" | "past" },
+      badge: { text: isCurrentPeriod ? (mode === "today" ? "Aujourd'hui" : "Mois en cours") : (curIsFuture ? "Jour à venir" : "Période passée"), tone: (isCurrentPeriod ? "live" : "past") as "live" | "past" },
       blocks: [
         {
           kind: "table" as const,
@@ -14772,6 +14776,15 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           footerRow: ["Total", fmt(curTotal), fmt(prevTotal), `${totalDelta >= 0 ? "+" : ""}${fmt(totalDelta)}`, `${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(0)}%`],
           footerColors: [undefined, undefined, undefined, undefined, Math.abs(totalDelta) < 1 ? COLOR.inkMuted : totalDelta < 0 ? COLOR.emeraldSoft : COLOR.claySoft],
         },
+        ...(mode === "today" && cmp && !curIsFuture ? [{
+          kind: "kv" as const,
+          rows: (() => {
+            const dayTx = withGroup.filter((t) => t.type === "Dépense" && t.date === curDate).sort((a, b) => b.amount - a.amount);
+            const rows = dayTx.slice(0, 8).map((t) => ({ label: `${t.category}${t.subcategory ? ` › ${t.subcategory}` : ""}`, value: fmt(t.amount) }));
+            if (dayTx.length > 8) rows.push({ label: `… et ${dayTx.length - 8} autre(s)`, value: fmt(dayTx.slice(8).reduce((a, t) => a + t.amount, 0)) });
+            return [{ label: `Dépensé le ${dateLabelFull(curDate)}`, value: `${fmt(curTotal)} FCFA`, strong: true } as any, ...(rows.length ? rows : [{ label: "Aucune dépense ce jour-là", value: "—" }])];
+          })(),
+        }] : []),
         ...(mode === "today" ? [{
           kind: "kv" as const,
           rows: (() => {
@@ -14855,6 +14868,9 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         const cmpFirst = mkDate(pmkNav, 1), cmpLast = mkDate(pmkNav, daysInMonthOf(pmkNav));
         const stepCmp = (n: number) => { const nd = addDays(cmpDate, n); if (nd >= cmpFirst && nd <= cmpLast) setKpiDetail({ ...kpiDetail, cmp: nd }); };
         const cmpTotal = withGroup.filter((t) => t.type === "Dépense" && t.date === cmpDate).reduce((a, t) => a + t.amount, 0);
+        const curSideDate = mkDate(anchorMk, clampDay(anchorMk, new Date(cmpDate + "T00:00:00").getDate()));
+        const curSideFuture = curSideDate > today;
+        const curSideTotal = curSideFuture ? 0 : withGroup.filter((t) => t.type === "Dépense" && t.date === curSideDate).reduce((a, t) => a + t.amount, 0);
         const arrowBtn = (dis: boolean): React.CSSProperties => ({ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 8, color: dis ? COLOR.hairline : COLOR.goldSoft, cursor: dis ? "default" : "pointer", display: "flex", padding: 6 });
         const topSlot = kpiDetail.mode === "today" ? (
           <div style={{ marginBottom: 16, padding: "10px 12px", border: `1px solid ${COLOR.hairline}`, borderRadius: 12, background: COLOR.surfaceRaised }}>
@@ -14864,6 +14880,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
               <div style={{ flex: 1, textAlign: "center" }}>
                 <div style={{ fontSize: 13.5, color: COLOR.ink, fontWeight: 600 }}>{dateLabelFull(cmpDate)}</div>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, color: COLOR.goldSoft }}>{fmt(cmpTotal)} FCFA dépensés</div>
+                <div style={{ fontSize: 11.5, color: COLOR.inkMuted, marginTop: 3 }}>{dateLabelShort(curSideDate)} : <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.ink }}>{curSideFuture ? "0 (jour à venir)" : `${fmt(curSideTotal)} FCFA`}</span></div>
               </div>
               <button aria-label="Jour suivant" disabled={cmpDate >= cmpLast} onClick={() => stepCmp(1)} style={arrowBtn(cmpDate >= cmpLast)}><ChevronRight size={18} /></button>
             </div>
