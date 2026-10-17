@@ -14067,6 +14067,172 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
 // ============================================================
 // SAISIE QUOTIDIENNE (entrée rapide, jour par jour)
 // ============================================================
+// ============================================================
+// PILOTAGE DE FIN DE MOIS — sur demande explicite de l'utilisateur (17/10/2026).
+// Calcule ce qu'on peut encore dépenser PAR JOUR jusqu'à la fin du mois, APRÈS avoir
+// réservé les charges fixes de fin de mois pas encore payées (loyer, Maman, Nesher,
+// Âge d'or, Plan éducation, Hemra…). Liste modifiable, enregistrée sur cet appareil.
+// ============================================================
+// dayFrom/dayTo : jour(s) du mois où la charge tombe habituellement (absents = date imprécise).
+interface FixedMonthCharge { id: string; label: string; amount: number; category: string; subcategory?: string; dayFrom?: number; dayTo?: number; }
+const DEFAULT_FIXED_MONTH_CHARGES: FixedMonthCharge[] = [
+  { id: "fm-loyer", label: "Loyer", amount: 650000, category: "Logement", subcategory: "Location", dayFrom: 27, dayTo: 31 },
+  { id: "fm-maman", label: "Maman", amount: 70700, category: "Enfants & Maman", subcategory: "Maman", dayFrom: 27, dayTo: 31 },
+  { id: "fm-nesher", label: "Nesher", amount: 60600, category: "Enfants & Maman", subcategory: "Nesher", dayFrom: 27, dayTo: 31 },
+  { id: "fm-hemra", label: "Hemra", amount: 50000, category: "Enfants & Maman", subcategory: "Hemra", dayFrom: 27, dayTo: 31 },
+  { id: "fm-hemra-2", label: "Hemra (date imprécise)", amount: 30000, category: "Enfants & Maman", subcategory: "Hemra" },
+  { id: "fm-agedor", label: "Âge d'or", amount: 40000, category: "Âge D’or Retraite", dayFrom: 17, dayTo: 28 },
+  { id: "fm-plan", label: "Plan éducation", amount: 32457, category: "Plan Éducation", dayFrom: 17, dayTo: 28 },
+  { id: "fm-grundfos-internet", label: "Grundfos · Internet", amount: 25000, category: "GRUNDFOS", subcategory: "Internet", dayFrom: 14, dayTo: 14 },
+  { id: "fm-grundfos-internet-2", label: "Grundfos · Internet (date imprécise)", amount: 10000, category: "GRUNDFOS", subcategory: "Internet" },
+  { id: "fm-claude", label: "Claude", amount: 12700, category: "Abonnements", subcategory: "Claude", dayFrom: 8, dayTo: 8 },
+  { id: "fm-spotify", label: "Spotify", amount: 2100, category: "Abonnements", subcategory: "Spotify", dayFrom: 11, dayTo: 11 },
+  { id: "fm-frais-bancaires", label: "Frais bancaires", amount: 14500, category: "Ajustement", subcategory: "Frais Bancaire", dayFrom: 30, dayTo: 30 },
+];
+function FinDeMoisCard({ transactions }: { transactions: Transaction[] }) {
+  const [charges, setCharges] = usePersistentState<FixedMonthCharge[]>("gl-fixed-month-charges-v3", DEFAULT_FIXED_MONTH_CHARGES, true);
+  const [editing, setEditing] = useState(false);
+  const [showList, setShowList] = useState(false);
+
+  const today = todayISO();
+  const mk = dateToMonthKey(today);
+  const pmk = prevMonthKey(mk);
+  const dim = daysInMonthOf(mk);
+  const dayNum = new Date(today + "T00:00:00").getDate();
+  const daysLeft = dim - dayNum + 1; // aujourd'hui inclus
+  const pdim = daysInMonthOf(pmk);
+
+  const matches = (t: Transaction, c: FixedMonthCharge) =>
+    t.type === "Dépense" && normalizeText(t.category) === normalizeText(c.category) &&
+    (!c.subcategory || normalizeText(t.subcategory || "") === normalizeText(c.subcategory));
+  const isFixed = (t: Transaction) => charges.some((c) => matches(t, c));
+
+  const monthTx = transactions.filter((t) => dateToMonthKey(t.date) === mk && t.date <= today);
+  const rev = monthTx.filter((t) => t.type === "Revenu").reduce((a, t) => a + t.amount, 0);
+  const dep = monthTx.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
+  const solde = rev - dep;
+
+  // Plusieurs lignes peuvent viser la même catégorie (ex. Hemra : 50 000 datés + 30 000 à date
+  // imprécise) : le total payé est réparti dans l'ordre, lignes datées d'abord, sans double compte.
+  const dueSort = (c: FixedMonthCharge) => (c.dayFrom ?? 99);
+  const ordered = [...charges].sort((a, b) => dueSort(a) - dueSort(b));
+  const pools: Record<string, number> = {};
+  const rowsById: Record<string, { paid: number; remaining: number }> = {};
+  ordered.forEach((c) => {
+    const key = `${normalizeText(c.category)}|${normalizeText(c.subcategory || "")}`;
+    if (pools[key] === undefined) pools[key] = monthTx.filter((t) => matches(t, c)).reduce((a, t) => a + t.amount, 0);
+    const paid = Math.min(pools[key], c.amount);
+    pools[key] -= paid;
+    rowsById[c.id] = { paid, remaining: c.amount - paid };
+  });
+  const rows = ordered.map((c) => ({ ...c, ...rowsById[c.id] }));
+  const dueLabel = (c: FixedMonthCharge) => c.dayFrom === undefined ? "date imprécise" : (c.dayTo === undefined || c.dayTo === c.dayFrom ? `le ${c.dayFrom}` : `du ${c.dayFrom} au ${c.dayTo}`);
+  const isLate = (r: { dayFrom?: number; dayTo?: number; remaining: number }) => r.remaining > 0 && r.dayFrom !== undefined && (r.dayTo ?? r.dayFrom) < dayNum;
+  const fixedRemaining = rows.reduce((a, r) => a + r.remaining, 0);
+  const reste = solde - fixedRemaining;
+  const perDay = reste / daysLeft;
+
+  const discretionarySoFar = monthTx.filter((t) => t.type === "Dépense" && !isFixed(t)).reduce((a, t) => a + t.amount, 0);
+  const rateNow = dayNum > 0 ? discretionarySoFar / dayNum : 0;
+  // Mois dernier : mêmes jours restants (du jour N à la fin du mois), hors charges fixes.
+  const fromPrev = `${pmk.split("_")[0]}-${pad2(Number(pmk.split("_")[1]))}-${pad2(Math.min(dayNum, pdim))}`;
+  const prevDaysCount = pdim - Math.min(dayNum, pdim) + 1;
+  const prevRemainingDisc = transactions
+    .filter((t) => dateToMonthKey(t.date) === pmk && t.date >= fromPrev && t.type === "Dépense" && !isFixed(t))
+    .reduce((a, t) => a + t.amount, 0);
+  const ratePrev = prevDaysCount > 0 ? prevRemainingDisc / prevDaysCount : 0;
+
+  const projected = reste - rateNow * daysLeft;
+  const projectedPrevStyle = reste - ratePrev * daysLeft;
+  const ok = perDay >= 0;
+  const tone = !ok ? COLOR.claySoft : perDay >= rateNow ? COLOR.emeraldSoft : COLOR.goldSoft;
+  const verdict = !ok
+    ? `Après les charges fixes à venir, il te manque ${fmt(-reste)} FCFA pour finir le mois.`
+    : perDay >= rateNow
+      ? `Ton rythme actuel (${fmt(rateNow)} FCFA/jour) est sous ta limite : tu es dans les clous.`
+      : `Ton rythme actuel (${fmt(rateNow)} FCFA/jour) dépasse ta limite : ralentis de ${fmt(rateNow - perDay)} FCFA/jour.`;
+
+  const mini = (label: string, value: string, color?: string) => (
+    <div style={{ flex: "1 1 150px", minWidth: 140 }}>
+      <div style={{ fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: color || COLOR.ink, fontFamily: "'IBM Plex Mono', monospace" }}>{value}</div>
+    </div>
+  );
+  const upd = (id: string, patch: Partial<FixedMonthCharge>) => setCharges(charges.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+
+  return (
+    <div style={{ background: COLOR.surface, border: `1px solid ${tone}`, borderRadius: 14, padding: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18, color: COLOR.ink }}>Pilotage de fin de mois</div>
+        <div style={{ fontSize: 12, color: COLOR.inkMuted }}>{daysLeft} jour{daysLeft > 1 ? "s" : ""} restant{daysLeft > 1 ? "s" : ""} (aujourd'hui inclus)</div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+        <span style={{ fontSize: 30, fontWeight: 600, color: tone, fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(Math.round(perDay))}</span>
+        <span style={{ fontSize: 13, color: COLOR.inkMuted }}>FCFA par jour que tu peux encore dépenser</span>
+      </div>
+      <div style={{ fontSize: 13, color: COLOR.ink, marginBottom: 16 }}>{verdict}</div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+        {mini("Solde du mois", fmt(solde), solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
+        {mini("− Charges fixes à venir", fmt(fixedRemaining), COLOR.claySoft)}
+        {mini("= Reste à vivre", fmt(reste), reste >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 14, paddingTop: 14, borderTop: `1px solid ${COLOR.hairline}` }}>
+        {mini("Ton rythme ce mois (hors fixes)", `${fmt(rateNow)} /jour`)}
+        {mini(`Mois dernier, mêmes jours (${prevDaysCount} j)`, `${fmt(ratePrev)} /jour`)}
+        {mini("Fin de mois si rythme actuel", fmt(projected), projected >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
+        {mini("Fin de mois si rythme du mois dernier", fmt(projectedPrevStyle), projectedPrevStyle >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
+      </div>
+
+      <button onClick={() => setShowList(!showList)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>
+        {showList ? "Masquer" : "Voir"} les charges fixes de fin de mois ({fmt(fixedRemaining)} FCFA restants)
+      </button>
+
+      {showList && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.map((r) => (
+            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5 }}>
+              {editing ? (
+                <>
+                  <input style={{ ...inputStyle, flex: "1 1 110px", width: "auto" }} value={r.label} onChange={(e) => upd(r.id, { label: e.target.value })} />
+                  <select style={{ ...inputStyle, flex: "1 1 130px", width: "auto" }} value={r.category} onChange={(e) => upd(r.id, { category: e.target.value, subcategory: "" })}>
+                    {Array.from(new Set([r.category, ...categoriesForType(transactions, "Dépense")])).map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <select style={{ ...inputStyle, flex: "1 1 110px", width: "auto" }} value={r.subcategory || ""} onChange={(e) => upd(r.id, { subcategory: e.target.value })}>
+                    <option value="">Toutes</option>
+                    {getSubcategories("Dépense", r.category).map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <input type="text" inputMode="numeric" placeholder="du jour" title="Jour du mois (début)" style={{ ...inputStyle, flex: "0 1 62px", width: 62 }} value={r.dayFrom ?? ""} onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); upd(r.id, { dayFrom: v >= 1 && v <= 31 ? v : undefined, dayTo: v >= 1 && v <= 31 ? (r.dayTo ?? v) : undefined }); }} />
+                  <input type="text" inputMode="numeric" placeholder="au jour" title="Jour du mois (fin)" style={{ ...inputStyle, flex: "0 1 62px", width: 62 }} value={r.dayTo ?? ""} onChange={(e) => { const v = Number(e.target.value.replace(/\D/g, "")); upd(r.id, { dayTo: v >= 1 && v <= 31 ? v : r.dayFrom }); }} />
+                  <input type="text" inputMode="numeric" style={{ ...inputStyle, flex: "0 1 100px", width: 100 }} value={r.amount} onChange={(e) => upd(r.id, { amount: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+                  <button onClick={() => setCharges(charges.filter((c) => c.id !== r.id))} style={{ background: "transparent", border: "none", color: COLOR.claySoft, cursor: "pointer" }}>✕</button>
+                </>
+              ) : (
+                <>
+                  <span style={{ flex: 1, color: COLOR.ink }}>{r.label} <span style={{ color: COLOR.inkMuted, fontSize: 11 }}>({dueLabel(r)} · {r.category}{r.subcategory ? ` › ${r.subcategory}` : ""})</span></span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(r.amount)}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", minWidth: 120, textAlign: "right", color: r.remaining === 0 ? COLOR.emeraldSoft : isLate(r) ? COLOR.goldSoft : COLOR.claySoft }}>
+                    {r.remaining === 0 ? "✓ payé" : isLate(r) ? `⚠ à vérifier · ${fmt(r.remaining)}` : `reste ${fmt(r.remaining)}`}
+                  </span>
+                </>
+              )}
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 14, marginTop: 4 }}>
+            <button onClick={() => setEditing(!editing)} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>{editing ? "Terminer" : "Modifier la liste"}</button>
+            {editing && <button onClick={() => setCharges([...charges, { id: uid("fm"), label: "Nouvelle charge", amount: 0, category: categoriesForType(transactions, "Dépense")[0] || "" }])} style={{ background: "transparent", border: "none", color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: 0 }}>+ Ajouter une charge</button>}
+          </div>
+          <div style={{ fontSize: 11, color: COLOR.inkMuted, lineHeight: 1.5 }}>
+            Une charge est « payée » dès que tes dépenses du mois dans cette catégorie atteignent son montant. Si tu en as payé une partie, seul le reste est réservé. « ⚠ à vérifier » = la date habituelle est passée sans paiement trouvé (peut-être saisi dans une autre catégorie). Ces dépenses sont exclues de ton « rythme hors fixes ».
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, categoryGroups, accounts, monthlyObjective, setMonthlyObjective, chargeOverrides, includeGrundfosVoiture }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[];
   monthlyObjective: number; setMonthlyObjective: (n: number) => void; chargeOverrides: Record<string, ChargeOverride>; includeGrundfosVoiture: boolean;
@@ -14282,6 +14448,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
         <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
         <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
       </div>
+      <FinDeMoisCard transactions={transactions} />
 
       {kpiDetail && (() => {
         const d = buildKpiGroupDetail(kpiDetail.mode, kpiDetail.anchor);
