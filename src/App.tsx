@@ -14410,7 +14410,7 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
   const [incLabel, setIncLabel] = useState("");
   const [incAmount, setIncAmount] = useState("");
   const [incDay, setIncDay] = useState("");
-  const [showList, setShowList] = useState(true);
+  const [showList, setShowList] = useState(false);
   const [managingId, setManagingId] = useState<string | null>(null);
 
   const today = todayISO();
@@ -16111,6 +16111,18 @@ export default function GrandLivre() {
     if (data.scalarTimestamps) setScalarTimestamps(data.scalarTimestamps);
   };
 
+  // Seuil du jour du Conseiller quotidien, affiché en permanence dans l'en-tête (sur demande
+  // explicite de l'utilisateur, 17/10/2026) : visible dès l'ouverture de l'app, sur tous les écrans.
+  const headerThreshold = useMemo(() => {
+    try {
+      const a = generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture);
+      if (!a.hasObjective || a.dailyThreshold === null) return null;
+      const spentToday = transactions.filter((t) => t.type === "Dépense" && t.date === todayISO()).reduce((x, t) => x + t.amount, 0);
+      return { threshold: a.dailyThreshold as number, spentToday };
+    } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, fixedMonthState]);
+
   if (!allLoaded) {
     return <div style={{ minHeight: "100vh", background: COLOR.bg, color: COLOR.inkMuted, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter', sans-serif" }}>Chargement…</div>;
   }
@@ -16245,6 +16257,18 @@ export default function GrandLivre() {
                 )}
               </div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: isMobile ? 21 : 26, fontWeight: 600, color: COLOR.goldSoft }}>{fmt(lastNW)}<span style={{ fontSize: 12, color: COLOR.inkMuted, marginLeft: 6 }}>FCFA</span></div>
+              {headerThreshold && (() => {
+                const left = headerThreshold.threshold - headerThreshold.spentToday;
+                const col = left >= 0 ? COLOR.emeraldSoft : COLOR.claySoft;
+                return (
+                  <div style={{ marginTop: 6, fontSize: 12, color: COLOR.inkMuted }}>
+                    Seuil du jour : <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 600 }}>{fmt(Math.round(headerThreshold.threshold))} FCFA</span>
+                    <span style={{ marginLeft: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: col }}>
+                      {left >= 0 ? `reste ${fmt(Math.round(left))}` : `dépassé de ${fmt(Math.round(-left))}`}
+                    </span>
+                  </div>
+                );
+              })()}
               {funds.length > 0 && (
                 <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2, alignItems: isMobile ? "flex-start" : "flex-end" }}>
                   <div style={{ fontSize: 11.5, color: "#9fb3d9" }}>
