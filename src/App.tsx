@@ -4960,6 +4960,29 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   const [bFromDay, setBFromDay] = useState(lastDate);
   const [bToDay, setBToDay] = useState(lastDate);
 
+  // Une dépense est une "charge fixe" si elle correspond à une ligne de la liste du Pilotage de fin de mois.
+  const isListedFixed = (t: Transaction) => FIXED_MONTH_CHARGES_GLOBAL.some((c) => !c.onlyMonth && t.type === "Dépense" &&
+    normalizeText(t.category) === normalizeText(c.category) && (!c.subcategory || normalizeText(t.subcategory || "") === normalizeText(c.subcategory)) && (!c.minAmount || t.amount >= c.minAmount));
+
+  // Rythme de chaque mois (tableau + graphique), sur demande explicite de l'utilisateur (17/10/2026).
+  const [rythmeMode, setRythmeMode] = useState<"entier" | "jusqu_a">("entier");
+  const [rythmeUntilDay, setRythmeUntilDay] = useState(() => new Date().getDate());
+  const monthRythmes = useMemo(() => {
+    const curMk = dateToMonthKey(todayISO());
+    const todayDay = new Date(todayISO() + "T00:00:00").getDate();
+    const list = allMonths.slice(-12).map((m) => {
+      const dim = daysInMonthOf(m);
+      const days = rythmeMode === "jusqu_a" ? Math.min(rythmeUntilDay, dim) : (m === curMk ? todayDay : dim);
+      const tx = withGroup.filter((t) => t.month === m && t.type === "Dépense" && (rythmeMode === "entier" || new Date(t.date + "T00:00:00").getDate() <= days));
+      const rev = withGroup.filter((t) => t.month === m && t.type === "Revenu" && (rythmeMode === "entier" || new Date(t.date + "T00:00:00").getDate() <= days)).reduce((a, t) => a + t.amount, 0);
+      const dep = tx.reduce((a, t) => a + t.amount, 0);
+      const horsFixes = tx.filter((t) => !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
+      return { month: m, days, dep, rythme: dep / Math.max(1, days), horsFixes, rythmeHF: horsFixes / Math.max(1, days), rev, rythmeRev: rev / Math.max(1, days) };
+    });
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [withGroup, allMonths, rythmeMode, rythmeUntilDay]);
+
   const statsFor = (from: string, to: string) => {
     const tx = granularity === "jour"
       ? withGroup.filter((t) => t.date >= from && t.date <= to)
@@ -4971,7 +4994,14 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     const tauxEpargne = revenus > 0 ? (solde / revenus) * 100 : 0;
     const byCat: Record<string, number> = {};
     tx.filter((t) => t.type === "Dépense").forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
-    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length };
+    // Rythme par jour : nombre de jours de la période (mois en cours = jours écoulés seulement).
+    const curMk = dateToMonthKey(todayISO());
+    const todayDay = new Date(todayISO() + "T00:00:00").getDate();
+    const days = granularity === "jour"
+      ? Math.max(1, Math.round((new Date(to + "T00:00:00").getTime() - new Date(from + "T00:00:00").getTime()) / 86400000) + 1)
+      : Math.max(1, allMonths.filter((m) => monthSortKey(m) >= monthSortKey(from) && monthSortKey(m) <= monthSortKey(to)).reduce((a, m) => a + (m === curMk ? todayDay : daysInMonthOf(m)), 0));
+    const depHorsFixes = tx.filter((t) => t.type === "Dépense" && !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
+    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length, days, rythme: depenses / days, rythmeHorsFixes: depHorsFixes / days };
   };
 
   const A = useMemo(() => statsFor(granularity === "jour" ? aFromDay : aFrom, granularity === "jour" ? aToDay : aTo), [withGroup, aFrom, aTo, aFromDay, aToDay, granularity]);
@@ -4999,9 +5029,9 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     return (
       <div style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
         <div style={{ width: 150, fontSize: 12.5, color: COLOR.inkMuted }}>{label}</div>
-        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.slateBlueSoft }}>{suffix === "%" ? a.toFixed(1) + "%" : fmt(a)}</div>
+        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.slateBlueSoft }}>{suffix === "%" ? a.toFixed(1) + "%" : suffix === "j" ? `${a} j` : fmt(a)}</div>
         <div style={{ width: 30, textAlign: "center", color: COLOR.inkMuted }}>→</div>
-        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.goldSoft }}>{suffix === "%" ? b.toFixed(1) + "%" : fmt(b)}</div>
+        <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.goldSoft }}>{suffix === "%" ? b.toFixed(1) + "%" : suffix === "j" ? `${b} j` : fmt(b)}</div>
         <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: good === null ? COLOR.inkMuted : good ? COLOR.emeraldSoft : COLOR.claySoft }}>
           {d >= 0 ? "+" : ""}{d.toFixed(0)}%
         </div>
@@ -5091,6 +5121,68 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
         {metricRow("Solde", A.solde, B.solde, false)}
         {metricRow("Taux d'épargne", A.tauxEpargne, B.tauxEpargne, false, "%")}
         {metricRow("Non-productif", A.nonProd, B.nonProd, true)}
+        {metricRow("Jours comptés", A.days, B.days, false, "j")}
+        {metricRow("Rythme de dépenses / jour", A.rythme, B.rythme, true)}
+        {metricRow("Rythme hors charges fixes / jour", A.rythmeHorsFixes, B.rythmeHorsFixes, true)}
+      </Panel>
+
+      <Panel title="Rythme de chaque mois" subtitle="Dépenses par jour sur les 12 derniers mois — total, et hors charges fixes de ta liste (loyer, Maman, Nesher…)"
+        right={
+          <div style={{ display: "flex", gap: 4, background: COLOR.surface, borderRadius: 16, padding: 3, border: `1px solid ${COLOR.hairline}` }}>
+            {([["entier", "Mois entiers"], ["jusqu_a", "Jusqu'au jour…"]] as const).map(([k, l]) => (
+              <button key={k} onClick={() => setRythmeMode(k)} style={{ padding: "5px 12px", borderRadius: 12, fontSize: 12, cursor: "pointer", border: "none", background: rythmeMode === k ? COLOR.gold : "transparent", color: rythmeMode === k ? COLOR.bg : COLOR.inkMuted }}>{l}</button>
+            ))}
+          </div>
+        }>
+        {rythmeMode === "jusqu_a" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, fontSize: 12.5, color: COLOR.inkMuted }}>
+            Comparer chaque mois du 1er au jour
+            <input type="number" min={1} max={31} value={rythmeUntilDay} onChange={(e) => setRythmeUntilDay(Math.max(1, Math.min(31, Number(e.target.value) || 1)))} style={{ ...inputStyle, width: 70 }} />
+            <span>(même nombre de jours pour tous : comparaison à armes égales)</span>
+          </div>
+        )}
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 560 }}>
+            <thead>
+              <tr style={{ color: COLOR.inkMuted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                {["Mois", "Jours", "Dépenses", "Rythme / jour", "Hors fixes / jour", "Revenus / jour", "vs mois précédent"].map((h, i) => <th key={h} style={{ textAlign: i === 0 ? "left" : "right", padding: "6px 8px", fontWeight: 500 }}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {[...monthRythmes].reverse().map((r, idx, arr) => {
+                const prev = arr[idx + 1];
+                const d = prev && prev.rythmeHF > 0 ? ((r.rythmeHF - prev.rythmeHF) / prev.rythmeHF) * 100 : null;
+                return (
+                  <tr key={r.month} style={{ borderTop: `1px solid ${COLOR.hairline}` }}>
+                    <td style={{ padding: "9px 8px", color: COLOR.ink }}>{monthLabel(r.month)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", color: COLOR.inkMuted }}>{r.days}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.dep)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.rythme)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft }}>{fmt(r.rythmeHF)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.emeraldSoft }}>{fmt(r.rythmeRev)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: d === null ? COLOR.inkMuted : d <= 0 ? COLOR.emeraldSoft : COLOR.claySoft }}>{d === null ? "—" : `${d >= 0 ? "+" : ""}${d.toFixed(0)}%`}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ height: 240, marginTop: 16 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={monthRythmes.map((r) => ({ name: monthLabel(r.month), "Rythme total": Math.round(r.rythme), "Hors charges fixes": Math.round(r.rythmeHF) }))} margin={{ left: 0, right: 10, top: 10 }}>
+              <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+              <XAxis dataKey="name" tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={{ stroke: COLOR.hairline }} tickLine={false} />
+              <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={fmtShort} />
+              <Tooltip content={<CustomTooltip />} />
+              <Legend wrapperStyle={{ fontSize: 12, color: COLOR.inkMuted }} />
+              <Bar dataKey="Rythme total" fill={COLOR.slateBlue} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="Hors charges fixes" fill={COLOR.gold} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 10, lineHeight: 1.5 }}>
+          Rythme / jour = dépenses du mois ÷ nombre de jours (mois en cours : jours écoulés). « Hors fixes » retire les charges de ta liste de fin de mois, pour voir ton vrai rythme du quotidien. Avec « Jusqu'au jour… », chaque mois est coupé au même jour, ce qui évite de comparer un mois complet à un mois en cours.
+        </div>
       </Panel>
 
       <PanelWithHelp title="Comparaison visuelle" explain="Chaque paire de barres met côte à côte la Période A (bleu) et la Période B (or) pour Revenus, Dépenses, Solde et Non-productif. Ça permet de voir en un coup d'œil quels indicateurs ont le plus bougé entre les deux périodes choisies ci-dessus.">
