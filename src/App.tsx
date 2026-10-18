@@ -14464,6 +14464,12 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
     .filter((t) => dateToMonthKey(t.date) === pmk && t.date >= fromPrev && t.type === "Dépense" && !isFixed(t))
     .reduce((a, t) => a + t.amount, 0);
   const ratePrev = prevDaysCount > 0 ? prevRemainingDisc / prevDaysCount : 0;
+  // Mois dernier, même période que ce mois-ci (du 1er au jour N), hors charges fixes — comparaison à armes égales.
+  const prevSameDays = Math.min(dayNum, pdim);
+  const prevSameDisc = transactions
+    .filter((t) => dateToMonthKey(t.date) === pmk && new Date(t.date + "T00:00:00").getDate() <= prevSameDays && t.type === "Dépense" && !isFixed(t))
+    .reduce((a, t) => a + t.amount, 0);
+  const ratePrevSame = prevSameDays > 0 ? prevSameDisc / prevSameDays : 0;
 
   const projected = reste - rateNow * daysLeft;
   const projectedPrevStyle = reste - ratePrev * daysLeft;
@@ -14530,9 +14536,10 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
 
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 14, paddingTop: 14, borderTop: `1px solid ${COLOR.hairline}` }}>
         {mini("Ton rythme ce mois (hors fixes)", `${fmt(rateNow)} /jour`)}
-        {mini(`Mois dernier, mêmes jours (${prevDaysCount} j)`, `${fmt(ratePrev)} /jour`)}
+        {mini(`${monthLabel(pmk)} du 1er au ${prevSameDays} (même période, hors fixes)`, `${fmt(ratePrevSame)} /jour`)}
         {mini("Fin de mois si rythme actuel", fmt(projected), projected >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
-        {mini("Fin de mois si rythme du mois dernier", fmt(projectedPrevStyle), projectedPrevStyle >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
+        {mini(`${monthLabel(pmk)} du ${Math.min(dayNum, pdim)} au ${pdim} (fin de mois, hors fixes, ${prevDaysCount} j)`, `${fmt(ratePrev)} /jour`)}
+        {mini(`Fin de mois si rythme de fin ${monthLabel(pmk)}`, fmt(projectedPrevStyle), projectedPrevStyle >= 0 ? COLOR.emeraldSoft : COLOR.claySoft)}
       </div>
 
       <div style={{ marginBottom: 10 }}>
