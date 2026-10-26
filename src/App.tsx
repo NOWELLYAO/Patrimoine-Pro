@@ -2850,6 +2850,9 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
   const results: { category: string; monthsPresent: number; typicalDay: number; typicalAmount: number }[] = [];
   Object.entries(byPosteMonth).forEach(([poste, monthsData]) => {
     if (!fixedPostes.has(poste)) return;
+    // Abonnement résilié (demande de l'utilisateur, 21/10/2026) : Money Coach n'est plus utilisé,
+    // il ne doit plus apparaître dans les rappels ni dans le seuil du jour.
+    if (normalizeText(poste).includes("money coach")) return;
     const presentMonths = Object.keys(monthsData);
     if (presentMonths.length < 4) return; // pas assez régulier pour être qualifié de "périodique"
     const amounts = presentMonths.map((m) => monthsData[m].amount);
