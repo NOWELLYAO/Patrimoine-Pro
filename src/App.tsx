@@ -264,6 +264,14 @@ interface Transaction {
   // réels (qui restent basés sur "account", où l'argent a vraiment bougé).
   onBehalfOf?: string;
   settled?: boolean; // avance entre comptes déjà réglée entre les deux comptes concernés
+  // Dépense (ou revenu) exceptionnel(le), ponctuel(le) et non représentatif(ve) du train de
+  // vie habituel (ex: achat d'un véhicule, gros investissement, rentrée d'argent one-off).
+  // Sur demande explicite de l'utilisateur (17/11/2026) : ces montants sont exclus des
+  // comparaisons période-sur-période (cartes "Aujourd'hui"/"Mois en cours" de la Saisie
+  // quotidienne) pour que la tendance affichée ne soit pas faussée par un évènement isolé.
+  // Le montant réel reste comptabilisé partout ailleurs (soldes, bilan, etc.) — seule la
+  // comparaison de tendance l'ignore.
+  exceptional?: boolean;
   // Horodatage de la dernière modification — posé automatiquement (via
   // setTransactionsTracked, pas au cas par cas) à chaque création ou édition, quel que
   // soit le point de saisie utilisé. Permet à la fusion de synchronisation de départager
@@ -1585,6 +1593,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
   const [account, setAccount] = useState("");
   const [onBehalfOf, setOnBehalfOf] = useState("");
   const [note, setNote] = useState("");
+  const [exceptional, setExceptional] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -1596,6 +1605,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
       setAmount(transaction.amount); setAccount(transaction.account || defaultQuickAccount(accounts));
       setOnBehalfOf(transaction.onBehalfOf || "");
       setNote(transaction.note || "");
+      setExceptional(!!transaction.exceptional);
       setSaved(false);
     }
   }, [open, transaction]);
@@ -1610,7 +1620,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, exceptional: exceptional || undefined });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
@@ -1696,6 +1706,13 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
                 )}
               </div>
             )}
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                <input type="checkbox" checked={exceptional} onChange={(e) => setExceptional(e.target.checked)} />
+                <Sparkles size={13} color={COLOR.goldSoft} />
+                Exceptionnelle (achat ponctuel, investissement…) — exclue des comparaisons de tendance
+              </label>
+            </div>
             <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
               value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
@@ -13629,6 +13646,11 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                               <ArrowRight size={9} /> pour {t.onBehalfOf}
                             </div>
                           )}
+                          {t.exceptional && (
+                            <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 2, display: "flex", alignItems: "center", gap: 3 }} title="Exceptionnelle — exclue des comparaisons de tendance">
+                              <Sparkles size={9} /> exceptionnelle
+                            </div>
+                          )}
                         </td>
                         <td style={{ padding: "9px 10px", fontSize: 12.5, textAlign: "right", borderBottom: `1px solid ${COLOR.hairline}`, borderRight: `1px solid ${COLOR.hairline}`, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: t.type === "Revenu" ? COLOR.emeraldSoft : COLOR.claySoft }}>{t.type === "Revenu" ? "+" : "−"}{fmt(t.amount)}</td>
                         <td style={{ padding: "9px 10px", borderBottom: `1px solid ${COLOR.hairline}`, whiteSpace: "nowrap" }}><button onClick={() => startEdit(t)} style={iconBtnStyle(COLOR.slateBlueSoft)}><Pencil size={13} /></button><button onClick={() => setConfirmDeleteId(t.id)} style={iconBtnStyle(COLOR.claySoft)}><Trash2 size={13} /></button></td>
@@ -13689,6 +13711,9 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                           )}
                           {t.onBehalfOf && (
                             <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><ArrowRight size={9} /> pour {t.onBehalfOf}</div>
+                          )}
+                          {t.exceptional && (
+                            <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><Sparkles size={9} /> exceptionnelle</div>
                           )}
                           {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginTop: 3 }}>{t.payee}</div>}
                           {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", marginTop: 2 }}>« {t.note} »</div>}
@@ -14643,6 +14668,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [quickAccount, setQuickAccount] = useState(() => defaultQuickAccount(accounts));
   const [quickOnBehalfOf, setQuickOnBehalfOf] = useState("");
   const [quickNote, setQuickNote] = useState("");
+  const [quickExceptional, setQuickExceptional] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -14667,6 +14693,13 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const dep = arr.filter((t) => t.type === "Dépense").reduce((a, t) => a + t.amount, 0);
     return { rev, dep, solde: rev - dep };
   };
+  // Même totaux, mais en excluant les transactions cochées "exceptionnelle" — utilisés
+  // uniquement pour les comparaisons période-sur-période (hint/badge des cartes KPI et
+  // la fiche de détail par nature), sur demande explicite de l'utilisateur (17/11/2026) :
+  // un achat ponctuel important (ex: achat d'un véhicule) ne doit pas fausser la tendance
+  // affichée. La valeur affichée en gros sur la carte reste le vrai total (sumFor), seule
+  // la comparaison change.
+  const sumForNormal = (pred: (t: any) => boolean) => sumFor((t) => pred(t) && !t.exceptional);
 
   const todayTotals = sumFor((t) => t.date === today);
   const weekTotals = sumFor((t) => t.date >= weekAgo && t.date <= today);
@@ -14674,9 +14707,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
 
   // Répartition des dépenses par nature (Nécessaire/Productif/Non-productif) pour une
   // fenêtre donnée — sur demande explicite de l'utilisateur (11/08/2026), pour les
-  // cartes "Aujourd'hui" et "Mois en cours — dépenses".
+  // cartes "Aujourd'hui" et "Mois en cours — dépenses". Les dépenses "exceptionnelles"
+  // sont exclues ici aussi (17/11/2026), puisque cette répartition sert la même analyse
+  // de tendance que les cartes KPI.
   const groupBreakdown = (pred: (t: any) => boolean) => {
-    const dep = withGroup.filter((t) => t.type === "Dépense" && pred(t));
+    const dep = withGroup.filter((t) => t.type === "Dépense" && !t.exceptional && pred(t));
     const total = dep.reduce((a, t) => a + t.amount, 0) || 1;
     const byGroup: Record<string, number> = { "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 };
     dep.forEach((t) => { byGroup[t.group] = (byGroup[t.group] || 0) + t.amount; });
@@ -14696,9 +14731,15 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const sameDayLastMonth = mkDate(prevMonthKeyVal, clampDay(prevMonthKeyVal, dayNum));
   const weekStartDayLastMonth = mkDate(prevMonthKeyVal, clampDay(prevMonthKeyVal, Math.max(1, dayNum - 6)));
 
-  const todayLastMonthTotals = sumFor((t) => t.date === sameDayLastMonth);
-  const weekLastMonthTotals = sumFor((t) => t.date >= weekStartDayLastMonth && t.date <= sameDayLastMonth);
-  const monthLastMonthTotals = sumFor((t) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum);
+  // Totaux "normalisés" (hors exceptionnelles) utilisés pour les comparaisons — à la fois
+  // pour la période en cours et la période comparative, afin que la comparaison reste
+  // cohérente des deux côtés.
+  const todayTotalsNormal = sumForNormal((t) => t.date === today);
+  const weekTotalsNormal = sumForNormal((t) => t.date >= weekAgo && t.date <= today);
+  const monthTotalsNormal = sumForNormal((t) => dateToMonthKey(t.date) === currentMonthKey);
+  const todayLastMonthTotals = sumForNormal((t) => t.date === sameDayLastMonth);
+  const weekLastMonthTotals = sumForNormal((t) => t.date >= weekStartDayLastMonth && t.date <= sameDayLastMonth);
+  const monthLastMonthTotals = sumForNormal((t) => dateToMonthKey(t.date) === prevMonthKeyVal && new Date(t.date + "T00:00:00").getDate() <= dayNum);
 
   // Construit la fiche de détail avec, pour chaque nature (Nécessaire/Productif/
   // Non-productif), l'écart entre la période actuelle et la période comparative — pour
@@ -14727,6 +14768,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     const prevRows = groupBreakdown(prevPred);
     const curTotal = curRows.reduce((a, r) => a + r.value, 0);
     const prevTotal = prevRows.reduce((a, r) => a + r.value, 0);
+    // Montant des dépenses "exceptionnelles" exclues de cette comparaison (achat ponctuel,
+    // investissement…) — affiché à titre informatif pour que l'utilisateur sache pourquoi
+    // le total ci-dessus peut différer de la vraie dépense totale de la période.
+    const curExceptional = withGroup.filter((t) => t.type === "Dépense" && t.exceptional && curPred(t)).reduce((a, t) => a + t.amount, 0);
+    const prevExceptional = withGroup.filter((t) => t.type === "Dépense" && t.exceptional && prevPred(t)).reduce((a, t) => a + t.amount, 0);
     const curLabel = mode === "today" ? dateLabelFull(curDate) : monthLabel(anchorMonthKey);
     const prevLabel = mode === "today" && cmp ? `${dateLabelFull(cmp)} (mois précédent)` : `Même ${mode === "today" ? "jour" : "période"} le mois dernier (${monthLabel(prevAnchorMonthKey)})`;
     // Distingue la vraie période en cours (aujourd'hui / mois civil actuel) d'une période
@@ -14814,6 +14860,10 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
           })(),
         }] : []),
         { kind: "note" as const, tone: ((totalDelta < 0 && biggestMover?.group === "Nécessaire") || (totalDelta > 0 && biggestMover?.group !== "Productif") ? "warn" : "info") as "warn" | "info", text: verdict },
+        ...(curExceptional > 0 || prevExceptional > 0 ? [{
+          kind: "note" as const, tone: "info" as const,
+          text: `Dépenses exceptionnelles exclues de cette comparaison : ${fmt(curExceptional)} FCFA sur ${curLabel.toLowerCase()}, ${fmt(prevExceptional)} FCFA sur la période comparative.`,
+        }] : []),
       ],
     };
   };
@@ -14827,7 +14877,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const quickDateEntries = withGroup.filter((t) => t.date === quickDate).sort((a, b) => b.id.localeCompare(a.id));
 
   const resetForm = () => {
-    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null); setQuickOnBehalfOf("");
+    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null); setQuickOnBehalfOf(""); setQuickExceptional(false);
   };
 
   const submit = () => {
@@ -14836,10 +14886,10 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     if (editingId) {
       setTransactions(transactions.map((t) => t.id === editingId ? {
         ...t, date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined,
-        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined,
+        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined, exceptional: quickExceptional || undefined,
       } : t));
     } else {
-      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined }]);
+      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined, exceptional: quickExceptional || undefined }]);
     }
     resetForm();
     setJustAdded(true);
@@ -14857,6 +14907,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     setQuickAccount(t.account || defaultQuickAccount(accounts));
     setQuickOnBehalfOf(t.onBehalfOf || "");
     setQuickNote(t.note || "");
+    setQuickExceptional(!!t.exceptional);
   };
 
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
@@ -14869,11 +14920,11 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
       </div>
       <DailyAdvisorButton transactions={transactions} monthlyObjective={monthlyObjective} setMonthlyObjective={setMonthlyObjective} chargeOverrides={chargeOverrides} includeGrundfosVoiture={includeGrundfosVoiture} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotals.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotals.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetail({ mode: "today", anchor: today })} />
-        <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotals.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotals.solde, weekLastMonthTotals.solde), "up")} />
-        <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotals.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.solde, monthLastMonthTotals.solde), "up")} />
-        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotals.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
-        <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotals.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotals.rev, monthLastMonthTotals.rev), "up")} />
+        <Kpi label="Aujourd'hui — solde" value={fmt(todayTotals.solde)} tone={todayTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={Clock} hint={vsHint(todayTotalsNormal.solde, todayLastMonthTotals.solde, "même jour le mois dernier")} hintBadge={compareLabel(pctDelta(todayTotalsNormal.solde, todayLastMonthTotals.solde), "up")} onDetailClick={() => setKpiDetail({ mode: "today", anchor: today })} />
+        <Kpi label="7 derniers jours — solde" value={fmt(weekTotals.solde)} tone={weekTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarDays} hint={vsHint(weekTotalsNormal.solde, weekLastMonthTotals.solde, "même période le mois dernier")} hintBadge={compareLabel(pctDelta(weekTotalsNormal.solde, weekLastMonthTotals.solde), "up")} />
+        <Kpi label="Mois en cours — solde" value={fmt(monthTotals.solde)} tone={monthTotals.solde >= 0 ? COLOR.emeraldSoft : COLOR.claySoft} icon={CalendarRange} hint={vsHint(monthTotalsNormal.solde, monthLastMonthTotals.solde, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotalsNormal.solde, monthLastMonthTotals.solde), "up")} />
+        <Kpi label="Mois en cours — dépenses" value={fmt(monthTotals.dep)} tone={COLOR.claySoft} icon={TrendingDown} hint={vsHint(monthTotalsNormal.dep, monthLastMonthTotals.dep, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotalsNormal.dep, monthLastMonthTotals.dep), "down")} onDetailClick={() => setKpiDetail({ mode: "month", anchor: currentMonthKey })} />
+        <Kpi label="Mois en cours — revenus" value={fmt(monthTotals.rev)} tone={COLOR.emeraldSoft} icon={TrendingUp} hint={vsHint(monthTotalsNormal.rev, monthLastMonthTotals.rev, "au même jour le mois dernier")} hintBadge={compareLabel(pctDelta(monthTotalsNormal.rev, monthLastMonthTotals.rev), "up")} />
       </div>
       <FinDeMoisCard onOpenSaisie={prefillQuick} transactions={transactions} setTransactions={setTransactions} accounts={accounts} charges={fixedMonthCharges} setCharges={setFixedMonthCharges} fixedState={fixedMonthState} setFixedState={setFixedMonthState} expectedIncomes={expectedIncomes} setExpectedIncomes={setExpectedIncomes} />
 
@@ -15003,6 +15054,13 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                     )}
                   </div>
                 )}
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                    <input type="checkbox" checked={quickExceptional} onChange={(e) => setQuickExceptional(e.target.checked)} />
+                    <Sparkles size={13} color={COLOR.goldSoft} />
+                    Exceptionnelle (achat ponctuel, investissement…) — exclue des comparaisons de tendance
+                  </label>
+                </div>
                 <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={quickType}
                   value={quickCategory} subvalue={quickSubcategory} onSelect={(c, s) => { setQuickCategory(c); setQuickSubcategory(s); }} />
 
@@ -15035,6 +15093,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
               <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 160px", overflow: "hidden" }}>
                 {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{t.time}</span>}
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block", flexShrink: 0 }} />
+                {t.exceptional && <Sparkles size={11} color={COLOR.goldSoft} style={{ flexShrink: 0 }} />}
                 <span style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                   {t.category}{t.subcategory && ` · ${t.subcategory}`}
                   {t.account && <span style={{ color: COLOR.slateBlueSoft }}> · {t.account}</span>}
@@ -15150,6 +15209,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [account, setAccount] = useState(() => defaultQuickAccount(accounts));
   const [onBehalfOf, setOnBehalfOf] = useState("");
   const [note, setNote] = useState("");
+  const [exceptional, setExceptional] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
 
@@ -15186,9 +15246,9 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     if (!category || !amount || Number(amount) <= 0) return;
     setTransactions([...transactions, {
       id: uid(), date, time, category, subcategory: subcategory || undefined, type, amount: Number(amount),
-      account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined,
+      account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, exceptional: exceptional || undefined,
     }]);
-    setAmount(""); setNote(""); setOnBehalfOf("");
+    setAmount(""); setNote(""); setOnBehalfOf(""); setExceptional(false);
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1000);
   };
@@ -15335,6 +15395,13 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                   )}
                 </div>
               )}
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${COLOR.hairline}` }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                  <input type="checkbox" checked={exceptional} onChange={(e) => setExceptional(e.target.checked)} />
+                  <Sparkles size={13} color={COLOR.goldSoft} />
+                  Exceptionnelle (achat ponctuel, investissement…) — exclue des comparaisons de tendance
+                </label>
+              </div>
               <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
                 value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
