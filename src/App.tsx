@@ -14483,19 +14483,25 @@ function FinDeMoisCard({ transactions, setTransactions, accounts, charges, setCh
   const dueLabel = (c: FixedMonthCharge) => c.onlyMonth ? "ponctuelle" : c.dayFrom === undefined ? "date imprécise" : (c.dayTo === undefined || c.dayTo === c.dayFrom ? `le ${c.dayFrom}` : `du ${c.dayFrom} au ${c.dayTo}`);
   const isLate = (r: FixedRow) => r.status === "open" && r.dayFrom !== undefined && (r.dayTo ?? r.dayFrom) < dayNum;
 
-  const discretionarySoFar = monthTx.filter((t) => t.type === "Dépense" && !isFixed(t)).reduce((a, t) => a + t.amount, 0);
+  // Les dépenses "exceptionnelles" (achat ponctuel, investissement…) sont exclues de ces
+  // rythmes/projections — sur demande explicite de l'utilisateur (17/11/2026) : un achat
+  // one-off ne va pas se répéter chaque jour jusqu'à la fin du mois, donc le compter dans
+  // le rythme journalier fausse complètement la projection de fin de mois. Le "Solde du
+  // mois" et le "Reste à vivre" ci-dessus, eux, restent les vrais montants (rien n'est
+  // caché) — seule la vitesse de croisière projetée ignore ces montants.
+  const discretionarySoFar = monthTx.filter((t) => t.type === "Dépense" && !isFixed(t) && !t.exceptional).reduce((a, t) => a + t.amount, 0);
   const rateNow = dayNum > 0 ? discretionarySoFar / dayNum : 0;
   // Mois dernier : mêmes jours restants (du jour N à la fin du mois), hors charges fixes.
   const fromPrev = `${pmk.split("_")[0]}-${pad2(Number(pmk.split("_")[1]))}-${pad2(Math.min(dayNum, pdim))}`;
   const prevDaysCount = pdim - Math.min(dayNum, pdim) + 1;
   const prevRemainingDisc = transactions
-    .filter((t) => dateToMonthKey(t.date) === pmk && t.date >= fromPrev && t.type === "Dépense" && !isFixed(t))
+    .filter((t) => dateToMonthKey(t.date) === pmk && t.date >= fromPrev && t.type === "Dépense" && !isFixed(t) && !t.exceptional)
     .reduce((a, t) => a + t.amount, 0);
   const ratePrev = prevDaysCount > 0 ? prevRemainingDisc / prevDaysCount : 0;
   // Mois dernier, même période que ce mois-ci (du 1er au jour N), hors charges fixes — comparaison à armes égales.
   const prevSameDays = Math.min(dayNum, pdim);
   const prevSameDisc = transactions
-    .filter((t) => dateToMonthKey(t.date) === pmk && new Date(t.date + "T00:00:00").getDate() <= prevSameDays && t.type === "Dépense" && !isFixed(t))
+    .filter((t) => dateToMonthKey(t.date) === pmk && new Date(t.date + "T00:00:00").getDate() <= prevSameDays && t.type === "Dépense" && !isFixed(t) && !t.exceptional)
     .reduce((a, t) => a + t.amount, 0);
   const ratePrevSame = prevSameDays > 0 ? prevSameDisc / prevSameDays : 0;
 
