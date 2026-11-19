@@ -4999,10 +4999,18 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
       const dim = daysInMonthOf(m);
       const days = rythmeMode === "jusqu_a" ? Math.min(rythmeUntilDay, dim) : (m === curMk ? todayDay : dim);
       const tx = withGroup.filter((t) => t.month === m && t.type === "Dépense" && (rythmeMode === "entier" || new Date(t.date + "T00:00:00").getDate() <= days));
-      const rev = withGroup.filter((t) => t.month === m && t.type === "Revenu" && (rythmeMode === "entier" || new Date(t.date + "T00:00:00").getDate() <= days)).reduce((a, t) => a + t.amount, 0);
+      const revTx = withGroup.filter((t) => t.month === m && t.type === "Revenu" && (rythmeMode === "entier" || new Date(t.date + "T00:00:00").getDate() <= days));
+      // Les transactions "exceptionnelles" sont exclues des rythmes / jour (et donc de la
+      // variation "vs mois précédent"), sur demande explicite de l'utilisateur (19/11/2026) :
+      // un achat ponctuel ne reflète pas le rythme du quotidien. La colonne "Dépenses"
+      // reste le vrai total du mois.
+      const txN = tx.filter((t) => !t.exceptional);
       const dep = tx.reduce((a, t) => a + t.amount, 0);
-      const horsFixes = tx.filter((t) => !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
-      return { month: m, days, dep, rythme: dep / Math.max(1, days), horsFixes, rythmeHF: horsFixes / Math.max(1, days), rev, rythmeRev: rev / Math.max(1, days) };
+      const depN = txN.reduce((a, t) => a + t.amount, 0);
+      const excluded = dep - depN;
+      const rev = revTx.filter((t) => !t.exceptional).reduce((a, t) => a + t.amount, 0);
+      const horsFixes = txN.filter((t) => !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
+      return { month: m, days, dep, excluded, rythme: depN / Math.max(1, days), horsFixes, rythmeHF: horsFixes / Math.max(1, days), rev, rythmeRev: rev / Math.max(1, days) };
     });
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5025,8 +5033,10 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     const days = granularity === "jour"
       ? Math.max(1, Math.round((new Date(to + "T00:00:00").getTime() - new Date(from + "T00:00:00").getTime()) / 86400000) + 1)
       : Math.max(1, allMonths.filter((m) => monthSortKey(m) >= monthSortKey(from) && monthSortKey(m) <= monthSortKey(to)).reduce((a, m) => a + (m === curMk ? todayDay : daysInMonthOf(m)), 0));
-    const depHorsFixes = tx.filter((t) => t.type === "Dépense" && !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
-    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length, days, rythme: depenses / days, rythmeHorsFixes: depHorsFixes / days };
+    // Rythmes / jour hors transactions "exceptionnelles" (19/11/2026) ; les totaux restent réels.
+    const depNormal = tx.filter((t) => t.type === "Dépense" && !t.exceptional).reduce((a, t) => a + t.amount, 0);
+    const depHorsFixes = tx.filter((t) => t.type === "Dépense" && !t.exceptional && !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
+    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
   };
 
   const A = useMemo(() => statsFor(granularity === "jour" ? aFromDay : aFrom, granularity === "jour" ? aToDay : aTo), [withGroup, aFrom, aTo, aFromDay, aToDay, granularity]);
@@ -5181,7 +5191,10 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
                   <tr key={r.month} style={{ borderTop: `1px solid ${COLOR.hairline}` }}>
                     <td style={{ padding: "9px 8px", color: COLOR.ink }}>{monthLabel(r.month)}</td>
                     <td style={{ padding: "9px 8px", textAlign: "right", color: COLOR.inkMuted }}>{r.days}</td>
-                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.dep)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {r.excluded > 0 && <span title={`Dont ${fmt(r.excluded)} FCFA exceptionnels, exclus des rythmes / jour`} style={{ marginRight: 5 }}><Sparkles size={10} color={COLOR.goldSoft} /></span>}
+                      {fmt(r.dep)}
+                    </td>
                     <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(r.rythme)}</td>
                     <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft }}>{fmt(r.rythmeHF)}</td>
                     <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.emeraldSoft }}>{fmt(r.rythmeRev)}</td>
@@ -5206,7 +5219,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
           </ResponsiveContainer>
         </div>
         <div style={{ fontSize: 11, color: COLOR.inkMuted, marginTop: 10, lineHeight: 1.5 }}>
-          Rythme / jour = dépenses du mois ÷ nombre de jours (mois en cours : jours écoulés). « Hors fixes » retire les charges de ta liste de fin de mois, pour voir ton vrai rythme du quotidien. Avec « Jusqu'au jour… », chaque mois est coupé au même jour, ce qui évite de comparer un mois complet à un mois en cours.
+          Rythme / jour = dépenses du mois ÷ nombre de jours (mois en cours : jours écoulés). « Hors fixes » retire les charges de ta liste de fin de mois, pour voir ton vrai rythme du quotidien. Avec « Jusqu'au jour… », chaque mois est coupé au même jour, ce qui évite de comparer un mois complet à un mois en cours. Les transactions cochées « exceptionnelles » (✨) sont comprises dans la colonne Dépenses mais exclues des rythmes / jour et de la variation.
         </div>
       </Panel>
 
