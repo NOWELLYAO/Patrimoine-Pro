@@ -7106,6 +7106,7 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
   };
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showAll, setShowAll] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const filtered = !!(fromMk || toMk);
   const visible = showAll || filtered ? calc.rows : calc.rows.slice(0, 12);
   const tone = (n: number) => (n > 0 ? COLOR.emeraldSoft : n < 0 ? COLOR.claySoft : COLOR.inkMuted);
@@ -7125,8 +7126,69 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
   const chartData = [...calc.rows].filter((r) => r.received > 0 || r.real > 0).slice(0, filtered ? 24 : 12).reverse()
     .map((r) => ({ mois: monthLabel(r.mk), "Petty Cash reçu": r.received, "GRUNDFOS réel": r.real }));
 
+  // Rapport complet basé sur le filtre de dates actif : synthèse, tableau mensuel
+  // chronologique, constats rédigés. Rendu dans CalcDetailSheet, qui fournit l'export PDF.
+  const buildReport = (): { title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } => {
+    const asc = [...calc.rows].filter((r) => r.received > 0 || r.real > 0 || r.sent !== null).reverse();
+    const period = asc.length
+      ? (asc.length === 1 ? monthLabel(asc[0].mk) : `${monthLabel(asc[0].mk)} → ${monthLabel(asc[asc.length - 1].mk)}`)
+      : "Aucune donnée";
+    const unfilled = asc.filter((r) => r.sent === null && (r.received > 0 || r.real > 0));
+    const deficitMonths = asc.filter((r) => r.net < 0);
+    const blocks: CalcDetailBlock[] = [];
+    blocks.push({ kind: "kv", rows: [
+      { label: "Période analysée", value: `${period} (${asc.length} mois)` },
+      { label: "Petty Cash reçu", value: `${fmt(calc.totalReceived)} FCFA` },
+      { label: "Dépenses GRUNDFOS réelles", value: `${fmt(calc.totalRealAll)} FCFA${calc.activeCount ? ` (~${fmt(Math.round(calc.avgReal))} / mois)` : ""}` },
+      { label: "Solde Petty Cash (reçu − réel)", value: `${signed(calc.netAll)} FCFA`, strong: true, warn: calc.netAll < 0 },
+      { label: "Taux de couverture (reçu ÷ réel)", value: calc.coverage === null ? "—" : `${calc.coverage.toFixed(1)} %`, warn: calc.coverage !== null && calc.coverage < 100 },
+      { label: "Petty sent cumulé (mois saisis)", value: calc.filledCount ? `${fmt(calc.totalSent)} FCFA` : "—" },
+      { label: "Valeur nette Petty sent (sent − réel)", value: calc.filledCount ? `${signed(calc.totalGap)} FCFA` : "—", strong: true, warn: calc.filledCount > 0 && calc.totalGap < 0 },
+      { label: "Mois saisis en gain / perte", value: calc.filledCount ? `${calc.gains} / ${calc.losses}` : "—" },
+      ...(calc.best && calc.worst && calc.activeCount > 1 ? [
+        { label: "Meilleur mois (solde)", value: `${monthLabel(calc.best.mk)} : ${signed(calc.best.net)} FCFA` },
+        { label: "Pire mois (solde)", value: `${monthLabel(calc.worst.mk)} : ${signed(calc.worst.net)} FCFA`, warn: calc.worst.net < 0 },
+      ] : []),
+    ] });
+    if (asc.length) {
+      blocks.push({
+        kind: "table",
+        columns: ["Mois", "Reçu", "Petty sent", "Réel", "Écart", "Solde"],
+        rows: asc.map((r) => [monthLabel(r.mk), fmt(r.received), r.sent === null ? "—" : fmt(r.sent), fmt(r.real), r.gap === null ? "—" : signed(r.gap), signed(r.net)]),
+        cellColors: asc.map((r) => [undefined, undefined, undefined, undefined, r.gap === null ? undefined : (r.gap >= 0 ? COLOR.emeraldSoft : COLOR.claySoft), r.net >= 0 ? COLOR.emeraldSoft : COLOR.claySoft]),
+        footerRow: ["Total", fmt(calc.totalReceived), fmt(calc.totalSent), fmt(calc.totalRealAll), calc.filledCount ? signed(calc.totalGap) : "—", signed(calc.netAll)],
+        footerColors: [undefined, undefined, undefined, undefined, calc.filledCount ? (calc.totalGap >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) : undefined, calc.netAll >= 0 ? COLOR.emeraldSoft : COLOR.claySoft],
+      });
+    }
+    // Constats rédigés
+    if (calc.coverage !== null) {
+      blocks.push({ kind: "note", tone: calc.coverage >= 100 ? "info" : "warn",
+        text: calc.coverage >= 100
+          ? `Couverture : le Petty Cash reçu couvre ${calc.coverage.toFixed(0)} % des dépenses GRUNDFOS sur la période, soit un excédent de ${fmt(calc.netAll)} FCFA.`
+          : `Couverture : le Petty Cash reçu ne couvre que ${calc.coverage.toFixed(0)} % des dépenses GRUNDFOS sur la période, soit un déficit de ${fmt(-calc.netAll)} FCFA à ta charge.` });
+    }
+    if (deficitMonths.length && asc.length > 1) {
+      blocks.push({ kind: "note", tone: "warn", text: `Mois déficitaires (reçu < réel) : ${deficitMonths.map((r) => `${monthLabel(r.mk)} (${signed(r.net)})`).join(", ")}.` });
+    }
+    if (calc.filledCount) {
+      blocks.push({ kind: "note", tone: "info", text: `Petty sent : sur ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}, le montant déclaré est ${calc.totalGap >= 0 ? "supérieur" : "inférieur"} de ${fmt(Math.abs(calc.totalGap))} FCFA aux dépenses GRUNDFOS réelles (${calc.gains} mois en gain, ${calc.losses} en perte).` });
+    }
+    if (unfilled.length) {
+      blocks.push({ kind: "note", tone: "warn", text: `Mois sans saisie Petty sent (exclus du total « Écart ») : ${unfilled.map((r) => monthLabel(r.mk)).join(", ")}.` });
+    }
+    blocks.push({ kind: "note", tone: "info", text: "Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Ce rapport est un comparatif : il n'a aucun impact sur les comptes, soldes ou projections." });
+    return {
+      title: "Rapport Petty sent vs GRUNDFOS",
+      headline: `${period} · Solde ${signed(calc.netAll)} FCFA${calc.filledCount ? ` · Écart ${signed(calc.totalGap)} FCFA` : ""}`,
+      formula: "Écart = Petty sent − GRUNDFOS réel · Solde = Petty Cash reçu − GRUNDFOS réel",
+      blocks,
+    };
+  };
+
   return (
+    <>
     <PanelWithHelp title="Petty sent vs dépenses GRUNDFOS" subtitle="Comparatif manuel de fin de mois — aucun impact sur tes comptes"
+      right={<button onClick={() => setReportOpen(true)} disabled={!calc.rows.some((r) => r.received > 0 || r.real > 0 || r.sent !== null)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${COLOR.gold}`, borderRadius: 8, color: COLOR.goldSoft, cursor: "pointer", fontSize: 12.5, padding: "6px 12px" }}><FileText size={14} /> Rapport</button>}
       explain="Chaque fin de mois, saisis le montant « Petty sent » (ce que tu as envoyé / déclaré côté Petty Cash). L'app le compare aux dépenses GRUNDFOS réellement enregistrées dans le journal du même mois : Écart = Petty sent − dépenses GRUNDFOS. Positif = gain (le Petty sent couvre plus que ce que tu as dépensé), négatif = perte (tu as dépensé plus que ce qui est couvert). Ce montant est un simple comparatif : il ne crée aucune transaction et ne modifie aucun solde, compte, bilan ni projection. Il est synchronisé entre appareils et inclus dans les sauvegardes.">
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
         {([["3 mois", 3], ["6 mois", 6], ["12 mois", 12], ["Année", "year"], ["Tout", "all"]] as [string, number | "all" | "year"][]).map(([lab, v]) => (
@@ -7231,6 +7293,8 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
         Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Le filtre de dates s'applique au tableau, au graphique et à tous les indicateurs. Les mois sans saisie Petty sent sont exclus du total « Écart ». Vide un champ pour effacer la saisie.
       </div>
     </PanelWithHelp>
+    {reportOpen && (() => { const d = buildReport(); return <CalcDetailSheet open onClose={() => setReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} />; })()}
+    </>
   );
 }
 
