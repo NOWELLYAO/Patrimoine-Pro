@@ -3099,7 +3099,7 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     }
   }
 
-  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, morningThreshold, spentTodayAdvice, remainingBudget, hasObjective, upcomingTotal };
+  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, morningThreshold, spentTodayAdvice, remainingBudget, hasObjective, upcomingTotal, upcoming };
 }
 
 // Note du jour : Excellent / Bon / Moyen / Faible — combine trois signaux concrets :
@@ -7040,25 +7040,43 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // transactions (en lecture seule) et la saisie manuelle ; ne produit que des chiffres
 // d'affichage. Écart = Petty sent − dépenses GRUNDFOS réelles : positif = gain, négatif =
 // perte. Seuls les mois où un montant Petty sent est saisi entrent dans les totaux.
-function computePettySentRows(transactions: Transaction[], pettySent: PettySentMap) {
+function computePettySentRows(transactions: Transaction[], pettySent: PettySentMap, fromMk?: string, toMk?: string) {
   const real: Record<string, number> = {};
   transactions.forEach((t) => {
     if (t.type !== "Dépense" || !GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
     const mk = dateToMonthKey(t.date);
     real[mk] = (real[mk] || 0) + (Number(t.amount) || 0);
   });
-  const keys = new Set<string>(Object.keys(real));
+  const received: Record<string, number> = {};
+  transactions.forEach((t) => {
+    if (t.type !== "Revenu" || !GRUNDFOS_VOITURE_LINKED_REVENUE.includes(t.category)) return;
+    const mk = dateToMonthKey(t.date);
+    received[mk] = (received[mk] || 0) + (Number(t.amount) || 0);
+  });
+  const keys = new Set<string>([...Object.keys(real), ...Object.keys(received)]);
   Object.keys(pettySent).forEach((k) => { if (pettySent[k]?.amount != null) keys.add(k); });
   keys.add(dateToMonthKey(todayISO()));
   const rows = Array.from(keys).sort((a, b) => monthSortKey(b) - monthSortKey(a)).map((mk) => {
     const sent = pettySent[mk]?.amount ?? null;
     const r = real[mk] || 0;
-    return { mk, sent, real: r, gap: sent === null ? null : sent - r };
-  });
-  const filled = rows.filter((x) => x.gap !== null) as { mk: string; sent: number; real: number; gap: number }[];
+    const rec = received[mk] || 0;
+    return { mk, sent, real: r, received: rec, gap: sent === null ? null : sent - r, net: rec - r };
+  }).filter((x) => (!fromMk || monthSortKey(x.mk) >= monthSortKey(fromMk)) && (!toMk || monthSortKey(x.mk) <= monthSortKey(toMk)));
+  const filled = rows.filter((x) => x.gap !== null) as { mk: string; sent: number; real: number; received: number; gap: number; net: number }[];
   const totalGap = filled.reduce((a, x) => a + x.gap, 0);
+  // Analyses sur TOUS les mois de la période où il y a une activité (reçu ou dépensé), pas
+  // seulement les mois saisis : le Petty Cash reçu et le GRUNDFOS réel sont connus sans saisie.
+  const active = rows.filter((x) => x.real > 0 || x.received > 0);
+  const totalReceived = active.reduce((a, x) => a + x.received, 0);
+  const totalRealAll = active.reduce((a, x) => a + x.real, 0);
+  const worst = active.length ? active.reduce((m, x) => (x.net < m.net ? x : m)) : null;
+  const best = active.length ? active.reduce((m, x) => (x.net > m.net ? x : m)) : null;
   return {
-    rows, totalGap,
+    rows, totalGap, totalReceived, totalRealAll, netAll: totalReceived - totalRealAll,
+    coverage: totalRealAll > 0 ? (totalReceived / totalRealAll) * 100 : null,
+    avgReal: active.length ? totalRealAll / active.length : 0,
+    activeCount: active.length, worst, best,
+    lateSentVsReceived: filled.reduce((a, x) => a + (x.received - x.sent), 0),
     totalSent: filled.reduce((a, x) => a + x.sent, 0),
     totalReal: filled.reduce((a, x) => a + x.real, 0),
     gains: filled.filter((x) => x.gap > 0).length,
@@ -7070,10 +7088,22 @@ function computePettySentRows(transactions: Transaction[], pettySent: PettySentM
 function PettySentPanel({ transactions, pettySent, setPettySent }: {
   transactions: Transaction[]; pettySent: PettySentMap; setPettySent: (m: PettySentMap) => void;
 }) {
-  const calc = useMemo(() => computePettySentRows(transactions, pettySent), [transactions, pettySent]);
+  const [fromMk, setFromMk] = useState<string>("");
+  const [toMk, setToMk] = useState<string>("");
+  const calc = useMemo(() => computePettySentRows(transactions, pettySent, fromMk || undefined, toMk || undefined), [transactions, pettySent, fromMk, toMk]);
+  const mkToInput = (mk: string) => { if (!mk) return ""; const [y, m] = mk.split("_"); return `${y}-${pad2(parseInt(m, 10))}`; };
+  const inputToMk = (v: string) => { if (!v) return ""; const [y, m] = v.split("-"); return `${parseInt(y, 10)}_${parseInt(m, 10)}`; };
+  const curMk = dateToMonthKey(todayISO());
+  const preset = (n: number | "all" | "year") => {
+    if (n === "all") { setFromMk(""); setToMk(""); return; }
+    if (n === "year") { setFromMk(`${curMk.split("_")[0]}_1`); setToMk(curMk); return; }
+    let mk = curMk; for (let i = 1; i < n; i++) mk = prevMonthKey(mk);
+    setFromMk(mk); setToMk(curMk);
+  };
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? calc.rows : calc.rows.slice(0, 12);
+  const filtered = !!(fromMk || toMk);
+  const visible = showAll || filtered ? calc.rows : calc.rows.slice(0, 12);
   const tone = (n: number) => (n > 0 ? COLOR.emeraldSoft : n < 0 ? COLOR.claySoft : COLOR.inkMuted);
   const signed = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${fmt(Math.abs(n))}`;
 
@@ -7088,19 +7118,36 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
     if (n === current) return;
     setPettySent({ ...pettySent, [mk]: { amount: n, updatedAt: new Date().toISOString() } });
   };
-  const chartData = [...calc.rows].filter((r) => r.gap !== null).slice(0, 12).reverse()
-    .map((r) => ({ mois: monthLabel(r.mk), Écart: r.gap as number }));
+  const chartData = [...calc.rows].filter((r) => r.received > 0 || r.real > 0).slice(0, filtered ? 24 : 12).reverse()
+    .map((r) => ({ mois: monthLabel(r.mk), "Petty Cash reçu": r.received, "GRUNDFOS réel": r.real }));
 
   return (
     <PanelWithHelp title="Petty sent vs dépenses GRUNDFOS" subtitle="Comparatif manuel de fin de mois — aucun impact sur tes comptes"
       explain="Chaque fin de mois, saisis le montant « Petty sent » (ce que tu as envoyé / déclaré côté Petty Cash). L'app le compare aux dépenses GRUNDFOS réellement enregistrées dans le journal du même mois : Écart = Petty sent − dépenses GRUNDFOS. Positif = gain (le Petty sent couvre plus que ce que tu as dépensé), négatif = perte (tu as dépensé plus que ce qui est couvert). Ce montant est un simple comparatif : il ne crée aucune transaction et ne modifie aucun solde, compte, bilan ni projection. Il est synchronisé entre appareils et inclus dans les sauvegardes.">
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+        {([["3 mois", 3], ["6 mois", 6], ["12 mois", 12], ["Année", "year"], ["Tout", "all"]] as [string, number | "all" | "year"][]).map(([lab, v]) => (
+          <button key={lab} onClick={() => preset(v)} style={{ background: "transparent", border: `1px solid ${COLOR.hairline}`, borderRadius: 20, color: COLOR.inkMuted, cursor: "pointer", fontSize: 11.5, padding: "4px 11px" }}>{lab}</button>
+        ))}
+        <input type="month" aria-label="Du mois" value={mkToInput(fromMk)} onChange={(e) => setFromMk(inputToMk(e.target.value))} style={{ ...inputStyle, width: "auto", colorScheme: "dark" }} />
+        <span style={{ color: COLOR.inkMuted, fontSize: 12 }}>→</span>
+        <input type="month" aria-label="Au mois" value={mkToInput(toMk)} onChange={(e) => setToMk(inputToMk(e.target.value))} style={{ ...inputStyle, width: "auto", colorScheme: "dark" }} />
+      </div>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        <Kpi label="Petty Cash reçu" value={fmt(calc.totalReceived)} tone={COLOR.emeraldSoft} hint="Revenus catégorie Petty Cash" />
+        <Kpi label="GRUNDFOS réel" value={fmt(calc.totalRealAll)} tone={COLOR.claySoft} hint={calc.activeCount ? `~${fmt(Math.round(calc.avgReal))} / mois` : undefined} />
+        <Kpi label="Solde Petty Cash" value={signed(calc.netAll)} tone={tone(calc.netAll)} hint="Reçu − GRUNDFOS réel" />
+        <Kpi label="Taux de couverture" value={calc.coverage === null ? "—" : `${calc.coverage.toFixed(0)}`} suffix={calc.coverage === null ? "" : "%"} tone={calc.coverage === null ? COLOR.inkMuted : calc.coverage >= 100 ? COLOR.emeraldSoft : COLOR.claySoft} hint="Reçu ÷ GRUNDFOS réel" />
+      </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
-        <Kpi label="Valeur nette cumulée" value={calc.filledCount ? signed(calc.totalGap) : "—"} tone={calc.filledCount ? tone(calc.totalGap) : COLOR.inkMuted}
-          hint={calc.filledCount ? `sur ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}` : "Saisis un mois pour commencer"} />
-        <Kpi label="Petty sent cumulé" value={calc.filledCount ? fmt(calc.totalSent) : "—"} hint="Mois saisis uniquement" />
-        <Kpi label="GRUNDFOS réel cumulé" value={calc.filledCount ? fmt(calc.totalReal) : "—"} hint="Mêmes mois, depuis le journal" />
+        <Kpi label="Valeur nette (Petty sent)" value={calc.filledCount ? signed(calc.totalGap) : "—"} tone={calc.filledCount ? tone(calc.totalGap) : COLOR.inkMuted}
+          hint={calc.filledCount ? `Petty sent ${fmt(calc.totalSent)} − réel ${fmt(calc.totalReal)} · ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}` : "Saisis un mois pour commencer"} />
         <Kpi label="Mois en gain / perte" value={calc.filledCount ? `${calc.gains} / ${calc.losses}` : "—"} suffix="" tone={COLOR.ink}
           hint={calc.filledCount ? `${calc.filledCount - calc.gains - calc.losses} à l'équilibre` : undefined} />
+        {calc.best && calc.worst && calc.activeCount > 1 && (
+          <Kpi label="Meilleur / pire mois" value={`${monthLabel(calc.best.mk)} / ${monthLabel(calc.worst.mk)}`} suffix="" tone={COLOR.ink}
+            hint={`Solde ${signed(calc.best.net)} / ${signed(calc.worst.net)}`} />
+        )}
       </div>
 
       {chartData.length > 0 && (
@@ -7112,22 +7159,24 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
               <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => fmtShort(v)} width={42} />
               <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
               <ReferenceLine y={0} stroke={COLOR.inkMuted} />
-              <Bar dataKey="Écart" radius={[3, 3, 0, 0]}>
-                {chartData.map((d, i) => <Cell key={i} fill={d.Écart >= 0 ? COLOR.emerald : COLOR.clay} />)}
-              </Bar>
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey="Petty Cash reçu" fill={COLOR.emerald} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="GRUNDFOS réel" fill={COLOR.clay} radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       )}
 
       <div className="gl-scroll" style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 460 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 620 }}>
           <thead>
             <tr style={{ color: COLOR.inkMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>
               <th style={{ textAlign: "left", padding: "6px 8px", fontWeight: 500 }}>Mois</th>
+              <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>Petty Cash reçu</th>
               <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500, width: 150 }}>Petty sent</th>
               <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>GRUNDFOS réel</th>
               <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>Écart</th>
+              <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>Solde reçu−réel</th>
             </tr>
           </thead>
           <tbody>
@@ -7136,6 +7185,7 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
               return (
                 <tr key={r.mk} style={{ borderTop: `1px solid ${COLOR.hairline}` }}>
                   <td style={{ padding: "7px 8px", color: COLOR.ink }}>{monthLabel(r.mk)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: r.received > 0 ? COLOR.emeraldSoft : COLOR.inkMuted }}>{fmt(r.received)}</td>
                   <td style={{ padding: "5px 8px", textAlign: "right" }}>
                     <input inputMode="decimal" placeholder="saisir…" aria-label={`Petty sent ${monthLabel(r.mk)}`}
                       style={{ ...inputStyle, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", maxWidth: 140 }}
@@ -7149,6 +7199,7 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
                   <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: r.gap === null ? COLOR.inkMuted : tone(r.gap) }}>
                     {r.gap === null ? "—" : signed(r.gap)}
                   </td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: r.received === 0 && r.real === 0 ? COLOR.inkMuted : tone(r.net) }}>{r.received === 0 && r.real === 0 ? "—" : signed(r.net)}</td>
                 </tr>
               );
             })}
@@ -7157,21 +7208,23 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
             <tfoot>
               <tr style={{ borderTop: `2px solid ${COLOR.hairline}`, fontWeight: 600 }}>
                 <td style={{ padding: "8px", color: COLOR.ink }}>Total</td>
+                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.emeraldSoft }}>{fmt(calc.totalReceived)}</td>
                 <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(calc.totalSent)}</td>
-                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(calc.totalReal)}</td>
+                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(calc.totalRealAll)}</td>
                 <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: tone(calc.totalGap) }}>{signed(calc.totalGap)}</td>
+                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: tone(calc.netAll) }}>{signed(calc.netAll)}</td>
               </tr>
             </tfoot>
           )}
         </table>
       </div>
-      {calc.rows.length > 12 && (
+      {!filtered && calc.rows.length > 12 && (
         <button onClick={() => setShowAll((v) => !v)} style={{ marginTop: 10, background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 12, padding: 0 }}>
           {showAll ? "Réduire" : `Voir les ${calc.rows.length - 12} mois plus anciens`}
         </button>
       )}
       <div style={{ marginTop: 12, fontSize: 11.5, color: COLOR.inkMuted }}>
-        Écart = Petty sent − dépenses GRUNDFOS réelles (positif = gain, négatif = perte). Les mois sans saisie sont exclus des totaux. Vide un champ pour effacer la saisie.
+        Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Le filtre de dates s'applique au tableau, au graphique et à tous les indicateurs. Les mois sans saisie Petty sent sont exclus du total « Écart ». Vide un champ pour effacer la saisie.
       </div>
     </PanelWithHelp>
   );
@@ -16454,6 +16507,7 @@ export default function GrandLivre() {
 
   // Seuil du jour du Conseiller quotidien, affiché en permanence dans l'en-tête (sur demande
   // explicite de l'utilisateur, 17/10/2026) : visible dès l'ouverture de l'app, sur tous les écrans.
+  const [upcomingSheetOpen, setUpcomingSheetOpen] = useState(false);
   const headerThreshold = useMemo(() => {
     try {
       const a = generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture);
@@ -16462,7 +16516,7 @@ export default function GrandLivre() {
       // Manque éventuel : l'objectif restant ne couvre même pas les charges périodiques encore
       // attendues — c'est ce qui ramène le budget du jour à 0 (le seuil est plafonné à 0).
       const shortfall = Math.max(0, a.upcomingTotal - ((a.remainingBudget as number) ?? 0));
-      return { threshold: (a.morningThreshold ?? a.dailyThreshold) as number, spentToday, shortfall, upcomingTotal: a.upcomingTotal, remaining: a.remainingBudget as number };
+      return { threshold: (a.morningThreshold ?? a.dailyThreshold) as number, spentToday, shortfall, upcomingTotal: a.upcomingTotal, remaining: a.remainingBudget as number, upcoming: a.upcoming as { category: string; typicalDay: number; typicalAmount: number }[] };
     } catch { return null; }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, fixedMonthState]);
@@ -16607,17 +16661,36 @@ export default function GrandLivre() {
                 return (
                   <div style={{ marginTop: 6, fontSize: 12, color: COLOR.inkMuted }}>
                     Budget de la journée : <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft, fontWeight: 600 }}>{fmt(Math.round(headerThreshold.threshold))} FCFA</span>
+                    <button onClick={() => setUpcomingSheetOpen(true)} title="Voir les charges attendues" aria-label="Voir les charges attendues" style={{ background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", display: "inline-flex", padding: 2, marginLeft: 4, verticalAlign: "middle" }}><Info size={14} /></button>
                     <span style={{ marginLeft: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: col }}>
                       {left >= 0 ? `reste ${fmt(Math.round(left))}` : `dépassé de ${fmt(Math.round(-left))}`}
                     </span>
                     {headerThreshold.threshold <= 0 && headerThreshold.shortfall > 0 && (
                       <div style={{ marginTop: 3, fontSize: 11, color: COLOR.claySoft }}>
                         Objectif mensuel épuisé : il reste {fmt(Math.round(headerThreshold.remaining))} FCFA, mais ~{fmt(Math.round(headerThreshold.upcomingTotal))} de charges sont encore attendues (manque {fmt(Math.round(headerThreshold.shortfall))}).
+                        <button onClick={() => setUpcomingSheetOpen(true)} style={{ marginLeft: 6, background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}>Voir la liste</button>
                       </div>
                     )}
                   </div>
                 );
               })()}
+              {headerThreshold && upcomingSheetOpen && (
+                <CalcDetailSheet open onClose={() => setUpcomingSheetOpen(false)}
+                  title="Charges encore attendues ce mois-ci"
+                  headline={`${fmt(Math.round(headerThreshold.upcomingTotal))} FCFA · ${headerThreshold.upcoming.length} charge(s)`}
+                  formula="Budget du jour = (objectif restant − charges attendues) ÷ jours restants, plafonné à 0"
+                  blocks={[
+                    { kind: "kv", rows: [
+                      { label: "Objectif mensuel restant", value: `${fmt(Math.round(headerThreshold.remaining))} FCFA` },
+                      { label: "Charges attendues", value: `− ${fmt(Math.round(headerThreshold.upcomingTotal))} FCFA` },
+                      { label: "Reste après charges", value: `${fmt(Math.round(headerThreshold.remaining - headerThreshold.upcomingTotal))} FCFA`, strong: true, warn: headerThreshold.remaining - headerThreshold.upcomingTotal < 0 },
+                    ] },
+                    headerThreshold.upcoming.length
+                      ? { kind: "table", columns: ["Charge", "Montant", "Jour habituel"], rows: headerThreshold.upcoming.map((u) => [u.category, `${fmt(Math.round(u.typicalAmount))} FCFA`, `~ le ${u.typicalDay}`]), footerRow: ["Total", `${fmt(Math.round(headerThreshold.upcomingTotal))} FCFA`, ""] }
+                      : { kind: "note", text: "Aucune charge attendue pour le moment.", tone: "info" },
+                    { kind: "note", text: "Source : ta liste de charges fixes de fin de mois (reste à payer) et les postes classés « Fixe » détectés automatiquement, non encore réglés ce mois-ci.", tone: "info" },
+                  ]} />
+              )}
               {funds.length > 0 && (
                 <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2, alignItems: isMobile ? "flex-start" : "flex-end" }}>
                   <div style={{ fontSize: 11.5, color: "#9fb3d9" }}>
