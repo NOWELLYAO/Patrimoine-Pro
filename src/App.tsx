@@ -7532,6 +7532,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <PettySentPanel transactions={transactions} pettySent={pettySent} setPettySent={setPettySent} />
       <PanelWithHelp title="Rentabilité par activité" subtitle="Basée sur la catégorie de chaque transaction, pas sur le compte — l'argent circule souvent entre comptes"
         explain="Chaque catégorie est rattachée à une activité (Mazda, GRUNDFOS, Personnel…) plutôt qu'à un compte, parce que les comptes se mélangent dans la réalité (ex : un salaire épuisé qui pousse à puiser sur Petty Cash ou Revenus MAZDA). La marge affichée est cumulée depuis la toute première transaction de cette activité. Si tu renseignes un capital investi (ex : prix d'achat de la voiture), l'app calcule un ROI et estime, au rythme actuel, dans combien de mois l'investissement sera remboursé."
         right={
@@ -7679,8 +7680,6 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
           {!stats.length && <EmptyState text="Aucune activité avec des transactions pour l'instant." />}
         </div>
       </PanelWithHelp>
-
-      <PettySentPanel transactions={transactions} pettySent={pettySent} setPettySent={setPettySent} />
 
       <CollapsibleSection title="Gérer les activités" subtitle="Ajoute une activité, et renseigne un capital investi si tu veux suivre un retour sur investissement (ex : achat d'un véhicule)">
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
@@ -16460,7 +16459,10 @@ export default function GrandLivre() {
       const a = generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture);
       if (!a.hasObjective || a.dailyThreshold === null || a.morningThreshold === null) return null;
       const spentToday = transactions.filter((t) => t.type === "Dépense" && t.date === todayISO()).reduce((x, t) => x + t.amount, 0);
-      return { threshold: (a.morningThreshold ?? a.dailyThreshold) as number, spentToday };
+      // Manque éventuel : l'objectif restant ne couvre même pas les charges périodiques encore
+      // attendues — c'est ce qui ramène le budget du jour à 0 (le seuil est plafonné à 0).
+      const shortfall = Math.max(0, a.upcomingTotal - ((a.remainingBudget as number) ?? 0));
+      return { threshold: (a.morningThreshold ?? a.dailyThreshold) as number, spentToday, shortfall, upcomingTotal: a.upcomingTotal, remaining: a.remainingBudget as number };
     } catch { return null; }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture, fixedMonthCharges, fixedMonthState]);
@@ -16608,6 +16610,11 @@ export default function GrandLivre() {
                     <span style={{ marginLeft: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: col }}>
                       {left >= 0 ? `reste ${fmt(Math.round(left))}` : `dépassé de ${fmt(Math.round(-left))}`}
                     </span>
+                    {headerThreshold.threshold <= 0 && headerThreshold.shortfall > 0 && (
+                      <div style={{ marginTop: 3, fontSize: 11, color: COLOR.claySoft }}>
+                        Objectif mensuel épuisé : il reste {fmt(Math.round(headerThreshold.remaining))} FCFA, mais ~{fmt(Math.round(headerThreshold.upcomingTotal))} de charges sont encore attendues (manque {fmt(Math.round(headerThreshold.shortfall))}).
+                      </div>
+                    )}
                   </div>
                 );
               })()}
