@@ -672,6 +672,35 @@ const fmtVL = (n: number) => new Intl.NumberFormat("fr-FR", { minimumFractionDig
 // séparer les milliers (format français réel) n'en fait pas partie et s'affichait
 // comme "/" ou coupait le nombre. On utilise ici une espace normale, sûre dans
 // n'importe quelle police PDF, uniquement pour ce qui part dans un export PDF.
+// Nettoyage commun de TOUT texte écrit dans un PDF : Helvetica (jsPDF) ne connaît que
+// WinAnsi/Latin-1. Un caractère hors de ce jeu (vrai signe moins « − », flèche, emoji,
+// espace fine…) s'affichait en guillemet parasite et déformait l'espacement de toute la
+// phrase (constaté sur le rapport Petty sent, 24/11/2026). makePdfSafe() enveloppe
+// doc.text, splitTextToSize et autoTable de chaque PDF, pour que le problème ne puisse plus
+// réapparaître où que ce soit — y compris dans un futur export.
+function pdfSafe(s: any): string {
+  return String(s ?? "")
+    .replace(/[\u202F\u00A0\u2009\u2007]/g, " ").replace(/[\u2212\u2013]/g, "-").replace(/→/g, "->").replace(/←/g, "<-")
+    .replace(/≥/g, ">=").replace(/≤/g, "<=").replace(/≈/g, "~").replace(/[✓✔]/g, "OK").replace(/[✗✘]/g, "x")
+    .replace(/[^\u0000-\u00FF\u2018\u2019\u201C\u201D\u2022\u20AC\u2026\u2014]/g, "");
+}
+function makePdfSafe<T = any>(doc: T): T {
+  const d: any = doc;
+  const clean = (v: any): any => (Array.isArray(v) ? v.map(clean) : typeof v === "string" || typeof v === "number" ? pdfSafe(v) : v);
+  const text = d.text.bind(d); d.text = (t: any, ...a: any[]) => text(clean(t), ...a);
+  const split = d.splitTextToSize.bind(d); d.splitTextToSize = (t: any, ...a: any[]) => split(clean(t), ...a);
+  if (typeof d.autoTable === "function") {
+    const at = d.autoTable.bind(d);
+    d.autoTable = (opts: any) => at({
+      ...opts,
+      didParseCell: (data: any) => {
+        if (Array.isArray(data.cell?.text)) data.cell.text = data.cell.text.map((x: any) => pdfSafe(x));
+        opts?.didParseCell?.(data);
+      },
+    });
+  }
+  return doc;
+}
 const fmtPdf = (n: number) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 // Variante 4 décimales pour la VL dans les exports PDF Bourse — même logique que
 // fmtVL côté app, sur demande explicite de l'utilisateur (26/08/2026).
@@ -5434,7 +5463,7 @@ function TopCategoriesTab({ transactions, setTransactions, categoryGroups, allMo
       // "default" (qui résout vers un objet inutilisable selon le mode d'interop
       // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
 
       doc.setFillColor(26, 43, 76);
@@ -7105,7 +7134,7 @@ async function downloadPettySentPdf(d: PettySentPdfData) {
   ]);
   void autoTableModule;
   const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-  const doc: any = new jsPDF();
+  const doc: any = makePdfSafe(new jsPDF());
   const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
   const M = 14, CW = W - 2 * M;
   // Helvetica n'a ni espace fine insécable, ni vrai signe moins, ni flèche : on les remplace.
@@ -7756,7 +7785,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       // "default" (qui résout vers un objet inutilisable selon le mode d'interop
       // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const periodLabel = periodRange ? `${monthLabel(periodRange[0])} — ${monthLabel(periodRange[1])}` : "Tout l'historique";
@@ -8780,7 +8809,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
       // "default" (qui résout vers un objet inutilisable selon le mode d'interop
       // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
       // Les polices standard de jsPDF (Helvetica) ne supportent pas l'espace fine
       // insécable (U+202F) que produit Intl.NumberFormat("fr-FR") pour les milliers —
@@ -9949,7 +9978,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         import(/* @vite-ignore */ "jspdf-autotable"),
       ]);
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
 
       doc.setFillColor(13, 31, 61);
@@ -12381,7 +12410,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions, recu
       // "default" (qui résout vers un objet inutilisable selon le mode d'interop
       // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const periodLabel = `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`;
@@ -13768,7 +13797,7 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
     try {
       const [jsPDFModule] = await Promise.all([import(/* @vite-ignore */ "jspdf"), import(/* @vite-ignore */ "jspdf-autotable")]);
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
 
       doc.setFillColor(26, 43, 76);
@@ -14473,7 +14502,7 @@ function ExportTab({ filtered, filters, setFilters, allMonths }: { filtered: any
       // "default" (qui résout vers un objet inutilisable selon le mode d'interop
       // CJS/ESM) — cause du "Réessayer" systématique sur tous les boutons PDF de l'app.
       const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
-      const doc = new jsPDF();
+      const doc = makePdfSafe(new jsPDF());
       const pageWidth = doc.internal.pageSize.getWidth();
 
       // Bandeau d'en-tête coloré
