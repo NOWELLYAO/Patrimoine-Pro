@@ -7108,6 +7108,12 @@ function computePettySentRows(transactions: Transaction[], pettySent: PettySentM
     rows, totalGap, totalReceived, totalRealAll, netAll: totalReceived - totalRealAll,
     coverage: totalRealAll > 0 ? (totalReceived / totalRealAll) * 100 : null,
     avgReal: active.length ? totalRealAll / active.length : 0,
+    // Moyennes sur la période filtrée : le Petty Cash n'arrive pas chaque mois, donc on donne
+    // la moyenne par mois analysé ET la moyenne par versement réellement reçu.
+    avgReceived: active.length ? totalReceived / active.length : 0,
+    receiptCount: active.filter((x) => x.received > 0).length,
+    avgPerReceipt: active.filter((x) => x.received > 0).length ? totalReceived / active.filter((x) => x.received > 0).length : 0,
+    avgSent: filled.length ? filled.reduce((a, x) => a + x.sent, 0) / filled.length : 0,
     activeCount: active.length, worst, best,
     lateSentVsReceived: filled.reduce((a, x) => a + (x.received - x.sent), 0),
     totalSent: filled.reduce((a, x) => a + x.sent, 0),
@@ -7124,7 +7130,7 @@ function computePettySentRows(transactions: Transaction[], pettySent: PettySentM
 interface PettySentReportRow { mk: string; received: number; sent: number | null; real: number; gap: number | null; net: number; }
 interface PettySentPdfData {
   period: string; asc: PettySentReportRow[];
-  totals: { received: number; real: number; net: number; coverage: number | null; sent: number; gap: number; filled: number; gains: number; losses: number; avgReal: number };
+  totals: { received: number; real: number; net: number; coverage: number | null; sent: number; gap: number; filled: number; gains: number; losses: number; avgReal: number; avgReceived: number; receiptCount: number; avgPerReceipt: number; avgSent: number };
   notes: { tone: "warn" | "info"; text: string }[];
 }
 async function downloadPettySentPdf(d: PettySentPdfData) {
@@ -7174,6 +7180,10 @@ async function downloadPettySentPdf(d: PettySentPdfData) {
     { label: "VALEUR NETTE", value: t.filled ? sg(t.gap) : "-", sub: "sent - réel", color: t.filled ? col(t.gap) : GREY },
     { label: "MOIS GAIN / PERTE", value: t.filled ? `${t.gains} / ${t.losses}` : "-", sub: "mois saisis", color: NAVY },
     { label: "MOIS ANALYSÉS", value: String(d.asc.length), sub: "avec activité", color: NAVY },
+    { label: "REÇU : MOYENNE / MOIS", value: money(t.avgReceived), sub: "FCFA", color: GREEN },
+    { label: "REÇU : PAR VERSEMENT", value: t.receiptCount ? money(t.avgPerReceipt) : "-", sub: `${t.receiptCount} versement(s)`, color: GREEN },
+    { label: "PETTY SENT : MOY. / MOIS", value: t.filled ? money(t.avgSent) : "-", sub: `${t.filled} mois saisi(s)`, color: NAVY },
+    { label: "GRUNDFOS : MOY. / MOIS", value: money(t.avgReal), sub: "FCFA", color: RED },
   ];
   const gap = 4, cw = (CW - 3 * gap) / 4, ch = 22;
   cards.forEach((c, i) => {
@@ -7187,7 +7197,8 @@ async function downloadPettySentPdf(d: PettySentPdfData) {
     doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(...GREY);
     if (c.sub) doc.text(ps(c.sub), cx + 4, cy + 18.5);
   });
-  y += 2 * ch + gap + 10;
+  const cardRows = Math.ceil(cards.length / 4);
+  y += cardRows * ch + (cardRows - 1) * gap + 10;
 
   // Tableau mensuel
   if (d.asc.length) {
@@ -7328,7 +7339,10 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
       { label: "Dépenses GRUNDFOS réelles", value: `${fmt(calc.totalRealAll)} FCFA${calc.activeCount ? ` (~${fmt(Math.round(calc.avgReal))} / mois)` : ""}` },
       { label: "Solde Petty Cash (reçu − réel)", value: `${signed(calc.netAll)} FCFA`, strong: true, warn: calc.netAll < 0 },
       { label: "Taux de couverture (reçu ÷ réel)", value: calc.coverage === null ? "—" : `${calc.coverage.toFixed(1)} %`, warn: calc.coverage !== null && calc.coverage < 100 },
+      { label: "Petty Cash reçu : moyenne par mois", value: calc.activeCount ? `${fmt(Math.round(calc.avgReceived))} FCFA` : "—" },
+      { label: "Petty Cash reçu : moyenne par versement", value: calc.receiptCount ? `${fmt(Math.round(calc.avgPerReceipt))} FCFA (${calc.receiptCount} versement${calc.receiptCount > 1 ? "s" : ""})` : "—" },
       { label: "Petty sent cumulé (mois saisis)", value: calc.filledCount ? `${fmt(calc.totalSent)} FCFA` : "—" },
+      { label: "Petty sent : moyenne par mois saisi", value: calc.filledCount ? `${fmt(Math.round(calc.avgSent))} FCFA` : "—" },
       { label: "Valeur nette Petty sent (sent − réel)", value: calc.filledCount ? `${signed(calc.totalGap)} FCFA` : "—", strong: true, warn: calc.filledCount > 0 && calc.totalGap < 0 },
       { label: "Mois saisis en gain / perte", value: calc.filledCount ? `${calc.gains} / ${calc.losses}` : "—" },
       ...(calc.best && calc.worst && calc.activeCount > 1 ? [
@@ -7370,7 +7384,7 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
     const pdf: PettySentPdfData = {
       period,
       asc: asc.map((r) => ({ mk: r.mk, received: r.received, sent: r.sent, real: r.real, gap: r.gap, net: r.net })),
-      totals: { received: calc.totalReceived, real: calc.totalRealAll, net: calc.netAll, coverage: calc.coverage, sent: calc.totalSent, gap: calc.totalGap, filled: calc.filledCount, gains: calc.gains, losses: calc.losses, avgReal: calc.avgReal },
+      totals: { received: calc.totalReceived, real: calc.totalRealAll, net: calc.netAll, coverage: calc.coverage, sent: calc.totalSent, gap: calc.totalGap, filled: calc.filledCount, gains: calc.gains, losses: calc.losses, avgReal: calc.avgReal, avgReceived: calc.avgReceived, receiptCount: calc.receiptCount, avgPerReceipt: calc.avgPerReceipt, avgSent: calc.avgSent },
       notes,
     };
     return {
@@ -7401,6 +7415,14 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
         <Kpi label="GRUNDFOS réel" value={fmt(calc.totalRealAll)} tone={COLOR.claySoft} hint={calc.activeCount ? `~${fmt(Math.round(calc.avgReal))} / mois` : undefined} />
         <Kpi label="Solde Petty Cash" value={signed(calc.netAll)} tone={tone(calc.netAll)} hint="Reçu − GRUNDFOS réel" />
         <Kpi label="Taux de couverture" value={calc.coverage === null ? "—" : `${calc.coverage.toFixed(0)}`} suffix={calc.coverage === null ? "" : "%"} tone={calc.coverage === null ? COLOR.inkMuted : calc.coverage >= 100 ? COLOR.emeraldSoft : COLOR.claySoft} hint="Reçu ÷ GRUNDFOS réel" />
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        <Kpi label="Petty Cash reçu · moyenne" value={calc.activeCount ? fmt(Math.round(calc.avgReceived)) : "—"} suffix={calc.activeCount ? "/ mois" : ""} tone={COLOR.emeraldSoft}
+          hint={calc.receiptCount ? `${calc.receiptCount} versement${calc.receiptCount > 1 ? "s" : ""} · ${fmt(Math.round(calc.avgPerReceipt))} en moyenne par versement` : "Aucun versement sur la période"} />
+        <Kpi label="Petty sent · moyenne" value={calc.filledCount ? fmt(Math.round(calc.avgSent)) : "—"} suffix={calc.filledCount ? "/ mois" : ""} tone={COLOR.ink}
+          hint={calc.filledCount ? `sur ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}` : "Aucune saisie sur la période"} />
+        <Kpi label="GRUNDFOS réel · moyenne" value={calc.activeCount ? fmt(Math.round(calc.avgReal)) : "—"} suffix={calc.activeCount ? "/ mois" : ""} tone={COLOR.claySoft}
+          hint={calc.activeCount ? `sur ${calc.activeCount} mois avec activité` : undefined} />
       </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
         <Kpi label="Valeur nette (Petty sent)" value={calc.filledCount ? signed(calc.totalGap) : "—"} tone={calc.filledCount ? tone(calc.totalGap) : COLOR.inkMuted}
