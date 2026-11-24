@@ -2914,7 +2914,11 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
     const fromList = fm.rows.filter((r) => r.remaining > 0).map((r) => ({ category: r.label, monthsPresent: 0, typicalDay: r.dayFrom ?? dayNum, typicalAmount: r.remaining }));
     const uncovered = auto.filter((a) => {
       const [cat, sub] = a.category.split(" · ");
-      return !fm.rows.some((r) => normalizeText(r.category) === normalizeText(cat) && (!r.subcategory || normalizeText(r.subcategory) === normalizeText(sub || "")));
+      // Poste détecté au niveau catégorie entière (pas de sous-catégorie, ex. « Logement ») :
+      // il est déjà couvert par toute ligne de la liste portant cette catégorie, quelle que soit
+      // sa sous-catégorie (ex. « Loyer » = Logement · Location) — sinon la même charge était
+      // comptée deux fois (doublon Logement / Loyer signalé par l'utilisateur, 24/11/2026).
+      return !fm.rows.some((r) => normalizeText(r.category) === normalizeText(cat) && (!sub || !r.subcategory || normalizeText(r.subcategory) === normalizeText(sub)));
     });
     return [...fromList, ...uncovered].sort((x, y) => y.typicalAmount - x.typicalAmount);
   }
