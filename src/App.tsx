@@ -126,6 +126,28 @@ function mergeById<T extends { id: string; updatedAt?: string }>(local: T[], rem
   return Array.from(byId.values());
 }
 
+// "Petty sent" — montant de dépenses saisi À LA MAIN en fin de mois et comparé aux vraies
+// dépenses GRUNDFOS (sur demande explicite de l'utilisateur, 24/11/2026). C'est un
+// COMPARATIF PUR : il vit dans son propre état, n'est jamais converti en transaction, et
+// n'est lu par aucun calcul de solde, de compte, de bilan ou de projection. Une entrée par
+// mois (clé "2026_10"), chacune avec son propre horodatage pour que la synchro entre
+// appareils garde la saisie la plus récente MOIS PAR MOIS (et non tout ou rien). Un
+// montant `null` = saisie effacée volontairement : on garde l'entrée (comme une pierre
+// tombale) pour que l'effacement se propage au lieu d'être ressuscité par l'autre appareil.
+interface PettySentEntry { amount: number | null; updatedAt: string; }
+type PettySentMap = Record<string, PettySentEntry>;
+function mergePettySent(local: PettySentMap, remote?: PettySentMap): PettySentMap {
+  if (!remote) return local;
+  const out: PettySentMap = { ...local };
+  Object.keys(remote).forEach((k) => {
+    const l = out[k], r = remote[k];
+    if (!r) return;
+    if (!l) { out[k] = r; return; }
+    out[k] = (r.updatedAt || "") > (l.updatedAt || "") ? r : l;
+  });
+  return out;
+}
+
 // Timeout explicite sur les appels réseau vers Supabase — corrigé le 14/08/2026. Sans
 // ça, un fetch() qui reste "en attente" sur une connexion capricieuse (wifi/4G
 // instable, fréquent sur mobile) pouvait ne jamais échouer ni réussir pendant une
@@ -7014,10 +7036,152 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // ACTIVITÉS & RENTABILITÉ — suivi par activité réelle (pas par compte, car
 // l'argent circule entre comptes) : marge, ROI et délai de remboursement estimé.
 // ============================================================
-function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, allCategories, categoryGroups, accounts, onNavigate, periodRange }: {
+// Calcul pur du comparatif "Petty sent" vs dépenses GRUNDFOS réelles. Lit uniquement les
+// transactions (en lecture seule) et la saisie manuelle ; ne produit que des chiffres
+// d'affichage. Écart = Petty sent − dépenses GRUNDFOS réelles : positif = gain, négatif =
+// perte. Seuls les mois où un montant Petty sent est saisi entrent dans les totaux.
+function computePettySentRows(transactions: Transaction[], pettySent: PettySentMap) {
+  const real: Record<string, number> = {};
+  transactions.forEach((t) => {
+    if (t.type !== "Dépense" || !GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
+    const mk = dateToMonthKey(t.date);
+    real[mk] = (real[mk] || 0) + (Number(t.amount) || 0);
+  });
+  const keys = new Set<string>(Object.keys(real));
+  Object.keys(pettySent).forEach((k) => { if (pettySent[k]?.amount != null) keys.add(k); });
+  keys.add(dateToMonthKey(todayISO()));
+  const rows = Array.from(keys).sort((a, b) => monthSortKey(b) - monthSortKey(a)).map((mk) => {
+    const sent = pettySent[mk]?.amount ?? null;
+    const r = real[mk] || 0;
+    return { mk, sent, real: r, gap: sent === null ? null : sent - r };
+  });
+  const filled = rows.filter((x) => x.gap !== null) as { mk: string; sent: number; real: number; gap: number }[];
+  const totalGap = filled.reduce((a, x) => a + x.gap, 0);
+  return {
+    rows, totalGap,
+    totalSent: filled.reduce((a, x) => a + x.sent, 0),
+    totalReal: filled.reduce((a, x) => a + x.real, 0),
+    gains: filled.filter((x) => x.gap > 0).length,
+    losses: filled.filter((x) => x.gap < 0).length,
+    filledCount: filled.length,
+  };
+}
+
+function PettySentPanel({ transactions, pettySent, setPettySent }: {
+  transactions: Transaction[]; pettySent: PettySentMap; setPettySent: (m: PettySentMap) => void;
+}) {
+  const calc = useMemo(() => computePettySentRows(transactions, pettySent), [transactions, pettySent]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? calc.rows : calc.rows.slice(0, 12);
+  const tone = (n: number) => (n > 0 ? COLOR.emeraldSoft : n < 0 ? COLOR.claySoft : COLOR.inkMuted);
+  const signed = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${fmt(Math.abs(n))}`;
+
+  const commit = (mk: string) => {
+    const raw = drafts[mk];
+    if (raw === undefined) return;
+    const cleaned = raw.replace(/[\s ]/g, "").replace(",", ".");
+    const n = cleaned === "" ? null : Number(cleaned);
+    setDrafts((d) => { const c = { ...d }; delete c[mk]; return c; });
+    if (n !== null && (!isFinite(n) || n < 0)) return;
+    const current = pettySent[mk]?.amount ?? null;
+    if (n === current) return;
+    setPettySent({ ...pettySent, [mk]: { amount: n, updatedAt: new Date().toISOString() } });
+  };
+  const chartData = [...calc.rows].filter((r) => r.gap !== null).slice(0, 12).reverse()
+    .map((r) => ({ mois: monthLabel(r.mk), Écart: r.gap as number }));
+
+  return (
+    <PanelWithHelp title="Petty sent vs dépenses GRUNDFOS" subtitle="Comparatif manuel de fin de mois — aucun impact sur tes comptes"
+      explain="Chaque fin de mois, saisis le montant « Petty sent » (ce que tu as envoyé / déclaré côté Petty Cash). L'app le compare aux dépenses GRUNDFOS réellement enregistrées dans le journal du même mois : Écart = Petty sent − dépenses GRUNDFOS. Positif = gain (le Petty sent couvre plus que ce que tu as dépensé), négatif = perte (tu as dépensé plus que ce qui est couvert). Ce montant est un simple comparatif : il ne crée aucune transaction et ne modifie aucun solde, compte, bilan ni projection. Il est synchronisé entre appareils et inclus dans les sauvegardes.">
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+        <Kpi label="Valeur nette cumulée" value={calc.filledCount ? signed(calc.totalGap) : "—"} tone={calc.filledCount ? tone(calc.totalGap) : COLOR.inkMuted}
+          hint={calc.filledCount ? `sur ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}` : "Saisis un mois pour commencer"} />
+        <Kpi label="Petty sent cumulé" value={calc.filledCount ? fmt(calc.totalSent) : "—"} hint="Mois saisis uniquement" />
+        <Kpi label="GRUNDFOS réel cumulé" value={calc.filledCount ? fmt(calc.totalReal) : "—"} hint="Mêmes mois, depuis le journal" />
+        <Kpi label="Mois en gain / perte" value={calc.filledCount ? `${calc.gains} / ${calc.losses}` : "—"} suffix="" tone={COLOR.ink}
+          hint={calc.filledCount ? `${calc.filledCount - calc.gains - calc.losses} à l'équilibre` : undefined} />
+      </div>
+
+      {chartData.length > 0 && (
+        <div style={{ height: 170, marginBottom: 18 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke={COLOR.hairline} vertical={false} />
+              <XAxis dataKey="mois" tick={{ fill: COLOR.inkMuted, fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: COLOR.inkMuted, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => fmtShort(v)} width={42} />
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+              <ReferenceLine y={0} stroke={COLOR.inkMuted} />
+              <Bar dataKey="Écart" radius={[3, 3, 0, 0]}>
+                {chartData.map((d, i) => <Cell key={i} fill={d.Écart >= 0 ? COLOR.emerald : COLOR.clay} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      <div className="gl-scroll" style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 460 }}>
+          <thead>
+            <tr style={{ color: COLOR.inkMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              <th style={{ textAlign: "left", padding: "6px 8px", fontWeight: 500 }}>Mois</th>
+              <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500, width: 150 }}>Petty sent</th>
+              <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>GRUNDFOS réel</th>
+              <th style={{ textAlign: "right", padding: "6px 8px", fontWeight: 500 }}>Écart</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((r) => {
+              const draft = drafts[r.mk];
+              return (
+                <tr key={r.mk} style={{ borderTop: `1px solid ${COLOR.hairline}` }}>
+                  <td style={{ padding: "7px 8px", color: COLOR.ink }}>{monthLabel(r.mk)}</td>
+                  <td style={{ padding: "5px 8px", textAlign: "right" }}>
+                    <input inputMode="decimal" placeholder="saisir…" aria-label={`Petty sent ${monthLabel(r.mk)}`}
+                      style={{ ...inputStyle, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", maxWidth: 140 }}
+                      value={draft !== undefined ? draft : (r.sent === null ? "" : fmt(r.sent))}
+                      onFocus={() => setDrafts((d) => ({ ...d, [r.mk]: r.sent === null ? "" : String(r.sent) }))}
+                      onChange={(e) => setDrafts((d) => ({ ...d, [r.mk]: e.target.value }))}
+                      onBlur={() => commit(r.mk)}
+                      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+                  </td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(r.real)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: r.gap === null ? COLOR.inkMuted : tone(r.gap) }}>
+                    {r.gap === null ? "—" : signed(r.gap)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          {calc.filledCount > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${COLOR.hairline}`, fontWeight: 600 }}>
+                <td style={{ padding: "8px", color: COLOR.ink }}>Total</td>
+                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{fmt(calc.totalSent)}</td>
+                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.inkMuted }}>{fmt(calc.totalReal)}</td>
+                <td style={{ padding: "8px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: tone(calc.totalGap) }}>{signed(calc.totalGap)}</td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+      {calc.rows.length > 12 && (
+        <button onClick={() => setShowAll((v) => !v)} style={{ marginTop: 10, background: "transparent", border: "none", color: COLOR.slateBlueSoft, cursor: "pointer", fontSize: 12, padding: 0 }}>
+          {showAll ? "Réduire" : `Voir les ${calc.rows.length - 12} mois plus anciens`}
+        </button>
+      )}
+      <div style={{ marginTop: 12, fontSize: 11.5, color: COLOR.inkMuted }}>
+        Écart = Petty sent − dépenses GRUNDFOS réelles (positif = gain, négatif = perte). Les mois sans saisie sont exclus des totaux. Vide un champ pour effacer la saisie.
+      </div>
+    </PanelWithHelp>
+  );
+}
+
+function ActivitiesTab({ transactions, setTransactions, activities, setActivities, categoryActivity, setCategoryActivity, activityCapital, setActivityCapital, pettySent, setPettySent, allCategories, categoryGroups, accounts, onNavigate, periodRange }: {
   transactions: Transaction[]; setTransactions: (t: Transaction[]) => void; activities: string[]; setActivities: (a: string[]) => void;
   categoryActivity: Record<string, string>; setCategoryActivity: (m: Record<string, string>) => void;
   activityCapital: Record<string, number>; setActivityCapital: (m: Record<string, number>) => void;
+  pettySent: PettySentMap; setPettySent: (m: PettySentMap) => void;
   allCategories: string[]; categoryGroups: Record<string, Group>; accounts: Account[]; onNavigate?: (tab: Tab, data?: any) => void; periodRange?: [string, string];
 }) {
   const [newActivity, setNewActivity] = useState("");
@@ -7515,6 +7679,8 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
           {!stats.length && <EmptyState text="Aucune activité avec des transactions pour l'instant." />}
         </div>
       </PanelWithHelp>
+
+      <PettySentPanel transactions={transactions} pettySent={pettySent} setPettySent={setPettySent} />
 
       <CollapsibleSection title="Gérer les activités" subtitle="Ajoute une activité, et renseigne un capital investi si tu veux suivre un retour sur investissement (ex : achat d'un véhicule)">
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
@@ -15562,6 +15728,8 @@ export default function GrandLivre() {
   const [activities, setActivities] = usePersistentState<string[]>("gl-activities", defaultActivities, canSaveGated);
   const [categoryActivity, setCategoryActivity] = usePersistentState<Record<string, string>>("gl-category-activity", defaultCategoryActivity, canSaveGated);
   const [activityCapital, setActivityCapital] = usePersistentState<Record<string, number>>("gl-activity-capital", {}, canSaveGated);
+  // Comparatif manuel "Petty sent" (voir PettySentEntry) — jamais lu par un calcul de comptes.
+  const [pettySent, setPettySent] = usePersistentState<PettySentMap>("gl-petty-sent", {}, canSaveGated);
   const [monthlyObjective, setMonthlyObjective] = usePersistentState<number>("gl-monthly-objective", 0, canSaveGated);
   // Objectif de portefeuille Bourse — sur demande explicite de l'utilisateur
   // (23/08/2026). Champ scalaire synchronisé au niveau racine, câblé à l'identique de
@@ -15594,7 +15762,7 @@ export default function GrandLivre() {
   // endroits — sur demande explicite de l'utilisateur (23/08/2026).
   const getSnapshotRoot = () => ({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-    activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+    activities, categoryActivity, activityCapital, pettySent, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
     funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
     fixedMonthCharges, fixedMonthState, expectedIncomes,
   });
@@ -15646,6 +15814,13 @@ export default function GrandLivre() {
       if (next[k] !== categoryActivity[k]) logChange(`Catégorie "${k}" rattachée à l'activité "${next[k]}" (avant : "${categoryActivity[k] || "Personnel"}")`);
     });
     setCategoryActivity(next);
+  };
+  const setPettySentLogged = (next: PettySentMap) => {
+    Object.keys(next).forEach((k) => {
+      const a = next[k]?.amount ?? null, b = pettySent[k]?.amount ?? null;
+      if (a !== b) logChange(`Petty sent ${monthLabel(k)} : ${b === null ? "—" : fmt(b)} → ${a === null ? "effacé" : fmt(a)} FCFA (comparatif, sans impact sur les comptes)`);
+    });
+    setPettySent(next);
   };
   const setActivityCapitalLogged = (next: Record<string, number>) => {
     Object.keys(next).forEach((k) => {
@@ -15833,13 +16008,13 @@ export default function GrandLivre() {
   // jamais figée dans la fermeture d'un effet créé plus tôt.
   const syncedRef = useRef({
     transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-    activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+    activities, categoryActivity, activityCapital, pettySent, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
     customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
   });
   useEffect(() => {
     syncedRef.current = {
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-      activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
+      activities, categoryActivity, activityCapital, pettySent, monthlyObjective, chargeOverrides, includeGrundfosVoiture,
       customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
     };
   });
@@ -15874,7 +16049,7 @@ export default function GrandLivre() {
         transactions: snap.transactions, categoryGroups: snap.categoryGroups, categoryScope: snap.categoryScope,
         rules: snap.rules, loans: snap.loans, envelopeCap: snap.envelopeCap, accounts: snap.accounts,
         budgets: snap.budgets, goals: snap.goals, recurring: snap.recurring, activities: snap.activities,
-        categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, monthlyObjective: snap.monthlyObjective,
+        categoryActivity: snap.categoryActivity, activityCapital: snap.activityCapital, pettySent: snap.pettySent, monthlyObjective: snap.monthlyObjective,
         chargeOverrides: snap.chargeOverrides, includeGrundfosVoiture: snap.includeGrundfosVoiture,
         customDepSubcategories: snap.customDepSubcategories, customRevSubcategories: snap.customRevSubcategories,
         funds: snap.funds, fundOperations: snap.fundOperations, fundDailyValues: snap.fundDailyValues, deletedFundIds: snap.deletedFundIds, bourseObjectif: snap.bourseObjectif, deletedAccountIds: snap.deletedAccountIds, scalarTimestamps: snap.scalarTimestamps,
@@ -15972,6 +16147,7 @@ export default function GrandLivre() {
       const mergedChargeOverrides = d.chargeOverrides ? { ...d.chargeOverrides, ...s.chargeOverrides } : s.chargeOverrides;
       const mergedCategoryActivity = d.categoryActivity ? { ...d.categoryActivity, ...s.categoryActivity } : s.categoryActivity;
       const mergedActivityCapital = d.activityCapital ? { ...d.activityCapital, ...s.activityCapital } : s.activityCapital;
+      const mergedPettySent = mergePettySent(s.pettySent || {}, d.pettySent);
       const mergedCustomDep = d.customDepSubcategories ? { ...d.customDepSubcategories, ...s.customDepSubcategories } : s.customDepSubcategories;
       const mergedCustomRev = d.customRevSubcategories ? { ...d.customRevSubcategories, ...s.customRevSubcategories } : s.customRevSubcategories;
 
@@ -16012,14 +16188,14 @@ export default function GrandLivre() {
       const localChanged = !eq(mergedTransactions, s.transactions) || !eq(mergedLoans, s.loans) || !eq(mergedBudgets, s.budgets)
         || !eq(mergedGoals, s.goals) || !eq(mergedRecurring, s.recurring) || !eq(mergedRules, s.rules) || !eq(mergedAccounts, s.accounts)
         || !eq(mergedActivities, s.activities) || !eq(mergedCategoryGroups, s.categoryGroups) || !eq(mergedCategoryScope, s.categoryScope)
-        || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital)
+        || !eq(mergedChargeOverrides, s.chargeOverrides) || !eq(mergedCategoryActivity, s.categoryActivity) || !eq(mergedActivityCapital, s.activityCapital) || !eq(mergedPettySent, s.pettySent || {})
         || !eq(mergedCustomDep, s.customDepSubcategories) || !eq(mergedCustomRev, s.customRevSubcategories) || !eq(mergedDeletedIds, s.deletedTransactionIds)
         || !eq(mergedFunds, s.funds) || !eq(mergedFundOperations, s.fundOperations) || !eq(mergedFundDailyValues, s.fundDailyValues) || !eq(mergedDeletedFundIds, s.deletedFundIds) || !eq(mergedDeletedFundOperationIds, s.deletedFundOperationIds)
         || finalEnvelopeCap !== s.envelopeCap || finalMonthlyObjective !== s.monthlyObjective || finalIncludeGrundfos !== s.includeGrundfosVoiture || !eq(finalBourseObjectif, s.bourseObjectif) || !eq(mergedDeletedAccountIds, s.deletedAccountIds) || !eq(mergedScalarTimestamps, s.scalarTimestamps);
       const remoteNeedsUpdate = !eq(mergedTransactions, d.transactions) || !eq(mergedLoans, d.loans) || !eq(mergedBudgets, d.budgets)
         || !eq(mergedGoals, d.goals) || !eq(mergedRecurring, d.recurring) || !eq(mergedRules, d.rules) || !eq(mergedAccounts, d.accounts)
         || !eq(mergedActivities, d.activities) || !eq(mergedCategoryGroups, d.categoryGroups) || !eq(mergedCategoryScope, d.categoryScope)
-        || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital)
+        || !eq(mergedChargeOverrides, d.chargeOverrides) || !eq(mergedCategoryActivity, d.categoryActivity) || !eq(mergedActivityCapital, d.activityCapital) || !eq(mergedPettySent, d.pettySent || {})
         || !eq(mergedCustomDep, d.customDepSubcategories) || !eq(mergedCustomRev, d.customRevSubcategories) || !eq(mergedDeletedIds, d.deletedTransactionIds)
         || !eq(mergedFunds, d.funds) || !eq(mergedFundOperations, d.fundOperations) || !eq(mergedFundDailyValues, d.fundDailyValues) || !eq(mergedDeletedFundIds, d.deletedFundIds) || !eq(mergedDeletedFundOperationIds, d.deletedFundOperationIds)
         || finalEnvelopeCap !== d.envelopeCap || finalMonthlyObjective !== d.monthlyObjective || finalIncludeGrundfos !== d.includeGrundfosVoiture || !eq(finalBourseObjectif, d.bourseObjectif) || !eq(mergedDeletedAccountIds, d.deletedAccountIds) || !eq(mergedScalarTimestamps, d.scalarTimestamps);
@@ -16040,6 +16216,7 @@ export default function GrandLivre() {
         setChargeOverrides(mergedChargeOverrides);
         setCategoryActivity(mergedCategoryActivity);
         setActivityCapital(mergedActivityCapital);
+        setPettySent(mergedPettySent);
         setCustomDepSubcategories(mergedCustomDep);
         setCustomRevSubcategories(mergedCustomRev);
         setEnvelopeCap(finalEnvelopeCap);
@@ -16060,7 +16237,7 @@ export default function GrandLivre() {
           transactions: mergedTransactions, loans: mergedLoans, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
           rules: mergedRules, accounts: mergedAccounts, activities: mergedActivities, categoryGroups: mergedCategoryGroups,
           categoryScope: mergedCategoryScope, chargeOverrides: mergedChargeOverrides, categoryActivity: mergedCategoryActivity,
-          activityCapital: mergedActivityCapital, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
+          activityCapital: mergedActivityCapital, pettySent: mergedPettySent, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           envelopeCap: finalEnvelopeCap, monthlyObjective: finalMonthlyObjective, includeGrundfosVoiture: finalIncludeGrundfos,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
           deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds, scalarTimestamps: mergedScalarTimestamps,
@@ -16075,7 +16252,7 @@ export default function GrandLivre() {
         const ok = await pushRemoteState(code, {
           transactions: mergedTransactions, categoryGroups: mergedCategoryGroups, categoryScope: mergedCategoryScope, rules: mergedRules,
           loans: mergedLoans, envelopeCap: finalEnvelopeCap, accounts: mergedAccounts, budgets: mergedBudgets, goals: mergedGoals, recurring: mergedRecurring,
-          activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, monthlyObjective: finalMonthlyObjective,
+          activities: mergedActivities, categoryActivity: mergedCategoryActivity, activityCapital: mergedActivityCapital, pettySent: mergedPettySent, monthlyObjective: finalMonthlyObjective,
           chargeOverrides: mergedChargeOverrides, includeGrundfosVoiture: finalIncludeGrundfos, customDepSubcategories: mergedCustomDep, customRevSubcategories: mergedCustomRev,
           deletedTransactionIds: mergedDeletedIds, funds: mergedFunds, fundOperations: mergedFundOperations, fundDailyValues: mergedFundDailyValues,
           deletedFundIds: mergedDeletedFundIds, deletedFundOperationIds: mergedDeletedFundOperationIds, bourseObjectif: finalBourseObjectif, deletedAccountIds: mergedDeletedAccountIds, scalarTimestamps: mergedScalarTimestamps,
@@ -16151,7 +16328,7 @@ export default function GrandLivre() {
     lastLocalChangeRef.current = now;
     try { localStorage.setItem("gl-last-local-change", now); } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, pettySent, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps, allLoaded]);
 
   // Pousse/tire après chaque modification locale, avec un court délai pour regrouper les
   // changements rapprochés (ex: plusieurs champs modifiés d'un coup).
@@ -16162,7 +16339,7 @@ export default function GrandLivre() {
     editSyncTimer.current = setTimeout(runSync, 500);
     return () => { if (editSyncTimer.current) clearTimeout(editSyncTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps, syncCode, allLoaded]);
+  }, [transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring, activities, categoryActivity, activityCapital, pettySent, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories, deletedTransactionIds, funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps, syncCode, allLoaded]);
 
   // Trois filets de sécurité indépendants, tous sûrs à utiliser puisque runSync ne
   // devient jamais périmé (aucune dépendance) : reconnexion réseau, retour au premier
@@ -16241,7 +16418,7 @@ export default function GrandLivre() {
   const restoreFromBackup = (data: any) => {
     setPreRestoreSnapshot({
       transactions, categoryGroups, categoryScope, rules, loans, envelopeCap, accounts, budgets, goals, recurring,
-      activities, categoryActivity, activityCapital, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
+      activities, categoryActivity, activityCapital, pettySent, monthlyObjective, chargeOverrides, includeGrundfosVoiture, customDepSubcategories, customRevSubcategories,
       funds, fundOperations, fundDailyValues, deletedFundIds, deletedFundOperationIds, bourseObjectif, deletedAccountIds, scalarTimestamps,
     });
     setPreRestoreSnapshotAt(`${dateLabelFull(todayISO())} à ${nowTime()}`);
@@ -16258,6 +16435,7 @@ export default function GrandLivre() {
     if (data.activities) setActivities(data.activities);
     if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
     if (data.activityCapital) setActivityCapital(data.activityCapital);
+    if (data.pettySent) setPettySent(data.pettySent);
     if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
     if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
     if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
@@ -16511,7 +16689,7 @@ export default function GrandLivre() {
             </div>
           )}
           {tab === "business" && <BusinessTab transactions={transactions} categoryGroups={resolvedGroups} categoryScope={categoryScope} setCategoryScope={setCategoryScopeLogged} allCategories={allCategories} />}
-          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
+          {tab === "activites" && <ActivitiesTab transactions={transactions} setTransactions={setTransactionsTracked} activities={activities} setActivities={setActivitiesLogged} categoryActivity={categoryActivity} setCategoryActivity={setCategoryActivityLogged} activityCapital={activityCapital} setActivityCapital={setActivityCapitalLogged} pettySent={pettySent} setPettySent={setPettySentLogged} allCategories={allCategories} categoryGroups={resolvedGroups} accounts={accounts} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "charges" && <ChargesTab transactions={transactions} chargeOverrides={chargeOverrides} setChargeOverrides={setChargeOverridesLogged} includeGrundfosVoiture={includeGrundfosVoiture} setIncludeGrundfosVoiture={setIncludeGrundfosVoitureLogged} onNavigate={navigateTo} periodRange={[filters.from, filters.to]} />}
           {tab === "bourse" && <BourseTab funds={funds} setFunds={setFunds} fundOperations={fundOperations} setFundOperations={setFundOperations} fundDailyValues={fundDailyValues} setFundDailyValues={setFundDailyValues} accounts={accounts} deletedFundIds={deletedFundIds} setDeletedFundIds={setDeletedFundIds} deletedFundOperationIds={deletedFundOperationIds} setDeletedFundOperationIds={setDeletedFundOperationIds} transactions={transactions} setTransactions={setTransactionsTracked} categoryGroups={resolvedGroups} setCategoryGroups={setCategoryGroups} bourseObjectif={bourseObjectif} setBourseObjectif={setBourseObjectif} isMobile={isMobile} />}
           {tab === "assistant" && <AssistantTab transactions={transactions} accounts={accounts} categoryGroups={resolvedGroups} budgets={budgets} recurring={recurring} funds={funds} fundOperations={fundOperations} fundDailyValues={fundDailyValues} />}
@@ -16547,6 +16725,7 @@ export default function GrandLivre() {
                 if (data.activities) setActivities(data.activities);
                 if (data.categoryActivity) setCategoryActivity(data.categoryActivity);
                 if (data.activityCapital) setActivityCapital(data.activityCapital);
+    if (data.pettySent) setPettySent(data.pettySent);
                 if (typeof data.monthlyObjective === "number") setMonthlyObjective(data.monthlyObjective);
                 if (data.chargeOverrides) setChargeOverrides(data.chargeOverrides);
                 if (typeof data.includeGrundfosVoiture === "boolean") setIncludeGrundfosVoiture(data.includeGrundfosVoiture);
