@@ -7089,6 +7089,162 @@ function computePettySentRows(transactions: Transaction[], pettySent: PettySentM
   };
 }
 
+// Export PDF dédié du rapport Petty sent vs GRUNDFOS : mise en page structurée
+// (bandeau, cartes de synthèse, tableau mensuel, graphique reçu vs réel, analyse, pied de
+// page paginé) plutôt que l'export générique des fiches de calcul.
+interface PettySentReportRow { mk: string; received: number; sent: number | null; real: number; gap: number | null; net: number; }
+interface PettySentPdfData {
+  period: string; asc: PettySentReportRow[];
+  totals: { received: number; real: number; net: number; coverage: number | null; sent: number; gap: number; filled: number; gains: number; losses: number; avgReal: number };
+  notes: { tone: "warn" | "info"; text: string }[];
+}
+async function downloadPettySentPdf(d: PettySentPdfData) {
+  const [jsPDFModule, autoTableModule] = await Promise.all([
+    import(/* @vite-ignore */ "jspdf"),
+    import(/* @vite-ignore */ "jspdf-autotable"),
+  ]);
+  void autoTableModule;
+  const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
+  const doc: any = new jsPDF();
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const M = 14, CW = W - 2 * M;
+  // Helvetica n'a ni espace fine insécable, ni vrai signe moins, ni flèche : on les remplace.
+  const ps = (s: any): string => String(s).replace(/[  ]/g, " ").replace(/[−–]/g, "-").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
+  const money = (n: number) => ps(fmt(Math.round(n)));
+  const sg = (n: number) => `${n > 0 ? "+" : n < 0 ? "-" : ""}${money(Math.abs(n))}`;
+  const GREEN: [number, number, number] = [34, 139, 94], RED: [number, number, number] = [193, 84, 63], NAVY: [number, number, number] = [26, 43, 76], GOLD: [number, number, number] = [201, 162, 39], GREY: [number, number, number] = [110, 118, 128];
+  const col = (n: number): [number, number, number] => (n >= 0 ? GREEN : RED);
+
+  // Bandeau
+  doc.setFillColor(...NAVY); doc.rect(0, 0, W, 32, "F");
+  doc.setFillColor(...GOLD); doc.rect(0, 32, W, 1.2, "F");
+  doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(17);
+  doc.text("Rapport Petty sent vs GRUNDFOS", M, 15);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(200, 210, 225);
+  doc.text(ps(`Période : ${d.period}   |   Généré le ${dateLabelFull(todayISO())}`), M, 23);
+  doc.text("Grand Livre - comparatif, sans impact sur les comptes", M, 28);
+
+  const section = (title: string, y: number) => {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11.5); doc.setTextColor(...NAVY);
+    doc.text(ps(title), M, y);
+    doc.setDrawColor(...GOLD); doc.setLineWidth(0.6); doc.line(M, y + 1.8, M + 22, y + 1.8);
+    doc.setFont("helvetica", "normal");
+    return y + 8;
+  };
+  const ensure = (y: number, need: number) => { if (y + need > H - 16) { doc.addPage(); return 20; } return y; };
+
+  // Cartes de synthèse (2 rangées de 4)
+  let y = section("Synthèse", 44);
+  const t = d.totals;
+  const cards: { label: string; value: string; sub?: string; color: [number, number, number] }[] = [
+    { label: "PETTY CASH REÇU", value: money(t.received), sub: "FCFA", color: GREEN },
+    { label: "GRUNDFOS RÉEL", value: money(t.real), sub: `~${money(t.avgReal)} / mois`, color: RED },
+    { label: "SOLDE (REÇU - RÉEL)", value: sg(t.net), sub: "FCFA", color: col(t.net) },
+    { label: "TAUX DE COUVERTURE", value: t.coverage === null ? "-" : `${t.coverage.toFixed(0)} %`, sub: "reçu / réel", color: t.coverage !== null && t.coverage < 100 ? RED : GREEN },
+    { label: "PETTY SENT CUMULÉ", value: t.filled ? money(t.sent) : "-", sub: `${t.filled} mois saisi(s)`, color: NAVY },
+    { label: "VALEUR NETTE", value: t.filled ? sg(t.gap) : "-", sub: "sent - réel", color: t.filled ? col(t.gap) : GREY },
+    { label: "MOIS GAIN / PERTE", value: t.filled ? `${t.gains} / ${t.losses}` : "-", sub: "mois saisis", color: NAVY },
+    { label: "MOIS ANALYSÉS", value: String(d.asc.length), sub: "avec activité", color: NAVY },
+  ];
+  const gap = 4, cw = (CW - 3 * gap) / 4, ch = 22;
+  cards.forEach((c, i) => {
+    const cx = M + (i % 4) * (cw + gap), cy = y + Math.floor(i / 4) * (ch + gap);
+    doc.setFillColor(247, 248, 250); doc.setDrawColor(226, 230, 235); doc.setLineWidth(0.3);
+    doc.roundedRect(cx, cy, cw, ch, 2, 2, "FD");
+    doc.setFillColor(...c.color); doc.rect(cx, cy + 2, 1.2, ch - 4, "F");
+    doc.setFontSize(6.5); doc.setTextColor(...GREY); doc.text(ps(c.label), cx + 4, cy + 6);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(c.value.length > 10 ? 10.5 : 12.5); doc.setTextColor(...c.color);
+    doc.text(ps(c.value), cx + 4, cy + 13.5);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(...GREY);
+    if (c.sub) doc.text(ps(c.sub), cx + 4, cy + 18.5);
+  });
+  y += 2 * ch + gap + 10;
+
+  // Tableau mensuel
+  if (d.asc.length) {
+    y = ensure(y, 40);
+    y = section("Détail mensuel", y);
+    doc.autoTable({
+      startY: y, margin: { left: M, right: M, bottom: 18 },
+      head: [["Mois", "Reçu", "Petty sent", "Réel", "Écart", "Solde"]],
+      body: d.asc.map((r) => [monthLabel(r.mk), money(r.received), r.sent === null ? "-" : money(r.sent), money(r.real), r.gap === null ? "-" : sg(r.gap), sg(r.net)].map(ps)),
+      foot: [["Total", money(t.received), t.filled ? money(t.sent) : "-", money(t.real), t.filled ? sg(t.gap) : "-", sg(t.net)].map(ps)],
+      showHead: "everyPage", showFoot: "lastPage", rowPageBreak: "avoid",
+      theme: "striped", styles: { fontSize: 8.5, cellPadding: 2.1, lineColor: [226, 230, 235] },
+      headStyles: { fillColor: NAVY, textColor: 255, fontStyle: "bold" },
+      footStyles: { fillColor: [236, 240, 246], textColor: NAVY, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: [249, 250, 252] },
+      columnStyles: { 0: { halign: "left", fontStyle: "bold" }, 1: { halign: "right" }, 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } },
+      didParseCell: (data: any) => {
+        if (data.column.index === 0) return;
+        data.cell.styles.halign = "right";
+        if (data.section === "head") return;
+        if (data.column.index < 4) return;
+        const r = data.section === "body" ? d.asc[data.row.index] : null;
+        const v = data.column.index === 4 ? (r ? r.gap : t.filled ? t.gap : null) : (r ? r.net : t.net);
+        if (v !== null) data.cell.styles.textColor = col(v as number);
+        data.cell.styles.fontStyle = "bold";
+      },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  }
+
+  // Graphique reçu vs réel
+  if (d.asc.length) {
+    y = ensure(y, 72);
+    y = section("Évolution mensuelle : Petty Cash reçu vs GRUNDFOS réel", y);
+    const gh = 44, gx = M + 16, gw = CW - 16;
+    const maxV = Math.max(1, ...d.asc.flatMap((r) => [r.received, r.real]));
+    const niceMax = (() => { const p = Math.pow(10, Math.floor(Math.log10(maxV))); return Math.ceil(maxV / p) * p; })();
+    doc.setDrawColor(226, 230, 235); doc.setLineWidth(0.2); doc.setFontSize(6.5); doc.setTextColor(...GREY);
+    for (let g = 0; g <= 4; g++) {
+      const gy = y + gh - (gh * g) / 4;
+      doc.line(gx, gy, gx + gw, gy);
+      doc.text(ps(fmtShort(Math.round((niceMax * g) / 4))), gx - 2, gy + 1.5, { align: "right" });
+    }
+    const slot = gw / d.asc.length, bw = Math.min(7, slot * 0.34);
+    d.asc.forEach((r, i) => {
+      const cx = gx + slot * i + slot / 2;
+      const h1 = (r.received / niceMax) * gh, h2 = (r.real / niceMax) * gh;
+      doc.setFillColor(...GREEN); if (h1 > 0) doc.rect(cx - bw - 0.4, y + gh - h1, bw, h1, "F");
+      doc.setFillColor(...RED); if (h2 > 0) doc.rect(cx + 0.4, y + gh - h2, bw, h2, "F");
+      doc.setFontSize(6.5); doc.setTextColor(...GREY);
+      doc.text(ps(monthLabel(r.mk)), cx, y + gh + 4.5, { align: "center" });
+    });
+    // légende
+    const ly = y + gh + 10;
+    doc.setFillColor(...GREEN); doc.rect(gx, ly - 2.4, 3, 3, "F"); doc.setFontSize(7.5); doc.setTextColor(60, 60, 60); doc.text("Petty Cash reçu", gx + 5, ly);
+    doc.setFillColor(...RED); doc.rect(gx + 38, ly - 2.4, 3, 3, "F"); doc.text("GRUNDFOS réel", gx + 43, ly);
+    y = ly + 8;
+  }
+
+  // Analyse
+  y = ensure(y, 30);
+  y = section("Analyse", y);
+  d.notes.forEach((n) => {
+    const lines = doc.splitTextToSize(ps(n.text), CW - 10);
+    const bh = lines.length * 4.4 + 6;
+    y = ensure(y, bh + 3);
+    doc.setFillColor(n.tone === "warn" ? 252 : 247, n.tone === "warn" ? 241 : 248, n.tone === "warn" ? 238 : 250);
+    doc.roundedRect(M, y, CW, bh, 1.5, 1.5, "F");
+    doc.setFillColor(...(n.tone === "warn" ? RED : NAVY)); doc.rect(M, y, 1.4, bh, "F");
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8.8); doc.setTextColor(50, 55, 62);
+    doc.text(lines, M + 6, y + 5.6);
+    y += bh + 3;
+  });
+
+  // Pied de page paginé
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    doc.setDrawColor(226, 230, 235); doc.setLineWidth(0.3); doc.line(M, H - 12, W - M, H - 12);
+    doc.setFontSize(7.5); doc.setTextColor(...GREY);
+    doc.text("Grand Livre - Rapport Petty sent vs GRUNDFOS - comparatif sans impact sur les comptes", M, H - 7.5);
+    doc.text(`Page ${p} / ${pages}`, W - M, H - 7.5, { align: "right" });
+  }
+  doc.save(`grand-livre_petty-sent-grundfos_${todayISO()}.pdf`);
+}
+
 function PettySentPanel({ transactions, pettySent, setPettySent }: {
   transactions: Transaction[]; pettySent: PettySentMap; setPettySent: (m: PettySentMap) => void;
 }) {
@@ -7128,13 +7284,14 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
 
   // Rapport complet basé sur le filtre de dates actif : synthèse, tableau mensuel
   // chronologique, constats rédigés. Rendu dans CalcDetailSheet, qui fournit l'export PDF.
-  const buildReport = (): { title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } => {
+  const buildReport = (): { pdf: PettySentPdfData; title: string; headline: string; formula: string; blocks: CalcDetailBlock[] } => {
     const asc = [...calc.rows].filter((r) => r.received > 0 || r.real > 0 || r.sent !== null).reverse();
     const period = asc.length
       ? (asc.length === 1 ? monthLabel(asc[0].mk) : `${monthLabel(asc[0].mk)} → ${monthLabel(asc[asc.length - 1].mk)}`)
       : "Aucune donnée";
     const unfilled = asc.filter((r) => r.sent === null && (r.received > 0 || r.real > 0));
     const deficitMonths = asc.filter((r) => r.net < 0);
+    const notes: { tone: "warn" | "info"; text: string }[] = [];
     const blocks: CalcDetailBlock[] = [];
     blocks.push({ kind: "kv", rows: [
       { label: "Période analysée", value: `${period} (${asc.length} mois)` },
@@ -7160,24 +7317,35 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
         footerColors: [undefined, undefined, undefined, undefined, calc.filledCount ? (calc.totalGap >= 0 ? COLOR.emeraldSoft : COLOR.claySoft) : undefined, calc.netAll >= 0 ? COLOR.emeraldSoft : COLOR.claySoft],
       });
     }
-    // Constats rédigés
+    // Constats rédigés (affichés dans la fiche ET repris dans le PDF)
+    const addNote = (tone: "warn" | "info", text: string) => { notes.push({ tone, text }); blocks.push({ kind: "note", tone, text }); };
     if (calc.coverage !== null) {
-      blocks.push({ kind: "note", tone: calc.coverage >= 100 ? "info" : "warn",
-        text: calc.coverage >= 100
+      addNote(calc.coverage >= 100 ? "info" : "warn",
+        calc.coverage >= 100
           ? `Couverture : le Petty Cash reçu couvre ${calc.coverage.toFixed(0)} % des dépenses GRUNDFOS sur la période, soit un excédent de ${fmt(calc.netAll)} FCFA.`
-          : `Couverture : le Petty Cash reçu ne couvre que ${calc.coverage.toFixed(0)} % des dépenses GRUNDFOS sur la période, soit un déficit de ${fmt(-calc.netAll)} FCFA à ta charge.` });
+          : `Couverture : le Petty Cash reçu ne couvre que ${calc.coverage.toFixed(0)} % des dépenses GRUNDFOS sur la période, soit un déficit de ${fmt(-calc.netAll)} FCFA à ta charge.`);
+    }
+    if (calc.best && calc.worst && calc.activeCount > 1) {
+      addNote("info", `Meilleur mois : ${monthLabel(calc.best.mk)} (solde ${signed(calc.best.net)} FCFA). Pire mois : ${monthLabel(calc.worst.mk)} (solde ${signed(calc.worst.net)} FCFA). Le Petty Cash n'est pas versé chaque mois : le solde mensuel est donc irrégulier, le cumul sur la période est plus représentatif.`);
     }
     if (deficitMonths.length && asc.length > 1) {
-      blocks.push({ kind: "note", tone: "warn", text: `Mois déficitaires (reçu < réel) : ${deficitMonths.map((r) => `${monthLabel(r.mk)} (${signed(r.net)})`).join(", ")}.` });
+      addNote("warn", `Mois où le Petty Cash reçu est inférieur aux dépenses GRUNDFOS (${deficitMonths.length}) : ${deficitMonths.map((r) => `${monthLabel(r.mk)} (${signed(r.net)})`).join(", ")}.`);
     }
     if (calc.filledCount) {
-      blocks.push({ kind: "note", tone: "info", text: `Petty sent : sur ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}, le montant déclaré est ${calc.totalGap >= 0 ? "supérieur" : "inférieur"} de ${fmt(Math.abs(calc.totalGap))} FCFA aux dépenses GRUNDFOS réelles (${calc.gains} mois en gain, ${calc.losses} en perte).` });
+      addNote("info", `Petty sent : sur ${calc.filledCount} mois saisi${calc.filledCount > 1 ? "s" : ""}, le montant déclaré est ${calc.totalGap >= 0 ? "supérieur" : "inférieur"} de ${fmt(Math.abs(calc.totalGap))} FCFA aux dépenses GRUNDFOS réelles (${calc.gains} mois en gain, ${calc.losses} en perte).`);
     }
     if (unfilled.length) {
-      blocks.push({ kind: "note", tone: "warn", text: `Mois sans saisie Petty sent (exclus du total « Écart ») : ${unfilled.map((r) => monthLabel(r.mk)).join(", ")}.` });
+      addNote("warn", `Mois sans saisie Petty sent (exclus du total « Écart ») : ${unfilled.map((r) => monthLabel(r.mk)).join(", ")}.`);
     }
-    blocks.push({ kind: "note", tone: "info", text: "Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Ce rapport est un comparatif : il n'a aucun impact sur les comptes, soldes ou projections." });
+    addNote("info", "Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Ce rapport est un comparatif : il n'a aucun impact sur les comptes, soldes ou projections.");
+    const pdf: PettySentPdfData = {
+      period,
+      asc: asc.map((r) => ({ mk: r.mk, received: r.received, sent: r.sent, real: r.real, gap: r.gap, net: r.net })),
+      totals: { received: calc.totalReceived, real: calc.totalRealAll, net: calc.netAll, coverage: calc.coverage, sent: calc.totalSent, gap: calc.totalGap, filled: calc.filledCount, gains: calc.gains, losses: calc.losses, avgReal: calc.avgReal },
+      notes,
+    };
     return {
+      pdf,
       title: "Rapport Petty sent vs GRUNDFOS",
       headline: `${period} · Solde ${signed(calc.netAll)} FCFA${calc.filledCount ? ` · Écart ${signed(calc.totalGap)} FCFA` : ""}`,
       formula: "Écart = Petty sent − GRUNDFOS réel · Solde = Petty Cash reçu − GRUNDFOS réel",
@@ -7293,7 +7461,7 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
         Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Le filtre de dates s'applique au tableau, au graphique et à tous les indicateurs. Les mois sans saisie Petty sent sont exclus du total « Écart ». Vide un champ pour effacer la saisie.
       </div>
     </PanelWithHelp>
-    {reportOpen && (() => { const d = buildReport(); return <CalcDetailSheet open onClose={() => setReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} />; })()}
+    {reportOpen && (() => { const d = buildReport(); return <CalcDetailSheet open onClose={() => setReportOpen(false)} title={d.title} headline={d.headline} formula={d.formula} blocks={d.blocks} onDownloadPdf={() => downloadPettySentPdf(d.pdf)} />; })()}
     </>
   );
 }
@@ -7592,7 +7760,7 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const periodLabel = periodRange ? `${monthLabel(periodRange[0])} — ${monthLabel(periodRange[1])}` : "Tout l'historique";
-      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/[\u2212\u2013]/g, "-").replace(/≥/g, ">=").replace(/≤/g, "<=").replace(/≈/g, "~").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
@@ -8588,9 +8756,10 @@ function CalcDetailIcon({ onClick }: { onClick: () => void }) {
   );
 }
 
-function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext, badge, topSlot }: {
+function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPrev, onNext, badge, topSlot, onDownloadPdf }: {
   open: boolean; onClose: () => void; title: string; headline: string; formula: string; blocks: CalcDetailBlock[];
   onPrev?: () => void; onNext?: () => void; badge?: { text: string; tone: "live" | "past" }; topSlot?: React.ReactNode;
+  onDownloadPdf?: () => Promise<void>; // export PDF dédié (remplace l'export générique de la fiche)
 }) {
   const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
   if (!open) return null;
@@ -8598,6 +8767,10 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
   // doré pour le résultat, tableaux via autoTable) — remplace le CSV, jugé peu présentable.
   const downloadPdf = async () => {
     setPdfState("loading");
+    if (onDownloadPdf) {
+      try { await onDownloadPdf(); setPdfState("idle"); } catch (e) { console.error(e); setPdfState("error"); }
+      return;
+    }
     try {
       const [jsPDFModule, autoTableModule] = await Promise.all([
         import(/* @vite-ignore */ "jspdf"),
@@ -8613,7 +8786,7 @@ function CalcDetailSheet({ open, onClose, title, headline, formula, blocks, onPr
       // insécable (U+202F) que produit Intl.NumberFormat("fr-FR") pour les milliers —
       // elle s'affichait comme "/" (ex: "508/111" au lieu de "508 111"). Toute chaîne
       // affichée dans ce PDF passe par ce filtre avant écriture.
-      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/[\u2212\u2013]/g, "-").replace(/≥/g, ">=").replace(/≤/g, "<=").replace(/≈/g, "~").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
@@ -12212,7 +12385,7 @@ function ComptesTab({ accounts, setAccounts, transactions, setTransactions, recu
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const periodLabel = `${monthLabel(periodFrom)} — ${monthLabel(periodTo)}`;
-      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
+      const ps = (s: any): string => String(s).replace(/[\u202F\u00A0]/g, " ").replace(/[\u2212\u2013]/g, "-").replace(/≥/g, ">=").replace(/≤/g, "<=").replace(/≈/g, "~").replace(/→/g, "->").replace(/—/g, "-").replace(/…/g, "...");
 
       doc.setFillColor(26, 43, 76);
       doc.rect(0, 0, pageWidth, 34, "F");
