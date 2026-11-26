@@ -10085,8 +10085,8 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   //    lecture de l'application NSIA.
   //  - "reel" (Valeur réelle) : la valeur réellement détenue à chaque date — elle monte à
   //    chaque souscription (apport d'argent), avec la courbe "Investi" pour s'y repérer.
-  const [chartMode, setChartMode] = useState<"perf" | "reel">("perf");
-  const [chartRange, setChartRange] = useState<"1m" | "3m" | "6m" | "all">("3m");
+  const [chartMode, setChartMode] = useState<"perf" | "reel">("reel");
+  const [chartRange, setChartRange] = useState<"1m" | "3m" | "6m" | "12m" | "all">("1m");
   const chartData = useMemo(() => {
     const allDates = Array.from(new Set([
       ...fundDailyValues.map((v) => v.date),
@@ -10094,7 +10094,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
     ])).sort();
     if (!allDates.length) return [];
     const today = todayISO();
-    const days = chartRange === "1m" ? 30 : chartRange === "3m" ? 91 : chartRange === "6m" ? 182 : 0;
+    const days = chartRange === "1m" ? 30 : chartRange === "3m" ? 91 : chartRange === "6m" ? 182 : chartRange === "12m" ? 365 : 0;
     const cutoff = days ? addDays(today, -days) : null;
     // Point de départ exact de la fenêtre (VL connue à cette date) + points suivants.
     const dates = cutoff ? [cutoff, ...allDates.filter((d) => d > cutoff)] : allDates;
@@ -10191,12 +10191,12 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
           <div style={{ display: "flex", gap: 6 }}>
-            {([["perf", "Performance"], ["reel", "Valeur réelle"]] as const).map(([k, lab]) => (
+            {([["reel", "Valeur"], ["perf", "Performance"]] as const).map(([k, lab]) => (
               <button key={k} onClick={() => setChartMode(k)} style={{ background: chartMode === k ? "rgba(201,162,39,0.22)" : "transparent", border: `1px solid ${chartMode === k ? "#c9a227" : "rgba(159,179,217,0.25)"}`, borderRadius: 20, color: chartMode === k ? "#e0c15a" : "#9fb3d9", cursor: "pointer", fontSize: 11, padding: "3px 10px" }}>{lab}</button>
             ))}
           </div>
           <div style={{ display: "flex", gap: 4 }}>
-            {([["1m", "1 M"], ["3m", "3 M"], ["6m", "6 M"], ["all", "Tout"]] as const).map(([k, lab]) => (
+            {([["1m", "1 M"], ["3m", "3 M"], ["6m", "6 M"], ["12m", "12 M"], ["all", "Tout"]] as const).map(([k, lab]) => (
               <button key={k} onClick={() => setChartRange(k)} style={{ background: chartRange === k ? "rgba(159,179,217,0.2)" : "transparent", border: "none", borderRadius: 6, color: chartRange === k ? "#fff" : "#9fb3d9", cursor: "pointer", fontSize: 11, padding: "3px 8px" }}>{lab}</button>
             ))}
           </div>
@@ -10211,10 +10211,10 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <div style={{ height: 110 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
-                  {/* Échelle de temps réelle. Mode Performance : axe ajusté aux variations (comme NSIA) ;
-                      mode Valeur réelle : axe depuis 0 pour garder l'amplitude honnête. */}
+                  {/* Échelle de temps réelle, axe vertical ajusté à la période affichée — comme l'app
+                      NSIA (26/11/2026) : sur 1 M, une baisse récente reste bien visible. */}
                   <XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} hide />
-                  <YAxis domain={chartMode === "perf" ? ["dataMin", "dataMax"] : [0, "auto"]} hide />
+                  <YAxis domain={["auto", "auto"]} hide />
                   <Tooltip cursor={{ stroke: "rgba(159,179,217,0.35)" }} content={({ active, payload }: any) => {
                     if (!active || !payload?.length) return null;
                     const row = payload[0].payload;
@@ -10233,7 +10233,6 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
                       </div>
                     );
                   }} />
-                  {chartMode === "reel" && <Line type="stepAfter" dataKey="investi" stroke="#9fb3d9" strokeWidth={1.3} strokeDasharray="4 3" dot={false} isAnimationActive={false} />}
                   <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -10241,7 +10240,7 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             <div style={{ marginTop: 4, fontSize: 10.5, color: "#9fb3d9", textAlign: "center" }}>
               {chartMode === "perf"
                 ? "Tes parts actuelles valorisées aux valeurs liquidatives passées — les souscriptions ne font pas monter la courbe."
-                : "Valeur réellement détenue à chaque date (monte à chaque souscription) · pointillés : montant investi."}
+                : "Valeur réellement détenue à chaque date, comme l'app NSIA (les souscriptions créent des paliers). Touche un point pour voir investi et plus-value."}
             </div>
           </div>
         ) : (
