@@ -10094,7 +10094,11 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
         const vl = valuesUntil[valuesUntil.length - 1]?.vl ?? opsWithVlUntil[opsWithVlUntil.length - 1]?.vl ?? 0;
         total += qty * vl;
       });
-      return { date, valeur: Math.round(total) };
+      // "Investi" = coût d'achat cumulé (frais inclus) à cette date, calculé comme la carte
+      // du haut : l'écart entre les deux courbes est exactement la plus-value latente.
+      const opsToDate = fundOperations.filter((o) => o.date <= date);
+      const investi = funds.reduce((a, f) => a + computeFundPosition(f.id, opsToDate, []).costTotal, 0);
+      return { date, t: new Date(date + "T00:00:00").getTime(), valeur: Math.round(total), investi: Math.round(investi) };
     });
   }, [funds, fundOperations, fundDailyValues]);
 
@@ -10158,12 +10162,33 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
           )}
         </div>
         {chartData.length > 1 ? (
-          <div style={{ height: 100, marginTop: 16 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} />
+          <div style={{ height: 124, marginTop: 16 }}>
+            <ResponsiveContainer width="100%" height={100}>
+              <LineChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+                {/* Échelle de temps réelle (et non un point par donnée) + axe vertical depuis 0 :
+                    la pente reflète la vraie durée et l'amplitude réelle des variations. */}
+                <XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} hide />
+                <YAxis domain={[0, "auto"]} hide />
+                <Tooltip cursor={{ stroke: "rgba(159,179,217,0.35)" }} content={({ active, payload }: any) => {
+                  if (!active || !payload?.length) return null;
+                  const row = payload[0].payload;
+                  return (
+                    <div style={{ background: "#0d1f3d", border: "1px solid rgba(159,179,217,0.3)", borderRadius: 6, padding: "8px 12px", fontSize: 11.5, color: "#fff", fontFamily: "'IBM Plex Mono', monospace" }}>
+                      <div style={{ color: "#9fb3d9", marginBottom: 3 }}>{dateLabelFull(row.date)}</div>
+                      <div style={{ color: "#e0c15a" }}>Valeur : {fmt(row.valeur)} FCFA</div>
+                      <div style={{ color: "#9fb3d9" }}>Investi : {fmt(row.investi)} FCFA</div>
+                      <div style={{ color: row.valeur - row.investi >= 0 ? "#5fc298" : "#dd7b64" }}>Plus-value : {row.valeur - row.investi >= 0 ? "+" : ""}{fmt(row.valeur - row.investi)} FCFA</div>
+                    </div>
+                  );
+                }} />
+                <Line type="stepAfter" dataKey="investi" stroke="#9fb3d9" strokeWidth={1.3} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
+            <div style={{ display: "flex", gap: 14, justifyContent: "center", marginTop: 4, fontSize: 10.5, color: "#9fb3d9" }}>
+              <span><span style={{ display: "inline-block", width: 14, height: 2, background: "#c9a227", verticalAlign: "middle", marginRight: 5 }} />Valeur</span>
+              <span><span style={{ display: "inline-block", width: 14, height: 0, borderTop: "2px dashed #9fb3d9", verticalAlign: "middle", marginRight: 5 }} />Investi</span>
+            </div>
           </div>
         ) : (
           <div style={{ marginTop: 16, fontSize: 11.5, color: "#9fb3d9", fontStyle: "italic" }}>
