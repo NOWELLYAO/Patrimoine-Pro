@@ -10078,29 +10078,57 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
   // — chacune porte sa propre VL — pas seulement les VL saisies explicitement, pour que
   // la courbe apparaisse dès la 2e donnée disponible plutôt que d'attendre 2 VL
   // saisies à la main.
+  // Deux lectures de la courbe (sur demande de l'utilisateur, 26/11/2026 : la courbe NSIA
+  // montrait la tendance baissière, la nôtre restait croissante) :
+  //  - "perf" (Performance) : les parts ACTUELLES valorisées aux VL passées. Les souscriptions
+  //    n'y créent aucune marche : seule la variation des VL fait bouger la courbe — c'est la
+  //    lecture de l'application NSIA.
+  //  - "reel" (Valeur réelle) : la valeur réellement détenue à chaque date — elle monte à
+  //    chaque souscription (apport d'argent), avec la courbe "Investi" pour s'y repérer.
+  const [chartMode, setChartMode] = useState<"perf" | "reel">("perf");
+  const [chartRange, setChartRange] = useState<"1m" | "3m" | "6m" | "all">("3m");
   const chartData = useMemo(() => {
     const allDates = Array.from(new Set([
       ...fundDailyValues.map((v) => v.date),
       ...fundOperations.map((o) => o.date),
     ])).sort();
-    return allDates.map((date) => {
-      let total = 0;
-      funds.forEach((f) => {
-        const opsUntil = fundOperations.filter((o) => o.fundId === f.id && o.date <= date).sort((a, b) => a.date.localeCompare(b.date));
+    if (!allDates.length) return [];
+    const today = todayISO();
+    const days = chartRange === "1m" ? 30 : chartRange === "3m" ? 91 : chartRange === "6m" ? 182 : 0;
+    const cutoff = days ? addDays(today, -days) : null;
+    // Point de départ exact de la fenêtre (VL connue à cette date) + points suivants.
+    const dates = cutoff ? [cutoff, ...allDates.filter((d) => d > cutoff)] : allDates;
+    const perFund = funds.map((f) => {
+      const vals = fundDailyValues.filter((v) => v.fundId === f.id).sort((x, y) => x.date.localeCompare(y.date));
+      const ops = fundOperations.filter((o) => o.fundId === f.id).sort((x, y) => x.date.localeCompare(y.date));
+      const qtyNow = computeFundPosition(f.id, fundOperations, fundDailyValues).qty;
+      const earliestVl = vals[0]?.vl ?? ops[0]?.vl ?? 0;
+      return { f, vals, ops, qtyNow, earliestVl };
+    });
+    const vlAt = (pf: typeof perFund[number], date: string) => {
+      let vl: number | null = null;
+      for (const v of pf.vals) { if (v.date <= date) vl = v.vl; else break; }
+      if (vl === null) { for (const o of pf.ops) { if (o.date <= date) vl = o.vl; else break; } }
+      return vl ?? pf.earliestVl;
+    };
+    return dates.map((date) => {
+      let reel = 0, perf = 0;
+      perFund.forEach((pf) => {
+        const vl = vlAt(pf, date);
         let qty = 0;
-        opsUntil.forEach((o) => { qty += o.type === "Souscription" ? o.quantite : -o.quantite; });
-        const valuesUntil = fundDailyValues.filter((v) => v.fundId === f.id && v.date <= date).sort((a, b) => a.date.localeCompare(b.date));
-        const opsWithVlUntil = opsUntil;
-        const vl = valuesUntil[valuesUntil.length - 1]?.vl ?? opsWithVlUntil[opsWithVlUntil.length - 1]?.vl ?? 0;
-        total += qty * vl;
+        for (const o of pf.ops) { if (o.date <= date) qty += o.type === "Souscription" ? o.quantite : -o.quantite; else break; }
+        reel += qty * vl;
+        perf += pf.qtyNow * vl;
       });
-      // "Investi" = coût d'achat cumulé (frais inclus) à cette date, calculé comme la carte
-      // du haut : l'écart entre les deux courbes est exactement la plus-value latente.
+      // "Investi" = coût d'achat cumulé (frais inclus) à cette date, comme la carte du haut :
+      // l'écart avec la valeur réelle est exactement la plus-value latente.
       const opsToDate = fundOperations.filter((o) => o.date <= date);
       const investi = funds.reduce((a, f) => a + computeFundPosition(f.id, opsToDate, []).costTotal, 0);
-      return { date, t: new Date(date + "T00:00:00").getTime(), valeur: Math.round(total), investi: Math.round(investi) };
+      return { date, t: new Date(date + "T00:00:00").getTime(), reel: Math.round(reel), perf: Math.round(perf), valeur: Math.round(chartMode === "perf" ? perf : reel), investi: Math.round(investi) };
     });
-  }, [funds, fundOperations, fundDailyValues]);
+  }, [funds, fundOperations, fundDailyValues, chartMode, chartRange]);
+  const chartDelta = chartData.length > 1 ? chartData[chartData.length - 1].perf - chartData[0].perf : 0;
+  const chartDeltaPct = chartData.length > 1 && chartData[0].perf > 0 ? (chartDelta / chartData[0].perf) * 100 : 0;
 
   // Courbe par fonds individuel — même logique que la courbe globale, mais restreinte
   // à un seul fonds. Sur demande explicite de l'utilisateur (23/08/2026).
@@ -10161,38 +10189,64 @@ function BourseTab({ funds, setFunds, fundOperations, setFundOperations, fundDai
             </div>
           )}
         </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            {([["perf", "Performance"], ["reel", "Valeur réelle"]] as const).map(([k, lab]) => (
+              <button key={k} onClick={() => setChartMode(k)} style={{ background: chartMode === k ? "rgba(201,162,39,0.22)" : "transparent", border: `1px solid ${chartMode === k ? "#c9a227" : "rgba(159,179,217,0.25)"}`, borderRadius: 20, color: chartMode === k ? "#e0c15a" : "#9fb3d9", cursor: "pointer", fontSize: 11, padding: "3px 10px" }}>{lab}</button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {([["1m", "1 M"], ["3m", "3 M"], ["6m", "6 M"], ["all", "Tout"]] as const).map(([k, lab]) => (
+              <button key={k} onClick={() => setChartRange(k)} style={{ background: chartRange === k ? "rgba(159,179,217,0.2)" : "transparent", border: "none", borderRadius: 6, color: chartRange === k ? "#fff" : "#9fb3d9", cursor: "pointer", fontSize: 11, padding: "3px 8px" }}>{lab}</button>
+            ))}
+          </div>
+        </div>
         {chartData.length > 1 ? (
-          <div style={{ height: 124, marginTop: 16 }}>
-            <ResponsiveContainer width="100%" height={100}>
-              <LineChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
-                {/* Échelle de temps réelle (et non un point par donnée) + axe vertical depuis 0 :
-                    la pente reflète la vraie durée et l'amplitude réelle des variations. */}
-                <XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} hide />
-                <YAxis domain={[0, "auto"]} hide />
-                <Tooltip cursor={{ stroke: "rgba(159,179,217,0.35)" }} content={({ active, payload }: any) => {
-                  if (!active || !payload?.length) return null;
-                  const row = payload[0].payload;
-                  return (
-                    <div style={{ background: "#0d1f3d", border: "1px solid rgba(159,179,217,0.3)", borderRadius: 6, padding: "8px 12px", fontSize: 11.5, color: "#fff", fontFamily: "'IBM Plex Mono', monospace" }}>
-                      <div style={{ color: "#9fb3d9", marginBottom: 3 }}>{dateLabelFull(row.date)}</div>
-                      <div style={{ color: "#e0c15a" }}>Valeur : {fmt(row.valeur)} FCFA</div>
-                      <div style={{ color: "#9fb3d9" }}>Investi : {fmt(row.investi)} FCFA</div>
-                      <div style={{ color: row.valeur - row.investi >= 0 ? "#5fc298" : "#dd7b64" }}>Plus-value : {row.valeur - row.investi >= 0 ? "+" : ""}{fmt(row.valeur - row.investi)} FCFA</div>
-                    </div>
-                  );
-                }} />
-                <Line type="stepAfter" dataKey="investi" stroke="#9fb3d9" strokeWidth={1.3} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} isAnimationActive={false} />
-              </LineChart>
-            </ResponsiveContainer>
-            <div style={{ display: "flex", gap: 14, justifyContent: "center", marginTop: 4, fontSize: 10.5, color: "#9fb3d9" }}>
-              <span><span style={{ display: "inline-block", width: 14, height: 2, background: "#c9a227", verticalAlign: "middle", marginRight: 5 }} />Valeur</span>
-              <span><span style={{ display: "inline-block", width: 14, height: 0, borderTop: "2px dashed #9fb3d9", verticalAlign: "middle", marginRight: 5 }} />Investi</span>
+          <div style={{ marginTop: 8 }}>
+            {chartMode === "perf" && (
+              <div style={{ fontSize: 11.5, color: chartDelta >= 0 ? "#5fc298" : "#dd7b64", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>
+                {chartDelta >= 0 ? "+" : "−"}{fmt(Math.abs(chartDelta))} FCFA ({chartDeltaPct >= 0 ? "+" : ""}{chartDeltaPct.toFixed(2)}%) sur la période
+              </div>
+            )}
+            <div style={{ height: 110 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+                  {/* Échelle de temps réelle. Mode Performance : axe ajusté aux variations (comme NSIA) ;
+                      mode Valeur réelle : axe depuis 0 pour garder l'amplitude honnête. */}
+                  <XAxis dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} hide />
+                  <YAxis domain={chartMode === "perf" ? ["dataMin", "dataMax"] : [0, "auto"]} hide />
+                  <Tooltip cursor={{ stroke: "rgba(159,179,217,0.35)" }} content={({ active, payload }: any) => {
+                    if (!active || !payload?.length) return null;
+                    const row = payload[0].payload;
+                    return (
+                      <div style={{ background: "#0d1f3d", border: "1px solid rgba(159,179,217,0.3)", borderRadius: 6, padding: "8px 12px", fontSize: 11.5, color: "#fff", fontFamily: "'IBM Plex Mono', monospace" }}>
+                        <div style={{ color: "#9fb3d9", marginBottom: 3 }}>{dateLabelFull(row.date)}</div>
+                        {chartMode === "perf" ? (
+                          <div style={{ color: "#e0c15a" }}>Parts actuelles : {fmt(row.perf)} FCFA</div>
+                        ) : (
+                          <>
+                            <div style={{ color: "#e0c15a" }}>Valeur : {fmt(row.reel)} FCFA</div>
+                            <div style={{ color: "#9fb3d9" }}>Investi : {fmt(row.investi)} FCFA</div>
+                            <div style={{ color: row.reel - row.investi >= 0 ? "#5fc298" : "#dd7b64" }}>Plus-value : {row.reel - row.investi >= 0 ? "+" : "−"}{fmt(Math.abs(row.reel - row.investi))} FCFA</div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  }} />
+                  {chartMode === "reel" && <Line type="stepAfter" dataKey="investi" stroke="#9fb3d9" strokeWidth={1.3} strokeDasharray="4 3" dot={false} isAnimationActive={false} />}
+                  <Line type="monotone" dataKey="valeur" stroke="#c9a227" strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ marginTop: 4, fontSize: 10.5, color: "#9fb3d9", textAlign: "center" }}>
+              {chartMode === "perf"
+                ? "Tes parts actuelles valorisées aux valeurs liquidatives passées — les souscriptions ne font pas monter la courbe."
+                : "Valeur réellement détenue à chaque date (monte à chaque souscription) · pointillés : montant investi."}
             </div>
           </div>
         ) : (
           <div style={{ marginTop: 16, fontSize: 11.5, color: "#9fb3d9", fontStyle: "italic" }}>
-            La courbe apparaîtra ici dès qu'un deuxième point sera disponible — renseigne la VL d'un fonds un autre jour, ou fais une nouvelle opération.
+            Pas assez de points sur cette période — choisis « Tout » ou renseigne la VL d'un fonds un autre jour.
           </div>
         )}
       </div>
