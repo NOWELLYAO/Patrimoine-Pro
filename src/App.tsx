@@ -5257,6 +5257,59 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     ? `${dateLabelShort(bFromDay)}${bFromDay !== bToDay ? " — " + dateLabelShort(bToDay) : ""}`
     : `${monthLabel(bFrom)}${bFrom !== bTo ? " — " + monthLabel(bTo) : ""}`;
 
+  // Définition unique des lignes du tableau : sert à l'affichage ET aux exports PDF / Excel.
+  const metricDefs: { label: string; a: number; b: number; lower: boolean; suffix: "FCFA" | "%" | "j"; rows: SubRow[]; note: string }[] = [
+    { label: "Revenus", a: A.revenus, b: B.revenus, lower: false, suffix: "FCFA", rows: topCatRows(A.revCat, B.revCat, "higher"), note: "Principales catégories de revenus. Les revenus n'ont pas de nature (Nécessaire/Productif…), seules les dépenses en ont." },
+    { label: "Dépenses", a: A.depenses, b: B.depenses, lower: true, suffix: "FCFA", rows: expenseTreeRows(), note: "Total réel par nature (exceptionnelles incluses). Touche une nature pour voir ses catégories, puis une catégorie pour ses sous-catégories." },
+    { label: "Solde", a: A.solde, b: B.solde, lower: false, suffix: "FCFA", note: "Solde = Revenus − Dépenses de chaque nature.", rows: [
+      { label: "Revenus", a: A.revenus, b: B.revenus, tone: "higher" },
+      ...GROUPS.map((g) => ({ label: `− ${g}`, a: -A.byGroup[g], b: -B.byGroup[g], tone: (g === "Productif" ? "neutral" : "higher") as "neutral" | "higher", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
+    ] },
+    { label: "Taux d'épargne", a: A.tauxEpargne, b: B.tauxEpargne, lower: false, suffix: "%", note: "Part des revenus absorbée par chaque nature ; l'épargne est ce qui reste.", rows: [
+      ...GROUPS.map((g) => ({ label: `${g} (% revenus)`, a: A.revenus > 0 ? (A.byGroup[g] / A.revenus) * 100 : 0, b: B.revenus > 0 ? (B.byGroup[g] / B.revenus) * 100 : 0, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g], pct: true })).filter((r) => r.a !== 0 || r.b !== 0),
+      { label: "Épargne (reste)", a: A.tauxEpargne, b: B.tauxEpargne, tone: "higher" as const, pct: true },
+    ] },
+    { label: "Non-productif", a: A.nonProd, b: B.nonProd, lower: true, suffix: "FCFA", rows: topCatRows(A.nonProdCat, B.nonProdCat, "lower", 8), note: "Catégories qui composent les dépenses Non-productives." },
+    { label: "Jours comptés", a: A.days, b: B.days, lower: false, suffix: "j", rows: [], note: `Le mois en cours est compté jusqu'à aujourd'hui, les mois passés en jours calendaires entiers. A : ${labelA} = ${A.days} j · B : ${labelB} = ${B.days} j. Les rythmes par jour divisent par ces nombres.` },
+    { label: "Rythme de dépenses / jour", a: A.rythme, b: B.rythme, lower: true, suffix: "FCFA", note: "Par jour et par nature, hors transactions exceptionnelles.",
+      rows: GROUPS.map((g) => ({ label: g, a: A.byGroupN[g] / A.days, b: B.byGroupN[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0) },
+    { label: "Rythme hors charges fixes / jour", a: A.rythmeHorsFixes, b: B.rythmeHorsFixes, lower: true, suffix: "FCFA", note: "Par jour et par nature, hors exceptionnelles et hors charges fixes de ta liste.",
+      rows: GROUPS.map((g) => ({ label: g, a: A.byGroupHF[g] / A.days, b: B.byGroupHF[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0) },
+  ];
+
+  const [cmpExport, setCmpExport] = useState<"idle" | "pdf" | "xlsx" | "error">("idle");
+  const buildExport = (): CmpExportData => {
+    const flat = (rows: SubRow[], depth: number, unit: "FCFA" | "%"): CmpExportRow[] =>
+      rows.flatMap((r) => [{ depth, label: r.label, a: r.a, b: r.b, unit: r.pct ? "%" : unit, tone: r.tone, color: r.color } as CmpExportRow, ...(r.children ? flat(r.children, depth + 1, unit) : [])]);
+    const expenseFlat: CmpExportData["expenseFlat"] = [];
+    GROUPS.forEach((g) => {
+      const cats = new Set([...Object.keys(A.tree[g]), ...Object.keys(B.tree[g])]);
+      cats.forEach((c) => {
+        const subs = new Set([...Object.keys(A.tree[g][c]?.subs || {}), ...Object.keys(B.tree[g][c]?.subs || {})]);
+        subs.forEach((sk) => expenseFlat.push({ nature: g, cat: c, sub: sk, a: A.tree[g][c]?.subs[sk] || 0, b: B.tree[g][c]?.subs[sk] || 0 }));
+      });
+    });
+    expenseFlat.sort((x, y) => GROUPS.indexOf(x.nature as Group) - GROUPS.indexOf(y.nature as Group) || Math.max(y.a, y.b) - Math.max(x.a, x.b));
+    return {
+      labelA, labelB, countA: A.count, countB: B.count, granularity,
+      blocks: metricDefs.map((m) => ({
+        head: { depth: 0, label: m.label, a: m.a, b: m.b, unit: m.suffix, tone: m.lower ? "lower" : "higher" },
+        rows: flat(m.rows, 1, m.suffix === "%" ? "%" : "FCFA"),
+        note: m.note,
+      })),
+      expenseFlat: expenseFlat.filter((r) => r.a !== 0 || r.b !== 0),
+    };
+  };
+  const runCmpExport = async (kind: "pdf" | "xlsx") => {
+    setCmpExport(kind);
+    try {
+      const data = buildExport();
+      if (kind === "pdf") await downloadComparatorPdf(data); else await downloadComparatorExcel(data);
+      setCmpExport("idle");
+    } catch (e) { console.error(e); setCmpExport("error"); }
+  };
+
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Panel title="Choisir les deux périodes à comparer">
@@ -5319,7 +5372,18 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
         </div>
       </Panel>
 
-      <Panel title="Comparaison des indicateurs clés" subtitle={`A : ${labelA} (${A.count} tx)  ·  B : ${labelB} (${B.count} tx)`}>
+      <Panel title="Comparaison des indicateurs clés" subtitle={`A : ${labelA} (${A.count} tx)  ·  B : ${labelB} (${B.count} tx)`}
+        right={
+          <div className="gl-noprint" style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => runCmpExport("xlsx")} disabled={cmpExport === "xlsx" || cmpExport === "pdf"} title="Exporter en Excel" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+              {cmpExport === "xlsx" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />} Excel
+            </button>
+            <button onClick={() => runCmpExport("pdf")} disabled={cmpExport === "xlsx" || cmpExport === "pdf"} title="Exporter en PDF" style={{ display: "flex", alignItems: "center", gap: 6, background: cmpExport === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${cmpExport === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8, color: cmpExport === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+              {cmpExport === "pdf" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileText size={13} />}
+              {cmpExport === "error" ? "Réessayer" : "PDF"}
+            </button>
+          </div>
+        }>
         <div style={{ display: "flex", padding: "4px 0", fontSize: 10.5, color: COLOR.inkMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
           <div style={{ width: 150 }}></div>
           <div style={{ flex: 1, textAlign: "right" }}>A</div>
@@ -5327,24 +5391,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
           <div style={{ flex: 1, textAlign: "right" }}>B</div>
           <div style={{ width: 90, textAlign: "right" }}>Évolution</div>
         </div>
-        {metricRow("Revenus", A.revenus, B.revenus, false, "FCFA", detailBlock(topCatRows(A.revCat, B.revCat, "higher"), "Principales catégories de revenus. Les revenus n'ont pas de nature (Nécessaire/Productif…), seules les dépenses en ont."))}
-        {metricRow("Dépenses", A.depenses, B.depenses, true, "FCFA", detailBlock(expenseTreeRows(), "Total réel par nature (exceptionnelles incluses). Touche une nature pour voir ses catégories, puis une catégorie pour ses sous-catégories.", "dep"))}
-        {metricRow("Solde", A.solde, B.solde, false, "FCFA", detailBlock([
-          { label: "Revenus", a: A.revenus, b: B.revenus, tone: "higher" },
-          ...GROUPS.map((g) => ({ label: `− ${g}`, a: -A.byGroup[g], b: -B.byGroup[g], tone: (g === "Productif" ? "neutral" : "higher") as "neutral" | "higher", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
-        ], "Solde = Revenus − Dépenses de chaque nature."))}
-        {metricRow("Taux d'épargne", A.tauxEpargne, B.tauxEpargne, false, "%", detailBlock([
-          ...GROUPS.map((g) => ({ label: `${g} (% revenus)`, a: A.revenus > 0 ? (A.byGroup[g] / A.revenus) * 100 : 0, b: B.revenus > 0 ? (B.byGroup[g] / B.revenus) * 100 : 0, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g], pct: true })).filter((r) => r.a !== 0 || r.b !== 0),
-          { label: "Épargne (reste)", a: A.tauxEpargne, b: B.tauxEpargne, tone: "higher" as const, pct: true },
-        ], "Part des revenus absorbée par chaque nature ; l'épargne est ce qui reste."))}
-        {metricRow("Non-productif", A.nonProd, B.nonProd, true, "FCFA", detailBlock(topCatRows(A.nonProdCat, B.nonProdCat, "lower", 8), "Catégories qui composent les dépenses Non-productives."))}
-        {metricRow("Jours comptés", A.days, B.days, false, "j", detailBlock([], `Le mois en cours est compté jusqu'à aujourd'hui, les mois passés en jours calendaires entiers. A : ${labelA} = ${A.days} j · B : ${labelB} = ${B.days} j. Les rythmes par jour divisent par ces nombres.`))}
-        {metricRow("Rythme de dépenses / jour", A.rythme, B.rythme, true, "FCFA", detailBlock(
-          GROUPS.map((g) => ({ label: g, a: A.byGroupN[g] / A.days, b: B.byGroupN[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
-          "Par jour et par nature, hors transactions exceptionnelles."))}
-        {metricRow("Rythme hors charges fixes / jour", A.rythmeHorsFixes, B.rythmeHorsFixes, true, "FCFA", detailBlock(
-          GROUPS.map((g) => ({ label: g, a: A.byGroupHF[g] / A.days, b: B.byGroupHF[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
-          "Par jour et par nature, hors exceptionnelles et hors charges fixes de ta liste."))}
+        {metricDefs.map((m) => metricRow(m.label, m.a, m.b, m.lower, m.suffix, detailBlock(m.rows, m.note, m.label)))}
       </Panel>
 
       <Panel title="Rythme de chaque mois" subtitle="Dépenses par jour sur les 12 derniers mois — total, et hors charges fixes de ta liste (loyer, Maman, Nesher…)"
@@ -7268,6 +7315,172 @@ interface PettySentPdfData {
   totals: { received: number; real: number; net: number; coverage: number | null; sent: number; gap: number; filled: number; gains: number; losses: number; avgReal: number; avgReceived: number; receiptCount: number; avgPerReceipt: number; avgSent: number };
   notes: { tone: "warn" | "info"; text: string }[];
 }
+// ───────── Export PDF / Excel du comparateur "Comparaison des indicateurs clés" ─────────
+interface CmpExportRow { depth: number; label: string; a: number; b: number; unit: "FCFA" | "%" | "j"; tone: "lower" | "higher" | "neutral"; color?: string }
+interface CmpExportBlock { head: CmpExportRow; rows: CmpExportRow[]; note?: string }
+interface CmpExportData {
+  labelA: string; labelB: string; countA: number; countB: number; granularity: string;
+  blocks: CmpExportBlock[];
+  expenseFlat: { nature: string; cat: string; sub: string; a: number; b: number }[];
+}
+const cmpDelta = (a: number, b: number) => (a !== 0 ? ((b - a) / Math.abs(a)) * 100 : (b !== 0 ? 100 : 0));
+const cmpGood = (r: { a: number; b: number; tone: "lower" | "higher" | "neutral" }): boolean | null => {
+  const d = cmpDelta(r.a, r.b);
+  return r.tone === "neutral" || d === 0 ? null : r.tone === "lower" ? d < 0 : d > 0;
+};
+const cmpFileTag = (d: CmpExportData) => `${d.labelA}_vs_${d.labelB}`.replace(/[^\w-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+
+async function downloadComparatorPdf(d: CmpExportData) {
+  const [jsPDFModule, autoTableModule] = await Promise.all([
+    import(/* @vite-ignore */ "jspdf"),
+    import(/* @vite-ignore */ "jspdf-autotable"),
+  ]);
+  void autoTableModule;
+  const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
+  const doc: any = makePdfSafe(new jsPDF());
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const M = 14;
+  const NAVY: [number, number, number] = [26, 43, 76], GOLD: [number, number, number] = [201, 162, 39], GREEN: [number, number, number] = [34, 139, 94], RED: [number, number, number] = [193, 84, 63], GREY: [number, number, number] = [110, 118, 128];
+  const val = (n: number, unit: string) => unit === "%" ? `${n.toFixed(1).replace(".", ",")} %` : unit === "j" ? `${n} j` : `${n < 0 ? "-" : ""}${fmtPdf(Math.abs(n))}`;
+  const ecart = (r: CmpExportRow) => { const e = r.b - r.a; return r.unit === "%" ? `${e >= 0 ? "+" : "-"}${Math.abs(e).toFixed(1).replace(".", ",")} pt` : r.unit === "j" ? `${e >= 0 ? "+" : "-"}${Math.abs(e)} j` : `${e >= 0 ? "+" : "-"}${fmtPdf(Math.abs(e))}`; };
+  const evo = (r: CmpExportRow) => { const x = cmpDelta(r.a, r.b); return `${x >= 0 ? "+" : ""}${x.toFixed(0)} %`; };
+
+  doc.setFillColor(...NAVY); doc.rect(0, 0, W, 32, "F");
+  doc.setFillColor(...GOLD); doc.rect(0, 32, W, 1.2, "F");
+  doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(17);
+  doc.text("Comparaison des indicateurs clés", M, 15);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(200, 210, 225);
+  doc.text(`A : ${d.labelA} (${d.countA} tx)   |   B : ${d.labelB} (${d.countB} tx)`, M, 23);
+  doc.text(`Grand Livre - généré le ${dateLabelFull(todayISO())}`, M, 28);
+
+  const body: any[] = [];
+  d.blocks.forEach((b) => {
+    body.push({ r: b.head, head: true });
+    b.rows.forEach((r) => body.push({ r }));
+    if (b.note) body.push({ note: b.note });
+  });
+  (doc as any).autoTable({
+    startY: 40,
+    margin: { left: M, right: M, bottom: 18 },
+    head: [["Indicateur", "A", "B", "Écart", "Évolution"]],
+    body: body.map((x) => x.note
+      ? [{ content: x.note, colSpan: 5, styles: { fontStyle: "italic", textColor: GREY, fontSize: 7.5, cellPadding: { top: 1, bottom: 3, left: 6, right: 2 } } }]
+      : [x.r.label, val(x.r.a, x.r.unit), val(x.r.b, x.r.unit), ecart(x.r), evo(x.r)]),
+    theme: "plain",
+    styles: { font: "helvetica", fontSize: 8.5, cellPadding: 2, textColor: [40, 48, 60], lineColor: [226, 230, 235], lineWidth: 0 },
+    headStyles: { fillColor: NAVY, textColor: 255, fontStyle: "bold", halign: "right" },
+    columnStyles: { 0: { cellWidth: 70, halign: "left" }, 1: { halign: "right" }, 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right", cellWidth: 24 } },
+    rowPageBreak: "avoid",
+    didParseCell: (data: any) => {
+      if (data.section === "head" && data.column.index === 0) data.cell.styles.halign = "left";
+      if (data.section !== "body") return;
+      const x = body[data.row.index];
+      if (!x || x.note) return;
+      const r: CmpExportRow = x.r;
+      if (data.column.index === 0) data.cell.styles.cellPadding = { top: 2, bottom: 2, right: 2, left: 2 + (x.head ? 0 : r.depth * 4) };
+      if (x.head) {
+        data.cell.styles.fontStyle = "bold"; data.cell.styles.fillColor = [236, 240, 246]; data.cell.styles.fontSize = 9;
+      } else if (r.depth >= 2) {
+        data.cell.styles.fontSize = 7.8; data.cell.styles.textColor = [90, 98, 110];
+      }
+      if (data.column.index === 4 || data.column.index === 3) {
+        const g = cmpGood(r);
+        data.cell.styles.textColor = g === null ? GREY : g ? GREEN : RED;
+      }
+    },
+    didDrawCell: (data: any) => {
+      if (data.section !== "body" || data.column.index !== 0) return;
+      const x = body[data.row.index];
+      if (!x || x.note || x.head || !x.r.color) return;
+      const m = /^#?([0-9a-f]{6})$/i.exec(x.r.color);
+      if (!m) return;
+      const n = parseInt(m[1], 16);
+      doc.setFillColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
+      doc.circle(data.cell.x + 2 + x.r.depth * 4 - 2.2, data.cell.y + data.cell.height / 2, 0.9, "F");
+    },
+  });
+  const pages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i); doc.setFontSize(8); doc.setTextColor(...GREY);
+    doc.text(`Page ${i} / ${pages}`, W - M, H - 8, { align: "right" });
+    doc.text("Grand Livre - Comparateur de périodes", M, H - 8);
+  }
+  doc.save(`grand-livre_comparateur_${cmpFileTag(d)}.pdf`);
+}
+
+async function downloadComparatorExcel(d: CmpExportData) {
+  const ExcelMod: any = await import(/* @vite-ignore */ "exceljs");
+  const ExcelJS: any = ExcelMod.Workbook ? ExcelMod : ExcelMod.default;
+  const NAVY = "FF1A2B4C", WHITE = "FFFFFFFF", GREEN = "FF1F8A5B", RED = "FFC1543F", GREY = "FF6E7680", HEAD = "FFECF0F6";
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "Grand Livre"; wb.created = new Date();
+  const banner = (ws: any, title: string, cols: number) => {
+    const last = String.fromCharCode(64 + cols);
+    ws.mergeCells(`A1:${last}1`);
+    const t = ws.getCell("A1"); t.value = `Grand Livre — ${title}`;
+    t.font = { bold: true, size: 14, color: { argb: WHITE } }; t.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; t.alignment = { vertical: "middle", indent: 1 };
+    ws.getRow(1).height = 28;
+    ws.mergeCells(`A2:${last}2`);
+    const s = ws.getCell("A2"); s.value = `A : ${d.labelA} (${d.countA} tx)  ·  B : ${d.labelB} (${d.countB} tx)  ·  Généré le ${dateLabelFull(todayISO())}`;
+    s.font = { italic: true, color: { argb: GREY } };
+  };
+  const headerRow = (row: any) => row.eachCell((c: any) => { c.font = { bold: true, color: { argb: WHITE } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: NAVY } }; c.alignment = { vertical: "middle", horizontal: c.col === 1 ? "left" : "right" }; });
+  const numFmt = (u: string) => (u === "%" ? '0.0"%"' : u === "j" ? '0" j"' : "#,##0;[Red]-#,##0");
+  const evoColor = (r: { a: number; b: number; tone: "lower" | "higher" | "neutral" }) => { const g = cmpGood(r); return g === null ? GREY : g ? GREEN : RED; };
+
+  // Feuille 1 : indicateurs avec tous leurs détails
+  const ws = wb.addWorksheet("Comparaison");
+  banner(ws, "Comparaison des indicateurs clés", 5);
+  ws.columns = [{ width: 44 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 14 }];
+  const h = ws.addRow(["Indicateur", "A", "B", "Écart", "Évolution"]); headerRow(h); h.height = 22;
+  const put = (r: CmpExportRow, head: boolean) => {
+    const e = r.b - r.a;
+    const row = ws.addRow([r.label, r.a, r.b, e, cmpDelta(r.a, r.b) / 100]);
+    row.getCell(1).alignment = { indent: head ? 0 : r.depth };
+    [2, 3, 4].forEach((i) => { row.getCell(i).numFmt = numFmt(r.unit); row.getCell(i).alignment = { horizontal: "right" }; });
+    row.getCell(4).numFmt = r.unit === "%" ? '+0.0" pt";-0.0" pt";0" pt"' : r.unit === "j" ? '+0" j";-0" j";0" j"' : "+#,##0;-#,##0;0";
+    row.getCell(5).numFmt = "+0%;-0%;0%"; row.getCell(5).alignment = { horizontal: "right" };
+    const colr = { argb: evoColor(r) };
+    row.getCell(4).font = { color: colr, bold: head }; row.getCell(5).font = { color: colr, bold: head };
+    if (head) { row.font = { bold: true }; row.eachCell((c: any) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: HEAD } }; }); row.getCell(4).font = { bold: true, color: colr }; row.getCell(5).font = { bold: true, color: colr }; }
+    else if (r.depth >= 2) { row.getCell(1).font = { color: { argb: GREY }, size: 10 }; }
+    return row;
+  };
+  d.blocks.forEach((b) => {
+    put(b.head, true);
+    b.rows.forEach((r) => put(r, false));
+    if (b.note) {
+      const n = ws.addRow([b.note]); ws.mergeCells(`A${n.number}:E${n.number}`);
+      n.getCell(1).font = { italic: true, size: 9, color: { argb: GREY } }; n.getCell(1).alignment = { wrapText: true, indent: 1, vertical: "top" };
+      n.height = Math.max(15, Math.ceil(b.note.length / 95) * 13);
+    }
+  });
+  ws.views = [{ state: "frozen", ySplit: 3 }];
+
+  // Feuille 2 : dépenses à plat (filtrable / tableau croisé dynamique)
+  const w2 = wb.addWorksheet("Dépenses détaillées");
+  banner(w2, "Dépenses par nature, catégorie et sous-catégorie", 7);
+  w2.columns = [{ width: 16 }, { width: 28 }, { width: 28 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 12 }];
+  const h2 = w2.addRow(["Nature", "Catégorie", "Sous-catégorie", "A", "B", "Écart", "Évolution"]); headerRow(h2); h2.height = 22;
+  [1, 2, 3].forEach((i) => { h2.getCell(i).alignment = { horizontal: "left" }; });
+  d.expenseFlat.forEach((r) => {
+    const row = w2.addRow([r.nature, r.cat, r.sub, r.a, r.b, r.b - r.a, cmpDelta(r.a, r.b) / 100]);
+    [4, 5].forEach((i) => { row.getCell(i).numFmt = "#,##0"; });
+    row.getCell(6).numFmt = "+#,##0;-#,##0;0"; row.getCell(7).numFmt = "+0%;-0%;0%";
+    const colr = { argb: evoColor({ a: r.a, b: r.b, tone: r.nature === "Productif" ? "neutral" : "lower" }) };
+    row.getCell(6).font = { color: colr }; row.getCell(7).font = { color: colr };
+  });
+  w2.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3, column: 7 } };
+  w2.views = [{ state: "frozen", ySplit: 3 }];
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `grand-livre_comparateur_${cmpFileTag(d)}.xlsx`; a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function downloadPettySentPdf(d: PettySentPdfData) {
   const [jsPDFModule, autoTableModule] = await Promise.all([
     import(/* @vite-ignore */ "jspdf"),
