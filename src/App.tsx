@@ -2881,10 +2881,20 @@ function generateFinancialProfileSynthesis(rule4321Narr: NarrativeSection[], tau
   return { checks, recommendation };
 }
 
+// Le Conseiller quotidien (seuil du jour, budget de l'en-tête, notes du jour et du mois,
+// charges attendues, dérapages) ignore les transactions marquées « exceptionnelles » —
+// sur demande explicite de l'utilisateur (28/11/2026) : une dépense ponctuelle de
+// 400 000 FCFA ne doit pas écraser le budget du jour ni les scores. Soldes, comptes et
+// bilans, eux, comptent toujours le montant réel.
+function withoutExceptional(tx: Transaction[]): Transaction[] {
+  return tx.some((t) => t.exceptional) ? tx.filter((t) => !t.exceptional) : tx;
+}
+
 // Détecte les dépenses périodiques (loyer, retraite, PEL...) qui reviennent la
 // plupart des mois, souvent en fin de mois, et qui ne sont pas encore passées ce
 // mois-ci — pour que le conseiller les anticipe plutôt que de les ignorer.
 function detectRecurringExpenses(transactions: Transaction[], curMonth: string, dayNum: number, chargeOverrides: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean) {
+  transactions = withoutExceptional(transactions);
   const lookback: string[] = [];
   let mk = prevMonthKey(curMonth);
   for (let i = 0; i < 6; i++) { lookback.push(mk); mk = prevMonthKey(mk); }
@@ -2958,6 +2968,7 @@ function detectRecurringExpenses(transactions: Transaction[], curMonth: string, 
 // dévie nettement de la moyenne des 3 derniers mois — pour nommer concrètement
 // ce qui dérape (ex: "Divertissement · Alcool") plutôt que de rester générique.
 function analyzeSubcategoryDrift(transactions: Transaction[], curMonth: string, dayNum: number, daysInMonth: number, chargeOverrides?: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean = true) {
+  transactions = withoutExceptional(transactions);
   const watched = ["Divertissement", "Cadeaux", "Shopping", "Invitation", "Vêtements", "Abonnements", "Voyage", "Personnel"];
   const lookback: string[] = [];
   let mk = prevMonthKey(curMonth);
@@ -3000,6 +3011,10 @@ function analyzeSubcategoryDrift(transactions: Transaction[], curMonth: string, 
 }
 
 function generateDailyAdvice(transactions: Transaction[], monthlyObjective: number, chargeOverrides?: Record<string, ChargeOverride>, includeGrundfosVoiture: boolean = true) {
+  const exceptionalMonthSpent = transactions
+    .filter((t) => t.exceptional && t.type === "Dépense" && dateToMonthKey(t.date) === dateToMonthKey(todayISO()) && t.date <= todayISO())
+    .reduce((a, t) => a + t.amount, 0);
+  transactions = withoutExceptional(transactions);
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const dayNum = new Date(today + "T00:00:00").getDate();
@@ -3057,6 +3072,9 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     headline = { kind: "conseil", title: "Définis un objectif mensuel pour des conseils plus précis", text: `Sans objectif, je peux seulement observer ta tendance : à ${fmt(avgDailySpend)} FCFA/jour en moyenne depuis le début du mois, tu termines vers ${fmt(projectedEndOfMonth)} FCFA de dépenses ce mois-ci si le rythme se maintient.` };
   }
   insights.push(headline);
+  if (exceptionalMonthSpent > 0) {
+    insights.push({ kind: "conseil", title: "Dépenses exceptionnelles exclues du calcul", text: `${fmt(exceptionalMonthSpent)} FCFA de dépenses marquées « exceptionnelles » ce mois-ci ne sont pas comptés dans le seuil du jour, le rythme ni les comparaisons. Elles restent bien enregistrées dans tes comptes et ton solde.` });
+  }
 
   // Charges périodiques attendues, nommées une par une (loyer, retraite, PEL...).
   if (upcoming.length) {
@@ -3132,13 +3150,14 @@ function generateDailyAdvice(transactions: Transaction[], monthlyObjective: numb
     }
   }
 
-  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, morningThreshold, spentTodayAdvice, remainingBudget, hasObjective, upcomingTotal, upcoming };
+  return { insights, spent, revenu, daysElapsed, daysRemaining, daysInMonth, avgDailySpend, projectedEndOfMonth, dailyThreshold, morningThreshold, spentTodayAdvice, remainingBudget, hasObjective, upcomingTotal, upcoming, exceptionalMonthSpent };
 }
 
 // Note du jour : Excellent / Bon / Moyen / Faible — combine trois signaux concrets :
 // le respect du seuil quotidien, la dépense du jour comparée à l'habitude, et l'absence
 // de dérapage sur une sous-catégorie déjà repérée comme en dérive ce mois-ci.
 function computeDayScore(transactions: Transaction[], monthlyObjective: number) {
+  transactions = withoutExceptional(transactions);
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const dayNum = new Date(today + "T00:00:00").getDate();
@@ -3198,6 +3217,7 @@ function computeDayScore(transactions: Transaction[], monthlyObjective: number) 
 // Note du mois : même logique que la note du jour, mais à l'échelle du mois en cours —
 // rythme de dépense vs objectif, comparaison à la même période le mois dernier, épargne.
 function computeMonthScore(transactions: Transaction[], monthlyObjective: number) {
+  transactions = withoutExceptional(transactions);
   const today = todayISO();
   const curMonth = dateToMonthKey(today);
   const dayNum = new Date(today + "T00:00:00").getDate();
@@ -16882,7 +16902,7 @@ export default function GrandLivre() {
     try {
       const a = generateDailyAdvice(transactions, monthlyObjective, chargeOverrides, includeGrundfosVoiture);
       if (!a.hasObjective || a.dailyThreshold === null || a.morningThreshold === null) return null;
-      const spentToday = transactions.filter((t) => t.type === "Dépense" && t.date === todayISO()).reduce((x, t) => x + t.amount, 0);
+      const spentToday = transactions.filter((t) => t.type === "Dépense" && !t.exceptional && t.date === todayISO()).reduce((x, t) => x + t.amount, 0);
       // Manque éventuel : l'objectif restant ne couvre même pas les charges périodiques encore
       // attendues — c'est ce qui ramène le budget du jour à 0 (le seuil est plafonné à 0).
       const shortfall = Math.max(0, a.upcomingTotal - ((a.remainingBudget as number) ?? 0));
