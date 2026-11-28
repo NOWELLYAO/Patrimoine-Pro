@@ -294,6 +294,11 @@ interface Transaction {
   // Le montant réel reste comptabilisé partout ailleurs (soldes, bilan, etc.) — seule la
   // comparaison de tendance l'ignore.
   exceptional?: boolean;
+  // Dépense GRUNDFOS qui ne relève PAS du Petty Cash : GRUNDFOS la rembourse à part (24/11 puis
+  // 28/11/2026, demande explicite). Elle reste une vraie dépense partout (soldes, comptes,
+  // bilans) mais est ignorée du comparatif « Petty sent vs GRUNDFOS » (réel, écart, solde,
+  // couverture, rapport, PDF).
+  outsidePettyCash?: boolean;
   // Horodatage de la dernière modification — posé automatiquement (via
   // setTransactionsTracked, pas au cas par cas) à chaque création ou édition, quel que
   // soit le point de saisie utilisé. Permet à la fusion de synchronisation de départager
@@ -1645,6 +1650,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
   const [onBehalfOf, setOnBehalfOf] = useState("");
   const [note, setNote] = useState("");
   const [exceptional, setExceptional] = useState(false);
+  const [outsidePC, setOutsidePC] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -1657,6 +1663,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
       setOnBehalfOf(transaction.onBehalfOf || "");
       setNote(transaction.note || "");
       setExceptional(!!transaction.exceptional);
+      setOutsidePC(!!transaction.outsidePettyCash);
       setSaved(false);
     }
   }, [open, transaction]);
@@ -1671,7 +1678,7 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
 
   const submit = () => {
     if (!category || !amount || Number(amount) <= 0) return;
-    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, exceptional: exceptional || undefined });
+    onSave({ ...transaction, date, time, type, category, subcategory: subcategory || undefined, amount: Number(amount), account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, exceptional: exceptional || undefined, outsidePettyCash: (outsidePC && type === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(category)) || undefined });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 700);
   };
@@ -1764,6 +1771,15 @@ function TransactionEditSheet({ open, transaction, transactions, accounts, onClo
                 Exceptionnelle (achat ponctuel, investissement…) — exclue des comparaisons de tendance
               </label>
             </div>
+            {type === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(category) && (
+              <div style={{ marginTop: 10 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                  <input type="checkbox" checked={outsidePC} onChange={(e) => setOutsidePC(e.target.checked)} />
+                  <Wallet size={13} color={COLOR.slateBlueSoft} />
+                  Hors Petty Cash (remboursée à part par GRUNDFOS) — exclue du comparatif Petty sent
+                </label>
+              </div>
+            )}
             <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
               value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
@@ -7095,9 +7111,12 @@ function BusinessTab({ transactions, categoryGroups, categoryScope, setCategoryS
 // perte. Seuls les mois où un montant Petty sent est saisi entrent dans les totaux.
 function computePettySentRows(transactions: Transaction[], pettySent: PettySentMap, fromMk?: string, toMk?: string) {
   const real: Record<string, number> = {};
+  const outside: Record<string, number> = {};
   transactions.forEach((t) => {
     if (t.type !== "Dépense" || !GRUNDFOS_VOITURE_CATEGORIES.includes(t.category)) return;
     const mk = dateToMonthKey(t.date);
+    // Dépense GRUNDFOS « hors Petty Cash » (remboursée à part) : suivie à part, jamais dans le réel.
+    if (t.outsidePettyCash) { outside[mk] = (outside[mk] || 0) + (Number(t.amount) || 0); return; }
     real[mk] = (real[mk] || 0) + (Number(t.amount) || 0);
   });
   const received: Record<string, number> = {};
@@ -7115,6 +7134,7 @@ function computePettySentRows(transactions: Transaction[], pettySent: PettySentM
     const rec = received[mk] || 0;
     return { mk, sent, real: r, received: rec, gap: sent === null ? null : sent - r, net: rec - r };
   }).filter((x) => (!fromMk || monthSortKey(x.mk) >= monthSortKey(fromMk)) && (!toMk || monthSortKey(x.mk) <= monthSortKey(toMk)));
+  const totalOutside = Object.keys(outside).filter((k) => (!fromMk || monthSortKey(k) >= monthSortKey(fromMk)) && (!toMk || monthSortKey(k) <= monthSortKey(toMk))).reduce((a, k) => a + outside[k], 0);
   const filled = rows.filter((x) => x.gap !== null) as { mk: string; sent: number; real: number; received: number; gap: number; net: number }[];
   const totalGap = filled.reduce((a, x) => a + x.gap, 0);
   // Analyses sur TOUS les mois de la période où il y a une activité (reçu ou dépensé), pas
@@ -7125,7 +7145,7 @@ function computePettySentRows(transactions: Transaction[], pettySent: PettySentM
   const worst = active.length ? active.reduce((m, x) => (x.net < m.net ? x : m)) : null;
   const best = active.length ? active.reduce((m, x) => (x.net > m.net ? x : m)) : null;
   return {
-    rows, totalGap, totalReceived, totalRealAll, netAll: totalReceived - totalRealAll,
+    rows, totalGap, totalOutside, totalReceived, totalRealAll, netAll: totalReceived - totalRealAll,
     coverage: totalRealAll > 0 ? (totalReceived / totalRealAll) * 100 : null,
     avgReal: active.length ? totalRealAll / active.length : 0,
     // Moyennes sur la période filtrée : le Petty Cash n'arrive pas chaque mois, donc on donne
@@ -7400,6 +7420,9 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
     if (unfilled.length) {
       addNote("warn", `Mois sans saisie Petty sent (exclus du total « Écart ») : ${unfilled.map((r) => monthLabel(r.mk)).join(", ")}.`);
     }
+    if (calc.totalOutside > 0) {
+      addNote("info", `Dépenses GRUNDFOS hors Petty Cash : ${fmt(calc.totalOutside)} FCFA sur la période, remboursées à part par GRUNDFOS, ne sont pas incluses dans le « GRUNDFOS réel » de ce rapport.`);
+    }
     addNote("info", "Écart = Petty sent − GRUNDFOS réel (positif = gain). Solde = Petty Cash reçu − GRUNDFOS réel. Ce rapport est un comparatif : il n'a aucun impact sur les comptes, soldes ou projections.");
     const pdf: PettySentPdfData = {
       period,
@@ -7454,6 +7477,13 @@ function PettySentPanel({ transactions, pettySent, setPettySent }: {
             hint={`Solde ${signed(calc.best.net)} / ${signed(calc.worst.net)}`} />
         )}
       </div>
+
+      {calc.totalOutside > 0 && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: COLOR.slateBlueSoft, background: "rgba(91,126,166,0.10)", border: `1px solid rgba(91,126,166,0.3)`, borderRadius: 8, padding: "9px 12px", marginBottom: 16 }}>
+          <Wallet size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{fmt(calc.totalOutside)} FCFA de dépenses GRUNDFOS marquées « hors Petty Cash » (remboursées à part par GRUNDFOS) sont exclus de ce comparatif. Elles restent comptées dans tes comptes.</span>
+        </div>
+      )}
 
       {chartData.length > 0 && (
         <div style={{ height: 170, marginBottom: 18 }}>
@@ -14357,6 +14387,9 @@ function JournalTab({ filtered, allCategories, categoryGroups, transactions, set
                           {t.exceptional && (
                             <div style={{ color: COLOR.goldSoft, fontSize: 10, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }}><Sparkles size={9} /> exceptionnelle</div>
                           )}
+                          {t.outsidePettyCash && (
+                            <div style={{ color: COLOR.slateBlueSoft, fontSize: 10, marginTop: 3, display: "flex", alignItems: "center", gap: 3 }} title="Remboursée à part par GRUNDFOS — exclue du comparatif Petty sent"><Wallet size={9} /> hors Petty Cash</div>
+                          )}
                           {t.payee && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, marginTop: 3 }}>{t.payee}</div>}
                           {t.note && <div style={{ fontSize: 10.5, color: COLOR.inkMuted, fontStyle: "italic", marginTop: 2 }}>« {t.note} »</div>}
                         </div>
@@ -15317,6 +15350,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const [quickOnBehalfOf, setQuickOnBehalfOf] = useState("");
   const [quickNote, setQuickNote] = useState("");
   const [quickExceptional, setQuickExceptional] = useState(false);
+  const [quickOutsidePC, setQuickOutsidePC] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -15525,7 +15559,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
   const quickDateEntries = withGroup.filter((t) => t.date === quickDate).sort((a, b) => b.id.localeCompare(a.id));
 
   const resetForm = () => {
-    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null); setQuickOnBehalfOf(""); setQuickExceptional(false);
+    setQuickAmount(""); setQuickTime(nowTime()); setQuickNote(""); setEditingId(null); setQuickOnBehalfOf(""); setQuickExceptional(false); setQuickOutsidePC(false);
   };
 
   const submit = () => {
@@ -15534,10 +15568,10 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     if (editingId) {
       setTransactions(transactions.map((t) => t.id === editingId ? {
         ...t, date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined,
-        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined, exceptional: quickExceptional || undefined,
+        type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined, exceptional: quickExceptional || undefined, outsidePettyCash: (quickOutsidePC && quickType === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(quickCategory)) || undefined,
       } : t));
     } else {
-      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined, exceptional: quickExceptional || undefined }]);
+      setTransactions([...transactions, { id: uid(), date: quickDate, time: quickTime, category: quickCategory, subcategory: quickSubcategory || undefined, type: quickType, amount: Number(quickAmount), account: quickAccount || undefined, onBehalfOf: onBehalfOfVal, note: quickNote || undefined, exceptional: quickExceptional || undefined, outsidePettyCash: (quickOutsidePC && quickType === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(quickCategory)) || undefined }]);
     }
     resetForm();
     setJustAdded(true);
@@ -15556,6 +15590,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
     setQuickOnBehalfOf(t.onBehalfOf || "");
     setQuickNote(t.note || "");
     setQuickExceptional(!!t.exceptional);
+    setQuickOutsidePC(!!t.outsidePettyCash);
   };
 
   const remove = (id: string) => setTransactions(transactions.filter((t) => t.id !== id));
@@ -15709,6 +15744,15 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                     Exceptionnelle (achat ponctuel, investissement…) — exclue des comparaisons de tendance
                   </label>
                 </div>
+                {quickType === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(quickCategory) && (
+                  <div style={{ marginTop: 10 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                      <input type="checkbox" checked={quickOutsidePC} onChange={(e) => setQuickOutsidePC(e.target.checked)} />
+                      <Wallet size={13} color={COLOR.slateBlueSoft} />
+                      Hors Petty Cash (remboursée à part par GRUNDFOS) — exclue du comparatif Petty sent
+                    </label>
+                  </div>
+                )}
                 <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={quickType}
                   value={quickCategory} subvalue={quickSubcategory} onSelect={(c, s) => { setQuickCategory(c); setQuickSubcategory(s); }} />
 
@@ -15742,6 +15786,7 @@ function SaisieQuotidienneTab({ transactions, setTransactions, allCategories, ca
                 {t.time && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLOR.inkMuted, flexShrink: 0 }}>{t.time}</span>}
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor[t.group] || COLOR.inkMuted, display: "inline-block", flexShrink: 0 }} />
                 {t.exceptional && <Sparkles size={11} color={COLOR.goldSoft} style={{ flexShrink: 0 }} />}
+                {t.outsidePettyCash && <Wallet size={11} color={COLOR.slateBlueSoft} style={{ flexShrink: 0 }} />}
                 <span style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                   {t.category}{t.subcategory && ` · ${t.subcategory}`}
                   {t.account && <span style={{ color: COLOR.slateBlueSoft }}> · {t.account}</span>}
@@ -15858,6 +15903,7 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
   const [onBehalfOf, setOnBehalfOf] = useState("");
   const [note, setNote] = useState("");
   const [exceptional, setExceptional] = useState(false);
+  const [outsidePC, setOutsidePC] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
   const [catPickerOpen, setCatPickerOpen] = useState(false);
 
@@ -15894,9 +15940,9 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
     if (!category || !amount || Number(amount) <= 0) return;
     setTransactions([...transactions, {
       id: uid(), date, time, category, subcategory: subcategory || undefined, type, amount: Number(amount),
-      account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, exceptional: exceptional || undefined,
+      account: account || undefined, onBehalfOf: (onBehalfOf && onBehalfOf !== account) ? onBehalfOf : undefined, note: note || undefined, exceptional: exceptional || undefined, outsidePettyCash: (outsidePC && type === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(category)) || undefined,
     }]);
-    setAmount(""); setNote(""); setOnBehalfOf(""); setExceptional(false);
+    setAmount(""); setNote(""); setOnBehalfOf(""); setExceptional(false); setOutsidePC(false);
     setJustAdded(true);
     setTimeout(() => setJustAdded(false), 1000);
   };
@@ -16050,6 +16096,15 @@ function QuickAddFAB({ transactions, setTransactions, accounts, categoryGroups, 
                   Exceptionnelle (achat ponctuel, investissement…) — exclue des comparaisons de tendance
                 </label>
               </div>
+              {type === "Dépense" && GRUNDFOS_VOITURE_CATEGORIES.includes(category) && (
+                <div style={{ marginTop: 10 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: COLOR.inkMuted, cursor: "pointer" }}>
+                    <input type="checkbox" checked={outsidePC} onChange={(e) => setOutsidePC(e.target.checked)} />
+                    <Wallet size={13} color={COLOR.slateBlueSoft} />
+                    Hors Petty Cash (remboursée à part par GRUNDFOS) — exclue du comparatif Petty sent
+                  </label>
+                </div>
+              )}
               <CategoryPickerSheet open={catPickerOpen} onClose={() => setCatPickerOpen(false)} transactions={transactions} type={type}
                 value={category} subvalue={subcategory} onSelect={(c, s) => { setCategory(c); setSubcategory(s); }} />
 
