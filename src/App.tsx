@@ -7615,11 +7615,32 @@ function ActivitiesTab({ transactions, setTransactions, activities, setActivitie
     const s = stats.find((x) => x.act === act);
     if (!s) return null;
     const months = Object.keys(s.byMonth).sort((a, b) => monthSortKey(a) - monthSortKey(b));
-    if (months.length < 3) return null;
     const series = months.map((m) => ({ month: m, value: s.byMonth[m] }));
-    const paragraphs = generateDeepNarrative(series, transactions, (t) => activityFor(t.category) === act, { subject: `la marge de ${act}`, cumulative: false });
-    if (!paragraphs.length) return null;
+    const paragraphs = months.length >= 3
+      ? generateDeepNarrative(series, transactions, (t) => activityFor(t.category) === act, { subject: `la marge de ${act}`, cumulative: false })
+      : [];
     const blocks: CalcDetailBlock[] = paragraphs.map((p) => ({ kind: "note", tone: p.startsWith("🔴") ? "warn" : "info", text: p }));
+    // Pas assez d'historique pour une analyse narrative (< 3 mois) : on explique au moins le
+    // chiffre affiché (d'où vient la marge, mois par mois) au lieu d'un bouton qui ne fait rien
+    // (signalé par l'utilisateur, 28/11/2026, sur l'activité « MAZDA 2 » : 2 mois seulement).
+    if (!paragraphs.length) {
+      blocks.push({ kind: "kv", rows: [
+        { label: "Revenus", value: `${fmt(s.revenus)} FCFA` },
+        { label: "Dépenses", value: `${fmt(s.depenses)} FCFA` },
+        { label: "Marge (revenus − dépenses)", value: `${s.marge >= 0 ? "+" : "−"}${fmt(Math.abs(s.marge))} FCFA`, strong: true, warn: s.marge < 0 },
+        { label: `Mois d'activité`, value: String(months.length) },
+        { label: "Marge mensuelle moyenne", value: `${s.avgMonthly >= 0 ? "+" : "−"}${fmt(Math.abs(s.avgMonthly))} FCFA`, warn: s.avgMonthly < 0 },
+      ] });
+      if (months.length) {
+        blocks.push({ kind: "table", columns: ["Mois", "Marge"], rows: series.map((x) => [monthLabel(x.month), `${x.value >= 0 ? "+" : "−"}${fmt(Math.abs(x.value))}`]),
+          cellColors: series.map((x) => [undefined, x.value >= 0 ? COLOR.emeraldSoft : COLOR.claySoft]) });
+      }
+      const exceptionalDep = transactions.filter((t) => t.type === "Dépense" && t.exceptional && activityFor(t.category) === act
+        && (!periodRange || (monthSortKey(dateToMonthKey(t.date)) >= monthSortKey(periodRange[0]) && monthSortKey(dateToMonthKey(t.date)) <= monthSortKey(periodRange[1]))))
+        .reduce((a, t) => a + t.amount, 0);
+      if (exceptionalDep > 0) blocks.push({ kind: "note", tone: "info", text: `Dont ${fmt(exceptionalDep)} FCFA de dépenses marquées « exceptionnelles » : elles sont bien comptées ici (c'est de l'argent réellement sorti), seules les comparaisons de tendance les ignorent.` });
+      blocks.push({ kind: "note", tone: "info", text: "L'analyse rédigée détaillée (tendances, meilleurs et pires mois) apparaît à partir de 3 mois d'historique pour cette activité." });
+    }
     if (s.capital > 0) {
       blocks.push({ kind: "kv", rows: [
         { label: "Capital investi", value: `${fmt(s.capital)} FCFA` },
