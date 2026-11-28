@@ -5188,7 +5188,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
               <div style={{ width: 136 - depth * 14, color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
                 {hasKids && <ChevronDown size={11} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: COLOR.slateBlueSoft }} />}
                 {r.color && <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.color, flexShrink: 0 }} />}
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
+                <span title={r.label} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
               </div>
               <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.slateBlueSoft }}>{fmtv(r.a)}</div>
               <div style={{ width: 30 }} />
@@ -5259,7 +5259,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
 
   // Définition unique des lignes du tableau : sert à l'affichage ET aux exports PDF / Excel.
   const metricDefs: { label: string; a: number; b: number; lower: boolean; suffix: "FCFA" | "%" | "j"; rows: SubRow[]; note: string }[] = [
-    { label: "Revenus", a: A.revenus, b: B.revenus, lower: false, suffix: "FCFA", rows: topCatRows(A.revCat, B.revCat, "higher"), note: "Principales catégories de revenus. Les revenus n'ont pas de nature (Nécessaire/Productif…), seules les dépenses en ont." },
+    { label: "Revenus", a: A.revenus, b: B.revenus, lower: false, suffix: "FCFA", rows: topCatRows(A.revCat, B.revCat, "higher", 99), note: "Toutes les catégories de revenus de la période, quelle que soit l'activité (Mazda, Mazda 2, GRUNDFOS…). Les revenus n'ont pas de nature (Nécessaire/Productif…), seules les dépenses en ont." },
     { label: "Dépenses", a: A.depenses, b: B.depenses, lower: true, suffix: "FCFA", rows: expenseTreeRows(), note: "Total réel par nature (exceptionnelles incluses). Touche une nature pour voir ses catégories, puis une catégorie pour ses sous-catégories." },
     { label: "Solde", a: A.solde, b: B.solde, lower: false, suffix: "FCFA", note: "Solde = Revenus − Dépenses de chaque nature.", rows: [
       { label: "Revenus", a: A.revenus, b: B.revenus, tone: "higher" },
