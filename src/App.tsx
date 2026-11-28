@@ -5123,10 +5123,16 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     const zeroG = (): Record<Group, number> => ({ "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 });
     const byGroup = zeroG(), byGroupN = zeroG(), byGroupHF = zeroG();
     const revCat: Record<string, number> = {}, nonProdCat: Record<string, number> = {};
+    // Arbre nature → catégorie → sous-catégorie (dépenses uniquement), pour le détail déroulant.
+    const tree: Record<Group, Record<string, { total: number; subs: Record<string, number> }>> = { "Nécessaire": {}, "Productif": {}, "Non-productif": {}, "Non classifié": {} };
     tx.forEach((t) => {
       if (t.type === "Revenu") { revCat[t.category] = (revCat[t.category] || 0) + t.amount; return; }
       if (t.type !== "Dépense") return;
       const g = (t.group as Group) || "Non classifié";
+      const node = (tree[g][t.category] = tree[g][t.category] || { total: 0, subs: {} });
+      node.total += t.amount;
+      const sk = t.subcategory || "Sans sous-catégorie";
+      node.subs[sk] = (node.subs[sk] || 0) + t.amount;
       byGroup[g] += t.amount;
       if (!t.exceptional) { byGroupN[g] += t.amount; if (!isListedFixed(t)) byGroupHF[g] += t.amount; }
       if (g === "Non-productif") nonProdCat[t.category] = (nonProdCat[t.category] || 0) + t.amount;
@@ -5140,7 +5146,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     // Rythmes / jour hors transactions "exceptionnelles" (19/11/2026) ; les totaux restent réels.
     const depNormal = tx.filter((t) => t.type === "Dépense" && !t.exceptional).reduce((a, t) => a + t.amount, 0);
     const depHorsFixes = tx.filter((t) => t.type === "Dépense" && !t.exceptional && !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
-    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, byGroup, byGroupN, byGroupHF, revCat, nonProdCat, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
+    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, byGroup, byGroupN, byGroupHF, revCat, nonProdCat, tree, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
   };
 
   const A = useMemo(() => statsFor(granularity === "jour" ? aFromDay : aFrom, granularity === "jour" ? aToDay : aTo), [withGroup, aFrom, aTo, aFromDay, aToDay, granularity]);
@@ -5164,29 +5170,54 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
 
   // Détail déroulant par ligne : sous-lignes {libellé, A, B, sens} + éventuelle note.
   const [openMetrics, setOpenMetrics] = useState<Record<string, boolean>>({});
-  type SubRow = { label: string; a: number; b: number; tone: "lower" | "higher" | "neutral"; color?: string; pct?: boolean };
-  const detailBlock = (rows: SubRow[], note?: string) => (
-    <div style={{ padding: "4px 0 10px 14px", borderBottom: `1px solid ${COLOR.hairline}`, background: "rgba(255,255,255,0.02)" }}>
-      {rows.map((r) => {
+  type SubRow = { label: string; a: number; b: number; tone: "lower" | "higher" | "neutral"; color?: string; pct?: boolean; children?: SubRow[] };
+  const detailBlock = (rows: SubRow[], note?: string, scope = "") => {
+    const renderRows = (list: SubRow[], depth: number, path: string): React.ReactNode =>
+      list.map((r) => {
         const d = pctDelta(r.a, r.b);
         const good = r.tone === "neutral" || d === 0 ? null : r.tone === "lower" ? d < 0 : d > 0;
         const fmtv = (n: number) => (r.pct ? `${n.toFixed(1)}%` : `${n < 0 ? "−" : ""}${fmt(Math.abs(n))}`);
+        const key = `${path}>${r.label}`;
+        const hasKids = !!r.children && r.children.length > 0;
+        const open = hasKids && !!openMetrics[key];
         return (
-          <div key={r.label} style={{ display: "flex", alignItems: "center", padding: "5px 0", fontSize: 11.5 }}>
-            <div style={{ width: 136, color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              {r.color && <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.color, flexShrink: 0 }} />}
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
+          <React.Fragment key={key}>
+            <div
+              onClick={hasKids ? (e) => { e.stopPropagation(); setOpenMetrics((m) => ({ ...m, [key]: !m[key] })); } : undefined}
+              style={{ display: "flex", alignItems: "center", padding: "5px 0", paddingLeft: depth * 14, fontSize: depth > 0 ? 11 : 11.5, cursor: hasKids ? "pointer" : "default", opacity: depth > 1 ? 0.9 : 1 }}>
+              <div style={{ width: 136 - depth * 14, color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                {hasKids && <ChevronDown size={11} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: COLOR.slateBlueSoft }} />}
+                {r.color && <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.color, flexShrink: 0 }} />}
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
+              </div>
+              <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.slateBlueSoft }}>{fmtv(r.a)}</div>
+              <div style={{ width: 30 }} />
+              <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft }}>{fmtv(r.b)}</div>
+              <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: good === null ? COLOR.inkMuted : good ? COLOR.emeraldSoft : COLOR.claySoft }}>{d >= 0 ? "+" : ""}{d.toFixed(0)}%</div>
             </div>
-            <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.slateBlueSoft }}>{fmtv(r.a)}</div>
-            <div style={{ width: 30 }} />
-            <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft }}>{fmtv(r.b)}</div>
-            <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: good === null ? COLOR.inkMuted : good ? COLOR.emeraldSoft : COLOR.claySoft }}>{d >= 0 ? "+" : ""}{d.toFixed(0)}%</div>
-          </div>
+            {open && renderRows(r.children!, depth + 1, key)}
+          </React.Fragment>
         );
-      })}
-      {note && <div style={{ fontSize: 11, color: COLOR.inkMuted, fontStyle: "italic", paddingTop: 4, paddingRight: 8 }}>{note}</div>}
-    </div>
-  );
+      });
+    return (
+      <div style={{ padding: "4px 0 10px 14px", borderBottom: `1px solid ${COLOR.hairline}`, background: "rgba(255,255,255,0.02)" }}>
+        {renderRows(rows, 0, scope)}
+        {note && <div style={{ fontSize: 11, color: COLOR.inkMuted, fontStyle: "italic", paddingTop: 4, paddingRight: 8 }}>{note}</div>}
+      </div>
+    );
+  };
+  // Nature → catégories → sous-catégories (dépenses réelles, exceptionnelles incluses).
+  const sortKids = (rows: SubRow[]) => rows.sort((x, y) => Math.max(y.a, y.b) - Math.max(x.a, x.b));
+  const expenseTreeRows = (): SubRow[] =>
+    GROUPS.map((g) => {
+      const cats = Array.from(new Set([...Object.keys(A.tree[g]), ...Object.keys(B.tree[g])]));
+      const children = sortKids(cats.map((c) => {
+        const subs = Array.from(new Set([...Object.keys(A.tree[g][c]?.subs || {}), ...Object.keys(B.tree[g][c]?.subs || {})]));
+        const subRows = sortKids(subs.map((sk) => ({ label: sk, a: A.tree[g][c]?.subs[sk] || 0, b: B.tree[g][c]?.subs[sk] || 0, tone: groupTone(g) })));
+        return { label: c, a: A.tree[g][c]?.total || 0, b: B.tree[g][c]?.total || 0, tone: groupTone(g), children: subRows.length > 1 || (subRows[0] && subRows[0].label !== "Sans sous-catégorie") ? subRows : undefined } as SubRow;
+      }));
+      return { label: g, a: A.byGroup[g], b: B.byGroup[g], tone: groupTone(g), color: groupColor[g], children } as SubRow;
+    }).filter((r) => r.a !== 0 || r.b !== 0);
   const groupTone = (g: Group): "lower" | "neutral" => (g === "Productif" ? "neutral" : "lower");
   const groupRows = (pick: (x: typeof A) => Record<Group, number>, perDay = false): SubRow[] =>
     GROUPS.map((g) => ({ label: g, a: pick(A)[g], b: pick(B)[g], tone: groupTone(g), color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0)
@@ -5297,7 +5328,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
           <div style={{ width: 90, textAlign: "right" }}>Évolution</div>
         </div>
         {metricRow("Revenus", A.revenus, B.revenus, false, "FCFA", detailBlock(topCatRows(A.revCat, B.revCat, "higher"), "Principales catégories de revenus. Les revenus n'ont pas de nature (Nécessaire/Productif…), seules les dépenses en ont."))}
-        {metricRow("Dépenses", A.depenses, B.depenses, true, "FCFA", detailBlock(groupRows((x) => x.byGroup), "Total réel par nature (exceptionnelles incluses)."))}
+        {metricRow("Dépenses", A.depenses, B.depenses, true, "FCFA", detailBlock(expenseTreeRows(), "Total réel par nature (exceptionnelles incluses). Touche une nature pour voir ses catégories, puis une catégorie pour ses sous-catégories.", "dep"))}
         {metricRow("Solde", A.solde, B.solde, false, "FCFA", detailBlock([
           { label: "Revenus", a: A.revenus, b: B.revenus, tone: "higher" },
           ...GROUPS.map((g) => ({ label: `− ${g}`, a: -A.byGroup[g], b: -B.byGroup[g], tone: (g === "Productif" ? "neutral" : "higher") as "neutral" | "higher", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
