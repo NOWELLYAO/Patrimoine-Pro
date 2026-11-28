@@ -5118,6 +5118,19 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     const tauxEpargne = revenus > 0 ? (solde / revenus) * 100 : 0;
     const byCat: Record<string, number> = {};
     tx.filter((t) => t.type === "Dépense").forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+    // Ventilation par nature (Nécessaire / Productif / Non-productif / Non classifié), pour le
+    // détail déroulant de chaque ligne du tableau (demande de l'utilisateur, 28/11/2026).
+    const zeroG = (): Record<Group, number> => ({ "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 });
+    const byGroup = zeroG(), byGroupN = zeroG(), byGroupHF = zeroG();
+    const revCat: Record<string, number> = {}, nonProdCat: Record<string, number> = {};
+    tx.forEach((t) => {
+      if (t.type === "Revenu") { revCat[t.category] = (revCat[t.category] || 0) + t.amount; return; }
+      if (t.type !== "Dépense") return;
+      const g = (t.group as Group) || "Non classifié";
+      byGroup[g] += t.amount;
+      if (!t.exceptional) { byGroupN[g] += t.amount; if (!isListedFixed(t)) byGroupHF[g] += t.amount; }
+      if (g === "Non-productif") nonProdCat[t.category] = (nonProdCat[t.category] || 0) + t.amount;
+    });
     // Rythme par jour : nombre de jours de la période (mois en cours = jours écoulés seulement).
     const curMk = dateToMonthKey(todayISO());
     const todayDay = new Date(todayISO() + "T00:00:00").getDate();
@@ -5127,7 +5140,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     // Rythmes / jour hors transactions "exceptionnelles" (19/11/2026) ; les totaux restent réels.
     const depNormal = tx.filter((t) => t.type === "Dépense" && !t.exceptional).reduce((a, t) => a + t.amount, 0);
     const depHorsFixes = tx.filter((t) => t.type === "Dépense" && !t.exceptional && !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
-    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
+    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, byGroup, byGroupN, byGroupHF, revCat, nonProdCat, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
   };
 
   const A = useMemo(() => statsFor(granularity === "jour" ? aFromDay : aFrom, granularity === "jour" ? aToDay : aTo), [withGroup, aFrom, aTo, aFromDay, aToDay, granularity]);
@@ -5149,12 +5162,51 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     .sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta))
     .slice(0, 15);
 
-  const metricRow = (label: string, a: number, b: number, lowerIsBetter: boolean, suffix = "FCFA") => {
+  // Détail déroulant par ligne : sous-lignes {libellé, A, B, sens} + éventuelle note.
+  const [openMetrics, setOpenMetrics] = useState<Record<string, boolean>>({});
+  type SubRow = { label: string; a: number; b: number; tone: "lower" | "higher" | "neutral"; color?: string; pct?: boolean };
+  const detailBlock = (rows: SubRow[], note?: string) => (
+    <div style={{ padding: "4px 0 10px 14px", borderBottom: `1px solid ${COLOR.hairline}`, background: "rgba(255,255,255,0.02)" }}>
+      {rows.map((r) => {
+        const d = pctDelta(r.a, r.b);
+        const good = r.tone === "neutral" || d === 0 ? null : r.tone === "lower" ? d < 0 : d > 0;
+        const fmtv = (n: number) => (r.pct ? `${n.toFixed(1)}%` : `${n < 0 ? "−" : ""}${fmt(Math.abs(n))}`);
+        return (
+          <div key={r.label} style={{ display: "flex", alignItems: "center", padding: "5px 0", fontSize: 11.5 }}>
+            <div style={{ width: 136, color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+              {r.color && <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.color, flexShrink: 0 }} />}
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
+            </div>
+            <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.slateBlueSoft }}>{fmtv(r.a)}</div>
+            <div style={{ width: 30 }} />
+            <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: COLOR.goldSoft }}>{fmtv(r.b)}</div>
+            <div style={{ width: 90, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: good === null ? COLOR.inkMuted : good ? COLOR.emeraldSoft : COLOR.claySoft }}>{d >= 0 ? "+" : ""}{d.toFixed(0)}%</div>
+          </div>
+        );
+      })}
+      {note && <div style={{ fontSize: 11, color: COLOR.inkMuted, fontStyle: "italic", paddingTop: 4, paddingRight: 8 }}>{note}</div>}
+    </div>
+  );
+  const groupTone = (g: Group): "lower" | "neutral" => (g === "Productif" ? "neutral" : "lower");
+  const groupRows = (pick: (x: typeof A) => Record<Group, number>, perDay = false): SubRow[] =>
+    GROUPS.map((g) => ({ label: g, a: pick(A)[g], b: pick(B)[g], tone: groupTone(g), color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0)
+      .map((r) => (perDay ? { ...r } : r));
+  const topCatRows = (a: Record<string, number>, b: Record<string, number>, tone: "lower" | "higher", n = 6): SubRow[] =>
+    Array.from(new Set([...Object.keys(a), ...Object.keys(b)]))
+      .map((c) => ({ label: c, a: a[c] || 0, b: b[c] || 0, tone }))
+      .sort((x, y) => Math.max(y.a, y.b) - Math.max(x.a, x.b)).slice(0, n);
+  const metricRow = (label: string, a: number, b: number, lowerIsBetter: boolean, suffix = "FCFA", detail?: React.ReactNode) => {
     const d = pctDelta(a, b);
     const good = d === 0 ? null : lowerIsBetter ? d < 0 : d > 0;
+    const isOpen = !!openMetrics[label];
     return (
-      <div style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: `1px solid ${COLOR.hairline}` }}>
-        <div style={{ width: 150, fontSize: 12.5, color: COLOR.inkMuted }}>{label}</div>
+      <React.Fragment key={label}>
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: isOpen ? "none" : `1px solid ${COLOR.hairline}`, cursor: detail ? "pointer" : "default" }}
+        onClick={detail ? () => setOpenMetrics((m) => ({ ...m, [label]: !m[label] })) : undefined}>
+        <div style={{ width: 150, fontSize: 12.5, color: COLOR.inkMuted, display: "flex", alignItems: "center", gap: 4 }}>
+          {detail && <ChevronDown size={13} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: COLOR.slateBlueSoft }} />}
+          <span>{label}</span>
+        </div>
         <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.slateBlueSoft }}>{suffix === "%" ? a.toFixed(1) + "%" : suffix === "j" ? `${a} j` : fmt(a)}</div>
         <div style={{ width: 30, textAlign: "center", color: COLOR.inkMuted }}>→</div>
         <div style={{ flex: 1, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: COLOR.goldSoft }}>{suffix === "%" ? b.toFixed(1) + "%" : suffix === "j" ? `${b} j` : fmt(b)}</div>
@@ -5162,6 +5214,8 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
           {d >= 0 ? "+" : ""}{d.toFixed(0)}%
         </div>
       </div>
+      {detail && isOpen && detail}
+      </React.Fragment>
     );
   };
 
@@ -5242,14 +5296,24 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
           <div style={{ flex: 1, textAlign: "right" }}>B</div>
           <div style={{ width: 90, textAlign: "right" }}>Évolution</div>
         </div>
-        {metricRow("Revenus", A.revenus, B.revenus, false)}
-        {metricRow("Dépenses", A.depenses, B.depenses, true)}
-        {metricRow("Solde", A.solde, B.solde, false)}
-        {metricRow("Taux d'épargne", A.tauxEpargne, B.tauxEpargne, false, "%")}
-        {metricRow("Non-productif", A.nonProd, B.nonProd, true)}
-        {metricRow("Jours comptés", A.days, B.days, false, "j")}
-        {metricRow("Rythme de dépenses / jour", A.rythme, B.rythme, true)}
-        {metricRow("Rythme hors charges fixes / jour", A.rythmeHorsFixes, B.rythmeHorsFixes, true)}
+        {metricRow("Revenus", A.revenus, B.revenus, false, "FCFA", detailBlock(topCatRows(A.revCat, B.revCat, "higher"), "Principales catégories de revenus. Les revenus n'ont pas de nature (Nécessaire/Productif…), seules les dépenses en ont."))}
+        {metricRow("Dépenses", A.depenses, B.depenses, true, "FCFA", detailBlock(groupRows((x) => x.byGroup), "Total réel par nature (exceptionnelles incluses)."))}
+        {metricRow("Solde", A.solde, B.solde, false, "FCFA", detailBlock([
+          { label: "Revenus", a: A.revenus, b: B.revenus, tone: "higher" },
+          ...GROUPS.map((g) => ({ label: `− ${g}`, a: -A.byGroup[g], b: -B.byGroup[g], tone: (g === "Productif" ? "neutral" : "higher") as "neutral" | "higher", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
+        ], "Solde = Revenus − Dépenses de chaque nature."))}
+        {metricRow("Taux d'épargne", A.tauxEpargne, B.tauxEpargne, false, "%", detailBlock([
+          ...GROUPS.map((g) => ({ label: `${g} (% revenus)`, a: A.revenus > 0 ? (A.byGroup[g] / A.revenus) * 100 : 0, b: B.revenus > 0 ? (B.byGroup[g] / B.revenus) * 100 : 0, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g], pct: true })).filter((r) => r.a !== 0 || r.b !== 0),
+          { label: "Épargne (reste)", a: A.tauxEpargne, b: B.tauxEpargne, tone: "higher" as const, pct: true },
+        ], "Part des revenus absorbée par chaque nature ; l'épargne est ce qui reste."))}
+        {metricRow("Non-productif", A.nonProd, B.nonProd, true, "FCFA", detailBlock(topCatRows(A.nonProdCat, B.nonProdCat, "lower", 8), "Catégories qui composent les dépenses Non-productives."))}
+        {metricRow("Jours comptés", A.days, B.days, false, "j", detailBlock([], `Le mois en cours est compté jusqu'à aujourd'hui, les mois passés en jours calendaires entiers. A : ${labelA} = ${A.days} j · B : ${labelB} = ${B.days} j. Les rythmes par jour divisent par ces nombres.`))}
+        {metricRow("Rythme de dépenses / jour", A.rythme, B.rythme, true, "FCFA", detailBlock(
+          GROUPS.map((g) => ({ label: g, a: A.byGroupN[g] / A.days, b: B.byGroupN[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
+          "Par jour et par nature, hors transactions exceptionnelles."))}
+        {metricRow("Rythme hors charges fixes / jour", A.rythmeHorsFixes, B.rythmeHorsFixes, true, "FCFA", detailBlock(
+          GROUPS.map((g) => ({ label: g, a: A.byGroupHF[g] / A.days, b: B.byGroupHF[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0),
+          "Par jour et par nature, hors exceptionnelles et hors charges fixes de ta liste."))}
       </Panel>
 
       <Panel title="Rythme de chaque mois" subtitle="Dépenses par jour sur les 12 derniers mois — total, et hors charges fixes de ta liste (loyer, Maman, Nesher…)"
