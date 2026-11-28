@@ -5123,12 +5123,19 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     const zeroG = (): Record<Group, number> => ({ "Nécessaire": 0, "Productif": 0, "Non-productif": 0, "Non classifié": 0 });
     const byGroup = zeroG(), byGroupN = zeroG(), byGroupHF = zeroG();
     const revCat: Record<string, number> = {}, nonProdCat: Record<string, number> = {};
+    // Projets = dépenses exceptionnelles OU achats d'actifs (Achat…, Payement maison) : sert à calculer
+    // la capacité d'épargne « hors projets » du rapport d'analyse.
+    let exceptionnel = 0, achatsActifs = 0, projets = 0;
     // Arbre nature → catégorie → sous-catégorie (dépenses uniquement), pour le détail déroulant.
     const tree: Record<Group, Record<string, { total: number; subs: Record<string, number> }>> = { "Nécessaire": {}, "Productif": {}, "Non-productif": {}, "Non classifié": {} };
     tx.forEach((t) => {
       if (t.type === "Revenu") { revCat[t.category] = (revCat[t.category] || 0) + t.amount; return; }
       if (t.type !== "Dépense") return;
       const g = (t.group as Group) || "Non classifié";
+      const isAsset = CMP_ASSET_RE.test(t.category || "");
+      if (t.exceptional) exceptionnel += t.amount;
+      if (isAsset) achatsActifs += t.amount;
+      if (t.exceptional || isAsset) projets += t.amount;
       const node = (tree[g][t.category] = tree[g][t.category] || { total: 0, subs: {} });
       node.total += t.amount;
       const sk = t.subcategory || "Sans sous-catégorie";
@@ -5146,7 +5153,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
     // Rythmes / jour hors transactions "exceptionnelles" (19/11/2026) ; les totaux restent réels.
     const depNormal = tx.filter((t) => t.type === "Dépense" && !t.exceptional).reduce((a, t) => a + t.amount, 0);
     const depHorsFixes = tx.filter((t) => t.type === "Dépense" && !t.exceptional && !isListedFixed(t)).reduce((a, t) => a + t.amount, 0);
-    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, byGroup, byGroupN, byGroupHF, revCat, nonProdCat, tree, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
+    return { revenus, depenses, solde, tauxEpargne, nonProd, byCat, byGroup, byGroupN, byGroupHF, revCat, nonProdCat, tree, exceptionnel, achatsActifs, projets, count: tx.length, days, rythme: depNormal / days, rythmeHorsFixes: depHorsFixes / days };
   };
 
   const A = useMemo(() => statsFor(granularity === "jour" ? aFromDay : aFrom, granularity === "jour" ? aToDay : aTo), [withGroup, aFrom, aTo, aFromDay, aToDay, granularity]);
@@ -5251,10 +5258,10 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
   };
 
   const labelA = granularity === "jour"
-    ? `${dateLabelShort(aFromDay)}${aFromDay !== aToDay ? " — " + dateLabelShort(aToDay) : ""}`
+    ? `${dateLabelFull(aFromDay)}${aFromDay !== aToDay ? " — " + dateLabelFull(aToDay) : ""}`
     : `${monthLabel(aFrom)}${aFrom !== aTo ? " — " + monthLabel(aTo) : ""}`;
   const labelB = granularity === "jour"
-    ? `${dateLabelShort(bFromDay)}${bFromDay !== bToDay ? " — " + dateLabelShort(bToDay) : ""}`
+    ? `${dateLabelFull(bFromDay)}${bFromDay !== bToDay ? " — " + dateLabelFull(bToDay) : ""}`
     : `${monthLabel(bFrom)}${bFrom !== bTo ? " — " + monthLabel(bTo) : ""}`;
 
   // Définition unique des lignes du tableau : sert à l'affichage ET aux exports PDF / Excel.
@@ -5277,7 +5284,7 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
       rows: GROUPS.map((g) => ({ label: g, a: A.byGroupHF[g] / A.days, b: B.byGroupHF[g] / B.days, tone: groupTone(g) as "lower" | "neutral", color: groupColor[g] })).filter((r) => r.a !== 0 || r.b !== 0) },
   ];
 
-  const [cmpExport, setCmpExport] = useState<"idle" | "pdf" | "xlsx" | "error">("idle");
+  const [cmpExport, setCmpExport] = useState<"idle" | "pdf" | "xlsx" | "report" | "error">("idle");
   const buildExport = (): CmpExportData => {
     const flat = (rows: SubRow[], depth: number, unit: "FCFA" | "%"): CmpExportRow[] =>
       rows.flatMap((r) => [{ depth, label: r.label, a: r.a, b: r.b, unit: r.pct ? "%" : unit, tone: r.tone, color: r.color } as CmpExportRow, ...(r.children ? flat(r.children, depth + 1, unit) : [])]);
@@ -5300,11 +5307,14 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
       expenseFlat: expenseFlat.filter((r) => r.a !== 0 || r.b !== 0),
     };
   };
-  const runCmpExport = async (kind: "pdf" | "xlsx") => {
+  const runCmpExport = async (kind: "pdf" | "xlsx" | "report") => {
     setCmpExport(kind);
     try {
-      const data = buildExport();
-      if (kind === "pdf") await downloadComparatorPdf(data); else await downloadComparatorExcel(data);
+      if (kind === "report") await downloadComparatorReportPdf(buildComparatorAnalysis(A as CmpStatsLite, B as CmpStatsLite, labelA, labelB), labelA, labelB, A.count, B.count);
+      else {
+        const data = buildExport();
+        if (kind === "pdf") await downloadComparatorPdf(data); else await downloadComparatorExcel(data);
+      }
       setCmpExport("idle");
     } catch (e) { console.error(e); setCmpExport("error"); }
   };
@@ -5375,10 +5385,13 @@ function ComparateurTab({ transactions, categoryGroups, allMonths }: {
       <Panel title="Comparaison des indicateurs clés" subtitle={`A : ${labelA} (${A.count} tx)  ·  B : ${labelB} (${B.count} tx)`}
         right={
           <div className="gl-noprint" style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => runCmpExport("xlsx")} disabled={cmpExport === "xlsx" || cmpExport === "pdf"} title="Exporter en Excel" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => runCmpExport("report")} disabled={cmpExport === "xlsx" || cmpExport === "pdf" || cmpExport === "report"} title="Rapport d'analyse en PDF (synthèse, points positifs, à surveiller, conseils)" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(74,123,208,0.14)", border: `1px solid ${COLOR.slateBlue}`, borderRadius: 8, color: COLOR.slateBlueSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+              {cmpExport === "report" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={13} />} Rapport
+            </button>
+            <button onClick={() => runCmpExport("xlsx")} disabled={cmpExport === "xlsx" || cmpExport === "pdf" || cmpExport === "report"} title="Exporter en Excel" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(63,156,122,0.14)", border: `1px solid ${COLOR.emerald}`, borderRadius: 8, color: COLOR.emeraldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
               {cmpExport === "xlsx" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileSpreadsheet size={13} />} Excel
             </button>
-            <button onClick={() => runCmpExport("pdf")} disabled={cmpExport === "xlsx" || cmpExport === "pdf"} title="Exporter en PDF" style={{ display: "flex", alignItems: "center", gap: 6, background: cmpExport === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${cmpExport === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8, color: cmpExport === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+            <button onClick={() => runCmpExport("pdf")} disabled={cmpExport === "xlsx" || cmpExport === "pdf" || cmpExport === "report"} title="Exporter en PDF" style={{ display: "flex", alignItems: "center", gap: 6, background: cmpExport === "error" ? "rgba(193,84,63,0.14)" : "rgba(201,162,39,0.14)", border: `1px solid ${cmpExport === "error" ? COLOR.clay : COLOR.gold}`, borderRadius: 8, color: cmpExport === "error" ? COLOR.claySoft : COLOR.goldSoft, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
               {cmpExport === "pdf" ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <FileText size={13} />}
               {cmpExport === "error" ? "Réessayer" : "PDF"}
             </button>
@@ -7329,6 +7342,192 @@ const cmpGood = (r: { a: number; b: number; tone: "lower" | "higher" | "neutral"
   return r.tone === "neutral" || d === 0 ? null : r.tone === "lower" ? d < 0 : d > 0;
 };
 const cmpFileTag = (d: CmpExportData) => `${d.labelA}_vs_${d.labelB}`.replace(/[^\w-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+
+// ───────── Rapport d'analyse automatique du comparateur (PDF) ─────────
+const CMP_ASSET_RE = /^(achat|pay(e)?ment maison|paiement maison)/i;
+interface CmpStatsLite {
+  revenus: number; depenses: number; solde: number; tauxEpargne: number; days: number; count: number; rythme: number;
+  byGroup: Record<Group, number>; byGroupN: Record<Group, number>; byCat: Record<string, number>; revCat: Record<string, number>;
+  tree: Record<Group, Record<string, { total: number; subs: Record<string, number> }>>;
+  exceptionnel: number; achatsActifs: number; projets: number;
+}
+interface CmpAnalysisSection { heading: string; tone: "info" | "good" | "warn" | "advice"; items: string[] }
+interface CmpAnalysis {
+  verdict: string;
+  kpis: { label: string; a: string; b: string; delta: string; good: boolean | null }[];
+  sections: CmpAnalysisSection[];
+}
+function buildComparatorAnalysis(A: CmpStatsLite, B: CmpStatsLite, labelA: string, labelB: string): CmpAnalysis {
+  const fm = (n: number) => `${n < 0 ? "-" : ""}${fmtPdf(Math.abs(n))}`;
+  const sg = (n: number) => `${n >= 0 ? "+" : "-"}${fmtPdf(Math.abs(n))}`;
+  const sh = (n: number) => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(2).replace(".", ",")} M` : fm(n));
+  const pc = (n: number) => `${n.toFixed(1).replace(".", ",")} %`;
+  const pd = (a: number, b: number) => { const d = cmpDelta(a, b); return `${d >= 0 ? "+" : ""}${d.toFixed(0)} %`; };
+  const mA = Math.max(1, A.days / 30.4), mB = Math.max(1, B.days / 30.4);
+  const capA = A.solde + A.projets, capB = B.solde + B.projets;
+  const capPctA = A.revenus > 0 ? (capA / A.revenus) * 100 : 0, capPctB = B.revenus > 0 ? (capB / B.revenus) * 100 : 0;
+
+  const verdict = `Entre ${labelA} (A) et ${labelB} (B), ton solde passe de ${sh(A.solde)} à ${sh(B.solde)} FCFA (${sg(B.solde - A.solde)}). `
+    + `Hors projets (dépenses exceptionnelles et achats d'actifs), ta capacité d'épargne est de ${sh(capA)} en A (${pc(capPctA)} des revenus) et ${sh(capB)} en B (${pc(capPctB)}), soit environ ${sh(capB / mB)} par mois en B.`;
+
+  const kpis: CmpAnalysis["kpis"] = [
+    { label: "REVENUS", a: sh(A.revenus), b: sh(B.revenus), delta: pd(A.revenus, B.revenus), good: B.revenus === A.revenus ? null : B.revenus > A.revenus },
+    { label: "DÉPENSES", a: sh(A.depenses), b: sh(B.depenses), delta: pd(A.depenses, B.depenses), good: B.depenses === A.depenses ? null : B.depenses < A.depenses },
+    { label: "SOLDE", a: sh(A.solde), b: sh(B.solde), delta: sg(B.solde - A.solde), good: B.solde === A.solde ? null : B.solde > A.solde },
+    { label: "TAUX D'ÉPARGNE", a: pc(A.tauxEpargne), b: pc(B.tauxEpargne), delta: `${(B.tauxEpargne - A.tauxEpargne >= 0 ? "+" : "-")}${Math.abs(B.tauxEpargne - A.tauxEpargne).toFixed(1).replace(".", ",")} pt`, good: B.tauxEpargne === A.tauxEpargne ? null : B.tauxEpargne > A.tauxEpargne },
+    { label: "CAPACITÉ HORS PROJETS", a: sh(capA), b: sh(capB), delta: pd(capA, capB), good: Math.abs(cmpDelta(capA, capB)) < 1 ? null : capB > capA },
+    { label: "DÉPENSES / JOUR", a: fm(A.rythme), b: fm(B.rythme), delta: pd(A.rythme, B.rythme), good: B.rythme === A.rythme ? null : B.rythme < A.rythme },
+  ];
+
+  const sections: CmpAnalysisSection[] = [];
+
+  // 1) Pourquoi le solde varie
+  const why: string[] = [];
+  why.push(`Revenus : ${sh(A.revenus)} -> ${sh(B.revenus)} (${sg(B.revenus - A.revenus)}, ${pd(A.revenus, B.revenus)}). Dépenses : ${sh(A.depenses)} -> ${sh(B.depenses)} (${sg(B.depenses - A.depenses)}, ${pd(A.depenses, B.depenses)}).`);
+  const revKeys = Array.from(new Set([...Object.keys(A.revCat), ...Object.keys(B.revCat)]));
+  revKeys.map((c) => ({ c, a: A.revCat[c] || 0, b: B.revCat[c] || 0 })).sort((x, y) => Math.abs(y.b - y.a) - Math.abs(x.b - x.a)).slice(0, 4).filter((r) => Math.abs(r.b - r.a) > 0)
+    .forEach((r) => why.push(`Revenu « ${r.c} » : ${fm(r.a)} -> ${fm(r.b)} (${sg(r.b - r.a)})${r.b === 0 ? " - n'apparaît plus" : r.a === 0 ? " - nouveau" : ""}.`));
+  const depKeys = Array.from(new Set([...Object.keys(A.byCat), ...Object.keys(B.byCat)]));
+  depKeys.map((c) => ({ c, a: A.byCat[c] || 0, b: B.byCat[c] || 0 })).sort((x, y) => Math.abs(y.b - y.a) - Math.abs(x.b - x.a)).slice(0, 4).filter((r) => Math.abs(r.b - r.a) > 0)
+    .forEach((r) => why.push(`Dépense « ${r.c} » : ${fm(r.a)} -> ${fm(r.b)} (${sg(r.b - r.a)})${r.b === 0 ? " - n'apparaît plus" : r.a === 0 ? " - nouvelle" : ""}.`));
+  if (A.exceptionnel > 0 || B.exceptionnel > 0) why.push(`Dépenses marquées exceptionnelles : ${fm(A.exceptionnel)} -> ${fm(B.exceptionnel)} (${sg(B.exceptionnel - A.exceptionnel)}).`);
+  if (A.achatsActifs > 0 || B.achatsActifs > 0) why.push(`Achats d'actifs (Achat..., Payement maison) : ${fm(A.achatsActifs)} -> ${fm(B.achatsActifs)} (${sg(B.achatsActifs - A.achatsActifs)}).`);
+  sections.push({ heading: "Pourquoi ton solde varie", tone: "info", items: why });
+
+  // 2) Capacité d'épargne hors projets
+  sections.push({ heading: "Ta capacité d'épargne hors projets", tone: "info", items: [
+    `Calcul : solde + dépenses exceptionnelles + achats d'actifs = ce qui reste après la vie courante et tes autres dépenses.`,
+    `A : ${fm(A.solde)} + ${fm(A.projets)} = ${fm(capA)} FCFA (${pc(capPctA)} des revenus, ~${sh(capA / mA)} par mois).`,
+    `B : ${fm(B.solde)} + ${fm(B.projets)} = ${fm(capB)} FCFA (${pc(capPctB)} des revenus, ~${sh(capB / mB)} par mois).`,
+    B.solde < 0 && capB > 0 ? `Ton solde réel est négatif alors que ta capacité est positive : ce sont tes projets qui absorbent l'épargne, pas un excès de dépenses courantes.` : `Plus cette capacité est stable d'une période à l'autre, plus ton train de vie est maîtrisé.`,
+  ] });
+
+  // 3) Points positifs
+  const good: string[] = [];
+  const dA = A.byCat["Dette"] || 0, dB = B.byCat["Dette"] || 0;
+  if (dA - dB >= 500000 && dB < dA * 0.5) good.push(`Dette : ${fm(dA)} -> ${fm(dB)}. Marge libérée d'environ ${sh((dA - dB) / mB)} par mois.`);
+  const ncA = A.byGroup["Non classifié"], ncB = B.byGroup["Non classifié"];
+  if (ncA - ncB >= 500000 && ncB < ncA * 0.6) good.push(`Dépenses non classifiées : ${fm(ncA)} -> ${fm(ncB)}. Tes données sont mieux rangées.`);
+  if (B.rythme < A.rythme * 0.97) good.push(`Rythme de dépenses par jour (hors exceptionnel) : ${fm(A.rythme)} -> ${fm(B.rythme)} (${pd(A.rythme, B.rythme)}).`);
+  if (B.revenus > A.revenus * 1.03) good.push(`Revenus en hausse de ${pd(A.revenus, B.revenus)} (${sg(B.revenus - A.revenus)} FCFA).`);
+  if (capPctB > capPctA + 1) good.push(`Capacité d'épargne hors projets en progression : ${pc(capPctA)} -> ${pc(capPctB)} des revenus.`);
+  if (capPctB >= 25) good.push(`Capacité d'épargne hors projets solide (${pc(capPctB)} des revenus en B).`);
+  sections.push({ heading: "Points positifs", tone: "good", items: good.length ? good : ["Aucun signal positif marqué sur cette comparaison."] });
+
+  // 4) À surveiller
+  const warn: string[] = [];
+  if (B.solde < 0) warn.push(`Solde négatif en B (${fm(B.solde)} FCFA) : tu as puisé environ ce montant dans ta trésorerie. Vérifie tes soldes de comptes.`);
+  const npShare = B.revenus > 0 ? (B.byGroup["Non-productif"] / B.revenus) * 100 : 0;
+  if (npShare > 22) warn.push(`Le Non-productif représente ${pc(npShare)} de tes revenus en B (repère courant : 20 %).`);
+  const jumps: { nat: string; c: string; sub: string; a: number; b: number }[] = [];
+  GROUPS.forEach((g) => Object.keys(B.tree[g]).concat(Object.keys(A.tree[g])).forEach((c, i, arr) => {
+    if (arr.indexOf(c) !== i) return;
+    const subs = new Set([...Object.keys(A.tree[g][c]?.subs || {}), ...Object.keys(B.tree[g][c]?.subs || {})]);
+    subs.forEach((sk) => { if (sk === "Sans sous-catégorie") return; jumps.push({ nat: g, c, sub: sk, a: A.tree[g][c]?.subs[sk] || 0, b: B.tree[g][c]?.subs[sk] || 0 }); });
+  }));
+  jumps.filter((j) => j.b - j.a >= 100000 && j.b >= j.a * 1.5 && !/frais banc/i.test(j.sub)).sort((x, y) => (y.b - y.a) - (x.b - x.a)).slice(0, 5)
+    .forEach((j) => warn.push(`Hausse « ${j.c} / ${j.sub} » : ${fm(j.a)} -> ${fm(j.b)} (${j.a === 0 ? "nouveau" : pd(j.a, j.b)}).`));
+  const fees = jumps.find((j) => /frais banc/i.test(j.sub) && j.b >= j.a * 3 && j.b - j.a >= 50000);
+  if (fees) warn.push(`Frais bancaires : ${fm(fees.a)} -> ${fm(fees.b)}. Vérifie tes relevés et tes forfaits.`);
+  const ajB = B.byCat["Ajustement"] || 0;
+  if (B.revenus > 0 && ajB / B.revenus > 0.01) warn.push(`« Ajustement » : ${fm(ajB)} en B (${pc((ajB / B.revenus) * 100)} des revenus) : écarts non expliqués. Rapproche tes comptes chaque mois.`);
+  const topRev = Object.entries(B.revCat).sort((x, y) => y[1] - x[1]).filter(([, v]) => B.revenus > 0 && v / B.revenus >= 0.25);
+  if (topRev.length) warn.push(`Concentration des revenus : ${topRev.map(([c, v]) => `${c} ${pc((v / B.revenus) * 100)}`).join(", ")}.`);
+  if (A.count > 0 && Math.abs(B.count - A.count) / A.count >= 0.3) warn.push(`Nombre de transactions : ${A.count} en A contre ${B.count} en B. Une partie des écarts de sous-catégories peut venir d'une saisie plus fine, pas d'un vrai changement.`);
+  sections.push({ heading: "À surveiller", tone: "warn", items: warn.length ? warn : ["Rien d'alarmant ne ressort de cette comparaison."] });
+
+  // 5) Conseils
+  const advice: string[] = [];
+  const vieMois = ((B.byGroupN["Nécessaire"] + B.byGroupN["Non-productif"] + B.byGroupN["Non classifié"]) / Math.max(1, B.days)) * 30.4;
+  if (vieMois > 0) advice.push(`Fonds d'urgence : tes dépenses de vie courante sont d'environ ${sh(vieMois)} par mois. Vise 3 mois (${sh(vieMois * 3)}) puis 6 mois (${sh(vieMois * 6)}), sur un support liquide et séparé.`);
+  if (B.solde < 0) advice.push(`Évite un nouveau gros achat d'actif tant que cette réserve n'est pas constituée.`);
+  const auto = (B.revenus / mB) * 0.1;
+  if (auto > 0) advice.push(`Épargne automatique : programme un virement d'environ ${sh(auto)} par mois (10 % de tes revenus moyens)${dA - dB >= 500000 ? `, en y ajoutant la marge libérée par ta dette (~${sh((dA - dB) / mB)} par mois)` : ""}.`);
+  if (npShare > 20) { const eco = ((npShare - 20) / 100) * B.revenus; advice.push(`Plafonne le Non-productif à 20 % de tes revenus : cela libérerait environ ${sh(eco)} sur la période B (~${sh(eco / mB)} par mois). Utilise les budgets de l'app avec alerte à 80 %.`); }
+  if (A.exceptionnel > 0 && B.exceptionnel > 0) advice.push(`Tes dépenses exceptionnelles reviennent d'une période à l'autre (${sh(A.exceptionnel)} puis ${sh(B.exceptionnel)}) : provisionne environ ${sh(((A.exceptionnel + B.exceptionnel) / (A.days + B.days)) * 30.4)} par mois pour les imprévus et projets.`);
+  advice.push(`Garde le même suivi chaque mois : fonds d'urgence (en mois de dépenses), épargne hors projets (au moins 15 % des revenus) et part du Non-productif (22 % ou moins).`);
+  sections.push({ heading: "Conseils", tone: "advice", items: advice });
+
+  return { verdict, kpis, sections };
+}
+
+async function downloadComparatorReportPdf(an: CmpAnalysis, labelA: string, labelB: string, countA: number, countB: number) {
+  const [jsPDFModule, autoTableModule] = await Promise.all([
+    import(/* @vite-ignore */ "jspdf"),
+    import(/* @vite-ignore */ "jspdf-autotable"),
+  ]);
+  void autoTableModule;
+  const jsPDF: any = (jsPDFModule as any).jsPDF || (jsPDFModule as any).default;
+  const doc: any = makePdfSafe(new jsPDF());
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const M = 14, CW = W - 2 * M;
+  const NAVY: [number, number, number] = [26, 43, 76], GOLD: [number, number, number] = [201, 162, 39], GREEN: [number, number, number] = [34, 139, 94], RED: [number, number, number] = [193, 84, 63], GREY: [number, number, number] = [110, 118, 128], INK: [number, number, number] = [40, 48, 60];
+  const toneCol: Record<CmpAnalysisSection["tone"], [number, number, number]> = { info: NAVY, good: GREEN, warn: RED, advice: GOLD };
+
+  doc.setFillColor(...NAVY); doc.rect(0, 0, W, 34, "F");
+  doc.setFillColor(...GOLD); doc.rect(0, 34, W, 1.2, "F");
+  doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(17);
+  doc.text("Rapport d'analyse - Comparaison de périodes", M, 15);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(200, 210, 225);
+  doc.text(`A : ${labelA} (${countA} tx)   |   B : ${labelB} (${countB} tx)`, M, 23);
+  doc.text(`Grand Livre - généré le ${dateLabelFull(todayISO())}`, M, 29);
+
+  const ensure = (y: number, need: number) => { if (y + need > H - 18) { doc.addPage(); return 20; } return y; };
+
+  // Verdict
+  let y = 44;
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5);
+  const vLines: string[] = doc.splitTextToSize(an.verdict, CW - 10);
+  const vH = vLines.length * 4.6 + 8;
+  doc.setFillColor(247, 248, 250); doc.setDrawColor(226, 230, 235); doc.roundedRect(M, y, CW, vH, 2, 2, "FD");
+  doc.setFillColor(...GOLD); doc.rect(M, y + 2, 1.4, vH - 4, "F");
+  doc.setTextColor(...INK); doc.text(vLines, M + 5, y + 6.5);
+  y += vH + 8;
+
+  // KPI (2 rangées de 3)
+  const gap = 4, cw = (CW - 2 * gap) / 3, ch = 25;
+  an.kpis.forEach((k, i) => {
+    const cx = M + (i % 3) * (cw + gap), cy = y + Math.floor(i / 3) * (ch + gap);
+    const col = k.good === null ? GREY : k.good ? GREEN : RED;
+    doc.setFillColor(247, 248, 250); doc.setDrawColor(226, 230, 235); doc.setLineWidth(0.3); doc.roundedRect(cx, cy, cw, ch, 2, 2, "FD");
+    doc.setFillColor(...col); doc.rect(cx, cy + 2, 1.2, ch - 4, "F");
+    doc.setFont("helvetica", "normal"); doc.setFontSize(6.5); doc.setTextColor(...GREY); doc.text(k.label, cx + 4, cy + 6);
+    doc.setFontSize(8.5); doc.setTextColor(...INK); doc.text(`A  ${k.a}`, cx + 4, cy + 12);
+    doc.setFont("helvetica", "bold"); doc.text(`B  ${k.b}`, cx + 4, cy + 17);
+    doc.setFontSize(8.5); doc.setTextColor(...col); doc.text(k.delta, cx + 4, cy + 22);
+  });
+  y += 2 * ch + gap + 10;
+
+  // Sections
+  an.sections.forEach((sec) => {
+    y = ensure(y, 20);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(11.5); doc.setTextColor(...NAVY); doc.text(sec.heading, M, y);
+    doc.setDrawColor(...toneCol[sec.tone]); doc.setLineWidth(0.7); doc.line(M, y + 1.8, M + 22, y + 1.8);
+    y += 8;
+    sec.items.forEach((it) => {
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+      const lines: string[] = doc.splitTextToSize(it, CW - 7);
+      y = ensure(y, lines.length * 4.3 + 2);
+      doc.setFillColor(...toneCol[sec.tone]); doc.circle(M + 1.6, y - 1.1, 0.8, "F");
+      doc.setTextColor(...INK); doc.text(lines, M + 5, y);
+      y += lines.length * 4.3 + 2;
+    });
+    y += 5;
+  });
+
+  y = ensure(y, 14);
+  doc.setFont("helvetica", "italic"); doc.setFontSize(7.5); doc.setTextColor(...GREY);
+  const disc: string[] = doc.splitTextToSize("Repères indicatifs calculés automatiquement à partir de tes transactions. Ils ne constituent pas un conseil financier personnalisé ; à adapter à ta situation (soldes de comptes, obligations familiales, stabilité des revenus).", CW);
+  doc.text(disc, M, y);
+
+  const pages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i); doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(...GREY);
+    doc.text(`Page ${i} / ${pages}`, W - M, H - 8, { align: "right" });
+    doc.text("Grand Livre - Rapport d'analyse", M, H - 8);
+  }
+  doc.save(`grand-livre_rapport-analyse_${`${labelA}_vs_${labelB}`.replace(/[^\w-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "")}.pdf`);
+}
 
 async function downloadComparatorPdf(d: CmpExportData) {
   const [jsPDFModule, autoTableModule] = await Promise.all([
